@@ -3,7 +3,10 @@
 A portable Agent Skill and deterministic CLI for reproducible medical-literature retrieval.
 It structures simple or compound PICO/PCC questions into AND-of-OR groups, creates transparent database-specific strategies, searches
 PubMed, PMC, OpenAlex, Semantic Scholar, and optionally Scopus, then preserves native and
-deduplicated MDR-ranked results. It does not generate research reports and is not an MCP server.
+deduplicated MDR-ranked results.
+
+This is the Agent Skill version of the article-search stage of
+[medical-deep-research](https://github.com/junhewk/medical-deep-research).
 
 ## Install the skill
 
@@ -28,7 +31,9 @@ uv run pytest
 
 Configure `NCBI_EMAIL` for PubMed/PMC. Optional credentials are `NCBI_API_KEY`,
 `OPENALEX_API_KEY`, `SEMANTIC_SCHOLAR_API_KEY` (or `S2_API_KEY`), `SCOPUS_API_KEY`, and
-`SCOPUS_INSTTOKEN`. Secrets are read only by the CLI and are never written to run artifacts.
+`SCOPUS_INSTTOKEN`. Secrets are read only by the CLI; configured values are stripped from provider
+errors before those errors reach a run artifact. `uv run hermes-medical-search doctor --json`
+reports what is configured and reachable.
 
 Create a strategy:
 
@@ -49,4 +54,5 @@ uv run hermes-medical-search run question.json
 ```
 
 The `mdr-v2-grouped` score in `ranked-results.jsonl` is a transparent prioritization heuristic. It is not GRADE,
-risk-of-bias assessment, evidence quality, or a systematic-review conclusion.
+risk-of-bias assessment, evidence quality, or a systematic-review conclusion. Recency is scored
+against the strategy's creation date, so re-running or resuming a run reproduces the file exactly.

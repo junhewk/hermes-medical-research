@@ -40,13 +40,28 @@ async def test_ncbi_count_fetch_and_mesh_resolution() -> None:
         database = request.url.params.get("db")
         if path.endswith("esearch.fcgi") and database == "mesh":
             return httpx.Response(200, json={"esearchresult": {"idlist": ["1"]}})
-        if path.endswith("efetch.fcgi") and database == "mesh":
+        if path.endswith("esummary.fcgi") and database == "mesh":
+            # Shape copied from a live esummary response: ds_meshterms[0] is the descriptor and
+            # the remainder are entry terms. efetch is NOT used here — it ignores retmode=xml
+            # for db=mesh and returns a plain-text record.
             return httpx.Response(
                 200,
-                text="<DescriptorRecordSet><DescriptorRecord><DescriptorName>"
-                "<String>Diabetes Mellitus, Type 2</String></DescriptorName>"
-                "</DescriptorRecord></DescriptorRecordSet>",
+                json={
+                    "result": {
+                        "uids": ["1"],
+                        "1": {
+                            "uid": "1",
+                            "ds_meshterms": [
+                                "Diabetes Mellitus, Type 2",
+                                "Diabetes Mellitus, Type II",
+                                "NIDDM",
+                            ],
+                        },
+                    }
+                },
             )
+        if path.endswith("efetch.fcgi") and database == "mesh":
+            raise AssertionError("MeSH resolution must not call efetch; it returns plain text")
         if path.endswith("esearch.fcgi") and request.url.params.get("retmax") == "0":
             return httpx.Response(200, json={"esearchresult": {"count": "1", "idlist": []}})
         if path.endswith("esearch.fcgi"):
@@ -72,6 +87,10 @@ async def test_ncbi_count_fetch_and_mesh_resolution() -> None:
         assert page.next_cursor is None
         resolver = MeshResolver(session, credentials)
         assert await resolver.resolve("type 2 diabetes") == "Diabetes Mellitus, Type 2"
+        # An exact entry term resolves to its descriptor rather than being rejected...
+        assert await resolver.resolve("NIDDM") == "Diabetes Mellitus, Type 2"
+        # ...while a descriptor sharing no vocabulary with the candidate is rejected.
+        assert await resolver.resolve("photosynthesis in ferns") is None
 
 
 @pytest.mark.asyncio

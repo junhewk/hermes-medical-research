@@ -104,6 +104,9 @@ def deduplicate(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def rank_records(
     records: list[dict[str, Any]], question: Question, *, today: date | None = None
 ) -> list[dict[str, Any]]:
+    # Resolve the scoring date once: recency is a function of "now", so leaving each record to
+    # resolve it independently would make the artifact depend on when it was written.
+    as_of = today or datetime.now(UTC).date()
     ranked: list[dict[str, Any]] = []
     for record in records:
         evidence_level, evidence = evidence_score(record)
@@ -112,13 +115,15 @@ def rank_records(
         recency = recency_score(
             record.get("publication_date") or record.get("year"),
             half_life_years=half_life,
-            today=today,
+            today=as_of,
         )
         relevance, group_relevance = _relevance_details(record, question)
         if question.framework == "PICO":
             base = evidence * (0.30 / 0.85) + citation * (0.15 / 0.85) + recency * (
                 0.40 / 0.85
             )
+            # Retained verbatim for artifact stability: the journal bonus this name refers to was
+            # removed before v0.2.0 and no longer exists anywhere in the scorer.
             profile = "pico-clinical-no-journal-bonus"
         else:
             base = evidence * 0.40 + citation * 0.30 + recency * 0.30
@@ -128,6 +133,7 @@ def rank_records(
         item["ranking"] = {
             "version": RANKING_VERSION,
             "profile": profile,
+            "ranked_as_of": as_of.isoformat(),
             "evidence_category": evidence_level,
             "evidence_score": round(evidence, 6),
             "citation_score": round(citation, 6),

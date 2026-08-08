@@ -13,7 +13,6 @@ from .parsers import (
     parse_pmc_xml,
     parse_pubmed_xml,
     reconstruct_abstract,
-    xml_text,
 )
 
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -21,6 +20,13 @@ OPENALEX_URL = "https://api.openalex.org/works"
 S2_BULK_URL = "https://api.semanticscholar.org/graph/v1/paper/search/bulk"
 S2_RELEVANCE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 SCOPUS_URL = "https://api.elsevier.com/content/search/scopus"
+# Minimum Jaccard token overlap between a candidate and the descriptor esearch matched it to.
+# Exact entry terms score 1.0 and genuine synonyms stay well above this; the floor exists to
+# reject a descriptor that shares almost no vocabulary with what the user asked for.
+MESH_MATCH_THRESHOLD = 0.34
+# The Scopus STANDARD view rejects `start` beyond this, so unbounded retrieval must stop here
+# rather than fail with an opaque HTTP error partway through a run.
+SCOPUS_MAX_START = 5000
 
 
 @dataclass(slots=True)
@@ -159,16 +165,13 @@ class OpenAlexProvider(Provider):
             total = int(meta.get("count", 0))
         except (TypeError, ValueError):
             total = None
-        records = [
-            self._record(item, rank=index)
-            for index, item in enumerate(data.get("results") or [], start=1)
-            if isinstance(item, dict)
-        ]
+        results = data.get("results") or []
+        records = [self._record(item) for item in results if isinstance(item, dict)]
         next_cursor = meta.get("next_cursor") if records else None
         return Page(records=records, next_cursor=next_cursor, total=total)
 
     @staticmethod
-    def _record(item: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    def _record(item: dict[str, Any]) -> dict[str, Any]:
         ids = item.get("ids") or {}
         primary = item.get("primary_location") or {}
         source = primary.get("source") or {}
@@ -181,7 +184,6 @@ class OpenAlexProvider(Provider):
         return {
             "source": "openalex",
             "source_id": normalize_external_id(item.get("id"), "openalex") or "",
-            "source_rank": rank,
             "title": item.get("display_name") or item.get("title") or "",
             "abstract": reconstruct_abstract(item.get("abstract_inverted_index")),
             "authors": authors,
@@ -263,11 +265,7 @@ class SemanticScholarProvider(Provider):
             total = int(data.get("total", 0))
         except (TypeError, ValueError):
             total = None
-        records = [
-            self._record(item, rank=index)
-            for index, item in enumerate(data.get("data") or [], start=1)
-            if isinstance(item, dict)
-        ]
+        records = [self._record(item) for item in data.get("data") or [] if isinstance(item, dict)]
         return Page(
             records=records,
             next_cursor=(data.get("token") if bulk else data.get("next")) if records else None,
@@ -275,13 +273,12 @@ class SemanticScholarProvider(Provider):
         )
 
     @staticmethod
-    def _record(item: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    def _record(item: dict[str, Any]) -> dict[str, Any]:
         ids = item.get("externalIds") or {}
         journal = item.get("journal") or {}
         return {
             "source": "semantic-scholar",
             "source_id": str(item.get("paperId") or ""),
-            "source_rank": rank,
             "title": item.get("title") or "",
             "abstract": item.get("abstract"),
             "authors": [
@@ -331,12 +328,17 @@ class ScopusProvider(Provider):
         self, strategy: SourceStrategy, cursor: str | int | None, page_size: int
     ) -> Page:
         start = int(cursor or 0)
+        if start >= SCOPUS_MAX_START:
+            # Stop cleanly at the API's ceiling instead of letting it 400 mid-run. Retrieval ends
+            # short of the reported total, which the manifest already records as `truncated`.
+            return Page(records=[], next_cursor=None, total=None)
+        count = min(page_size, self.page_size, SCOPUS_MAX_START - start)
         data = await self.session.json(
             self.source,
             SCOPUS_URL,
             params={
                 "query": strategy.selected_query,
-                "count": min(page_size, self.page_size),
+                "count": count,
                 "start": start,
                 "view": "STANDARD",
             },
@@ -348,16 +350,19 @@ class ScopusProvider(Provider):
         except (TypeError, ValueError):
             total = None
         entries = [item for item in result.get("entry") or [] if isinstance(item, dict)]
-        records = [self._record(item, rank=start + index) for index, item in enumerate(entries, 1)]
+        records = [self._record(item) for item in entries]
         next_start = start + len(entries)
+        exhausted = not entries or next_start >= SCOPUS_MAX_START or (
+            total is not None and next_start >= total
+        )
         return Page(
             records=records,
-            next_cursor=next_start if entries and (total is None or next_start < total) else None,
+            next_cursor=None if exhausted else next_start,
             total=total,
         )
 
     @staticmethod
-    def _record(item: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    def _record(item: dict[str, Any]) -> dict[str, Any]:
         links = item.get("link") or []
         url = next(
             (
@@ -371,7 +376,6 @@ class ScopusProvider(Provider):
         return {
             "source": "scopus",
             "source_id": identifier.removeprefix("SCOPUS_ID:"),
-            "source_rank": rank,
             "title": item.get("dc:title") or "",
             "abstract": item.get("dc:description"),
             "authors": [str(item.get("dc:creator"))] if item.get("dc:creator") else [],
@@ -418,6 +422,14 @@ class MeshResolver:
                         value.casefold() for value in group.resolved_mesh
                     }:
                         group.resolved_mesh.append(heading)
+                        if candidate not in group.candidate_mesh:
+                            # group.text is resolved too, so a heading can enter the PubMed query
+                            # (and explode down the MeSH tree) that the user never proposed.
+                            warnings.append(
+                                f"MeSH heading {heading!r} was derived from the canonical text of "
+                                f"{name}/{group.label} and added to the query; remove it by "
+                                "re-planning with --no-mesh if it is too broad."
+                            )
                     elif not heading and candidate in group.candidate_mesh:
                         warnings.append(
                             "Candidate MeSH heading was not validated for "
@@ -440,24 +452,34 @@ class MeshResolver:
         ids = list((data.get("esearchresult") or {}).get("idlist") or [])
         if not ids:
             return None
-        fetch_params = dict(params)
-        fetch_params.pop("term", None)
-        fetch_params.pop("retmax", None)
-        fetch_params.update({"id": ",".join(str(value) for value in ids), "retmode": "xml"})
-        xml = await self.session.text("ncbi", f"{NCBI_BASE}/efetch.fcgi", params=fetch_params)
-        try:
-            root = ET.fromstring(xml)
-        except ET.ParseError as exc:
-            raise SourceError("NCBI MeSH returned invalid XML") from exc
-        headings = [
-            value
-            for node in root.findall(".//DescriptorName")
-            if (value := xml_text(node))
-        ]
-        if not headings:
-            return None
+        summary_params = dict(params)
+        summary_params.pop("term", None)
+        summary_params.pop("retmax", None)
+        summary_params["id"] = ",".join(str(value) for value in ids)
+        # efetch ignores retmode=xml for db=mesh and returns a plain-text MeSH record, so headings
+        # are read from esummary's JSON instead.
+        summary = await self.session.json(
+            "ncbi", f"{NCBI_BASE}/esummary.fcgi", params=summary_params
+        )
+        result = summary.get("result") or {}
         normalized = _tokens(candidate)
-        return max(headings, key=lambda heading: _overlap(normalized, _tokens(heading)))
+        best_heading: str | None = None
+        best_score = 0.0
+        for uid in result.get("uids") or []:
+            entry = result.get(str(uid))
+            if not isinstance(entry, dict):
+                continue
+            # ds_meshterms[0] is the descriptor; the rest are entry terms, so an exact synonym
+            # such as "NIDDM" still resolves to "Diabetes Mellitus, Type 2".
+            terms = [str(term) for term in entry.get("ds_meshterms") or [] if term]
+            if not terms:
+                continue
+            score = max(_overlap(normalized, _tokens(term)) for term in terms)
+            if score > best_score:
+                best_heading, best_score = terms[0], score
+        # esearch matches entry terms as well as descriptors, so the best hit can still be a
+        # different concept. Require real token overlap rather than accepting any hit.
+        return best_heading if best_score >= MESH_MATCH_THRESHOLD else None
 
 
 def provider_for(source: str, session: HttpSession, credentials: Credentials) -> Provider:

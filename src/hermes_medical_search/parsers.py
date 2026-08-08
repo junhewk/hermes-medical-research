@@ -19,9 +19,12 @@ def parse_pubmed_xml(xml: str, *, start_rank: int = 1) -> list[dict[str, Any]]:
     for index, article in enumerate(root.findall(".//PubmedArticle"), start=start_rank):
         medline = article.find("MedlineCitation")
         detail = medline.find("Article") if medline is not None else None
+        # Scope to the article's OWN id list. PubMed nests an <ArticleIdList> inside every
+        # <Reference>, so a './/' search returns the cited papers' ids too — and the last one
+        # wins, silently stamping a random reference's DOI and PMCID onto the record.
         ids = {
             str(node.attrib.get("IdType", "")).lower(): xml_text(node)
-            for node in article.findall(".//ArticleIdList/ArticleId")
+            for node in article.findall("PubmedData/ArticleIdList/ArticleId")
         }
         pmid = xml_text(medline.find("PMID")) if medline is not None else ids.get("pubmed")
         abstract_parts = [xml_text(node) for node in article.findall(".//Abstract/AbstractText")]
@@ -66,9 +69,11 @@ def parse_pmc_xml(xml: str, *, start_rank: int = 1) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     articles = [root] if root.tag.rsplit("}", 1)[-1] == "article" else root.findall(".//article")
     for index, article in enumerate(articles, start=start_rank):
+        # Same hazard as PubMed: identity lives in <front>, while <back> holds the bibliography.
+        front = article.find("front")
         ids = {
             str(node.attrib.get("pub-id-type", "")).lower(): xml_text(node)
-            for node in article.findall(".//article-id")
+            for node in (front if front is not None else article).findall(".//article-id")
         }
         pmcid = _normalize_pmcid(ids.get("pmc") or ids.get("pmcid"))
         publication_date = _pmc_date(article)
@@ -130,7 +135,6 @@ def normalize_external_id(value: Any, prefix: str) -> str | None:
     if not value:
         return None
     text = str(value).strip()
-    lowered = text.lower()
     if prefix.casefold() == "doi":
         text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text, flags=re.I)
     elif prefix.casefold() == "openalex":
@@ -175,7 +179,7 @@ def _pubmed_date(detail: ET.Element) -> str | None:
         return None
     year = xml_text(node.find("Year"))
     month = _month(xml_text(node.find("Month")))
-    day = xml_text(node.find("Day"))
+    day = _day(xml_text(node.find("Day")))
     medline = xml_text(node.find("MedlineDate"))
     if year:
         return "-".join(part for part in (year, month, day) if part)
@@ -191,10 +195,16 @@ def _pmc_date(article: ET.Element) -> str | None:
         return None
     year = xml_text(preferred.find("year"))
     month = _month(xml_text(preferred.find("month")))
-    day = xml_text(preferred.find("day"))
-    if day and day.isdigit():
-        day = f"{int(day):02d}"
+    day = _day(xml_text(preferred.find("day")))
     return "-".join(part for part in (year, month, day) if part) if year else None
+
+
+def _day(value: str | None) -> str | None:
+    """Zero-pad a day so PubMed and PMC records share one date format."""
+    if not value or not value.strip().isdigit():
+        return None
+    number = int(value.strip())
+    return f"{number:02d}" if 1 <= number <= 31 else None
 
 
 def _month(value: str | None) -> str | None:

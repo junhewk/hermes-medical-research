@@ -9,19 +9,88 @@ SCHEMA_VERSION = "2"
 LEGACY_SCHEMA_VERSION = "1"
 SOURCES = ("pubmed", "pmc", "openalex", "semantic-scholar", "scopus")
 CORE_SOURCES = SOURCES[:-1]
+# (ISO 639-1, English name, *aliases) for the languages PubMed reports. PubMed emits ISO 639-2/B
+# ("eng", "ger", "fre"), OpenAlex emits ISO 639-1 ("en"), and users write English names, so all
+# three must normalize to one value before a language filter can compare them. Where 639-2/B and
+# /T differ both are listed (ger/deu, fre/fra, chi/zho, ...).
+_LANGUAGE_ALIASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("af", "afrikaans", ("afr",)),
+    ("am", "amharic", ("amh",)),
+    ("ar", "arabic", ("ara",)),
+    ("az", "azerbaijani", ("aze",)),
+    ("bg", "bulgarian", ("bul",)),
+    ("bn", "bengali", ("ben",)),
+    ("bs", "bosnian", ("bos",)),
+    ("ca", "catalan", ("cat",)),
+    ("cs", "czech", ("cze", "ces")),
+    ("cy", "welsh", ("wel", "cym")),
+    ("da", "danish", ("dan",)),
+    ("de", "german", ("ger", "deu")),
+    ("el", "greek", ("gre", "ell")),
+    ("en", "english", ("eng",)),
+    ("eo", "esperanto", ("epo",)),
+    ("es", "spanish", ("spa",)),
+    ("et", "estonian", ("est",)),
+    ("fa", "persian", ("per", "fas")),
+    ("fi", "finnish", ("fin",)),
+    ("fr", "french", ("fre", "fra")),
+    ("gd", "scottish gaelic", ("gla",)),
+    ("he", "hebrew", ("heb",)),
+    ("hi", "hindi", ("hin",)),
+    ("hr", "croatian", ("hrv",)),
+    ("hu", "hungarian", ("hun",)),
+    ("hy", "armenian", ("arm", "hye")),
+    ("id", "indonesian", ("ind",)),
+    ("is", "icelandic", ("ice", "isl")),
+    ("it", "italian", ("ita",)),
+    ("ja", "japanese", ("jpn",)),
+    ("ka", "georgian", ("geo", "kat")),
+    ("ko", "korean", ("kor",)),
+    ("la", "latin", ("lat",)),
+    ("lt", "lithuanian", ("lit",)),
+    ("lv", "latvian", ("lav",)),
+    ("mi", "maori", ("mao", "mri")),
+    ("mk", "macedonian", ("mac", "mkd")),
+    ("ml", "malayalam", ("mal",)),
+    ("ms", "malay", ("may", "msa")),
+    ("nl", "dutch", ("dut", "nld")),
+    ("no", "norwegian", ("nor",)),
+    ("pl", "polish", ("pol",)),
+    ("ps", "pushto", ("pus",)),
+    ("pt", "portuguese", ("por",)),
+    ("ro", "romanian", ("rum", "ron")),
+    ("ru", "russian", ("rus",)),
+    ("rw", "kinyarwanda", ("kin",)),
+    ("sa", "sanskrit", ("san",)),
+    ("sk", "slovak", ("slo", "slk")),
+    ("sl", "slovenian", ("slv",)),
+    ("sq", "albanian", ("alb", "sqi")),
+    ("sr", "serbian", ("srp",)),
+    ("sv", "swedish", ("swe",)),
+    ("th", "thai", ("tha",)),
+    ("tr", "turkish", ("tur",)),
+    ("uk", "ukrainian", ("ukr",)),
+    ("ur", "urdu", ("urd",)),
+    ("vi", "vietnamese", ("vie",)),
+    ("zh", "chinese", ("chi", "zho")),
+)
 LANGUAGE_CODES = {
-    "arabic": "ar",
-    "chinese": "zh",
-    "english": "en",
-    "french": "fr",
-    "german": "de",
-    "italian": "it",
-    "japanese": "ja",
-    "korean": "ko",
-    "portuguese": "pt",
-    "russian": "ru",
-    "spanish": "es",
+    alias: code
+    for code, name, aliases in _LANGUAGE_ALIASES
+    for alias in (name, code, *aliases)
 }
+# PubMed's [Language] field matches the full English name only: "eng"[Language] and
+# "en"[Language] both return zero results silently, so a code must be expanded before it is
+# compiled into a query.
+LANGUAGE_NAMES = {
+    alias: name
+    for code, name, aliases in _LANGUAGE_ALIASES
+    for alias in (name, code, *aliases)
+}
+# PubMed's "undetermined" and "multiple languages" markers carry no filterable language, so they
+# normalize to the empty string and _passes_filters treats them as missing metadata rather than
+# as a language that failed to match.
+LANGUAGE_CODES.update({"und": "", "undetermined": "", "mul": "", "multiple": ""})
 
 
 class ValidationError(ValueError):
@@ -29,10 +98,15 @@ class ValidationError(ValueError):
 
 
 def language_code(value: str) -> str:
-    normalized = value.strip().casefold()
-    if len(normalized) == 2:
-        return normalized
+    """Normalize an English name, ISO 639-1, or ISO 639-2/B|T code to ISO 639-1."""
+    normalized = " ".join(value.split()).casefold()
     return LANGUAGE_CODES.get(normalized, normalized)
+
+
+def language_name(value: str) -> str:
+    """Normalize any accepted spelling to the full English name PubMed's [Language] requires."""
+    normalized = " ".join(value.split()).casefold()
+    return LANGUAGE_NAMES.get(normalized, normalized)
 
 
 def _strings(value: Any, field_name: str) -> list[str]:
@@ -375,11 +449,12 @@ class Strategy:
 
 
 def _validate_sources(value: Any, field_name: str) -> list[str]:
-    names = _strings(value, field_name)
+    # Casefold to match the CLI's --sources/--exclude parsing; one vocabulary, one set of rules.
+    names = [name.casefold() for name in _strings(value, field_name)]
     unknown = sorted(set(names) - set(SOURCES))
     if unknown:
         raise ValidationError(f"unsupported {field_name}: {', '.join(unknown)}")
-    return names
+    return list(dict.fromkeys(names))
 
 
 def _dedupe(values: list[str]) -> list[str]:

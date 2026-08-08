@@ -5,10 +5,12 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from contextlib import AsyncExitStack
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .artifacts import (
     ARTIFACT_SCHEMA_VERSION,
     RunStore,
@@ -30,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="hermes-medical-search",
         description="Plan and run reproducible PICO/PCC medical-literature searches.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     doctor = commands.add_parser("doctor", help="Check source configuration and access")
@@ -128,9 +130,9 @@ async def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "search":
         return await _search_command(args.run_dir, confirm_all=args.confirm_all)
     if args.command == "run":
-        run_path, strategy = await _create_plan(args, mode="quick")
         credentials = Credentials.from_env()
         async with _session(credentials) as session:
+            run_path, strategy = await _create_plan(args, mode="quick", session=session)
             result = await preflight(strategy, session, credentials)
             store = RunStore(run_path)
             store.write_json("preflight.json", result)
@@ -140,9 +142,12 @@ async def _dispatch(args: argparse.Namespace) -> int:
     raise ValueError(f"unsupported command {args.command}")
 
 
-async def _create_plan(args: argparse.Namespace, *, mode: str) -> tuple[Path, Strategy]:
+async def _create_plan(
+    args: argparse.Namespace, *, mode: str, session: HttpSession | None = None
+) -> tuple[Path, Strategy]:
     question = _load_question(args.input)
     credentials = Credentials.from_env()
+    supplied_from_date = bool(question.filters.from_date)
     if mode == "quick" and not question.filters.from_date:
         question.filters.from_date = _years_ago(date.today(), 3).isoformat()
     limit = _parse_limit(args.limit_per_source, mode=mode)
@@ -150,8 +155,9 @@ async def _create_plan(args: argparse.Namespace, *, mode: str) -> tuple[Path, St
     variants = _parse_variants(args.variant, sources=sources, precision=args.precision)
     warnings: list[str] = []
     if not args.no_mesh:
-        async with _session(credentials) as session:
-            warnings.extend(await MeshResolver(session, credentials).resolve_question(question))
+        async with AsyncExitStack() as stack:
+            active = session or await stack.enter_async_context(_session(credentials))
+            warnings.extend(await MeshResolver(active, credentials).resolve_question(question))
     else:
         warnings.append("MeSH resolution was explicitly skipped.")
     strategy = compile_strategy(
@@ -171,7 +177,7 @@ async def _create_plan(args: argparse.Namespace, *, mode: str) -> tuple[Path, St
             "Question schema v1 was upgraded to schema v2 by wrapping each component "
             "in one labeled group."
         )
-    if mode == "quick" and not _input_has_from_date(args.input):
+    if mode == "quick" and not supplied_from_date:
         strategy.warnings.append(
             f"Quick mode applied its visible three-year default from {question.filters.from_date}."
         )
@@ -363,16 +369,20 @@ async def _doctor(args: argparse.Namespace) -> int:
                     )
                     return source, None, count
                 except Exception as exc:
-                    return source, str(exc), None
+                    return source, credentials.redact(str(exc)), None
 
             results = await asyncio.gather(*(check(source) for source in selected))
         for source, error, count in results:
             statuses[source]["live"] = "available" if error is None else "unavailable"
             statuses[source]["test_query_count"] = count
             statuses[source]["error"] = error
+    # Scopus is opt-in, so an unconfigured Scopus must not fail a doctor run the user never
+    # asked to include. Explicitly requested sources are always held to the full standard.
+    optional = set() if args.sources else {"scopus"}
     ready = all(
         detail.get("configured") and (args.offline or detail.get("live") == "available")
-        for detail in statuses.values()
+        for source, detail in statuses.items()
+        if source not in optional or detail.get("configured")
     )
     payload = {"ready": ready, "sources": statuses}
     if args.json:
@@ -394,12 +404,6 @@ def _load_question(path: Path) -> Question:
 def _load_strategy(path: Path) -> Strategy:
     with path.open(encoding="utf-8") as handle:
         return Strategy.from_dict(json.load(handle))
-
-
-def _input_has_from_date(path: Path) -> bool:
-    with path.open(encoding="utf-8") as handle:
-        data = json.load(handle)
-    return bool((data.get("filters") or {}).get("from_date"))
 
 
 def _parse_limit(raw: str | None, *, mode: str) -> int | str:

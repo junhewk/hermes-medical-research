@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -155,3 +156,136 @@ def test_full_retrieval_confirmation_token_is_stable() -> None:
     assert confirmation_token(strategy, {"pubmed": 42}) != confirmation_token(
         strategy, {"pubmed": 43}
     )
+
+
+def available_preflight(source: str = "pubmed", count: int = 2) -> dict[str, object]:
+    detail = {"status": "available", "count": count, "error": None}
+    return {"ready": True, "sources": {source: detail}}
+
+
+def filtered_question() -> Question:
+    return Question.from_dict(
+        {
+            "schema_version": "2",
+            "framework": "PCC",
+            "question": "LLMs in medical education",
+            "components": {
+                "population": {"groups": [{"label": "p", "text": "medical students"}]},
+                "concept": {"groups": [{"label": "c", "text": "large language models"}]},
+            },
+            "filters": {"languages": ["english"]},
+        }
+    )
+
+
+class LanguageProvider(FakeProvider):
+    """Two records per source, in the language representation PubMed actually returns."""
+
+    def __init__(self, source: str, language: str) -> None:
+        super().__init__(source)
+        self.language = language
+
+    async def fetch_page(self, _strategy, cursor, _page_size):
+        position = int(cursor or 0)
+        if position >= 2:
+            return Page([], None, 2)
+        item = article(self.source, f"{self.source}-{position + 1}", position + 1)
+        item["language"] = self.language
+        return Page([item], position + 1 if position + 1 < 2 else None, 2)
+
+
+@pytest.mark.asyncio
+async def test_pubmed_language_records_survive_a_language_filter(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """PubMed reports "eng"; a filter written as "english" must not discard the whole source."""
+    strategy = compile_strategy(
+        filtered_question(), mode="quick", limit_per_source=2, sources=["pubmed"]
+    )
+    monkeypatch.setattr(
+        "hermes_medical_search.orchestrator.provider_for",
+        lambda source, _session, _credentials: LanguageProvider(source, "eng"),
+    )
+    store = RunStore(tmp_path / "run")
+    checked = available_preflight()
+    async with HttpSession(intervals={"ncbi": 0}) as session:
+        summary = await execute_search(strategy, store, session, Credentials(), checked)
+    assert summary["records_by_source"]["pubmed"] == 2
+    assert summary["records_filtered_by_source"]["pubmed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_filtered_out_records_are_counted(monkeypatch, tmp_path: Path) -> None:
+    strategy = compile_strategy(
+        filtered_question(), mode="quick", limit_per_source=2, sources=["pubmed"]
+    )
+    monkeypatch.setattr(
+        "hermes_medical_search.orchestrator.provider_for",
+        lambda source, _session, _credentials: LanguageProvider(source, "ger"),
+    )
+    store = RunStore(tmp_path / "run")
+    checked = available_preflight()
+    async with HttpSession(intervals={"ncbi": 0}) as session:
+        summary = await execute_search(strategy, store, session, Credentials(), checked)
+    # A source that retrieves records and retains none must say so rather than look empty.
+    assert summary["records_by_source"]["pubmed"] == 0
+    assert summary["records_filtered_by_source"]["pubmed"] == 2
+    assert store.read_json("manifest.json")["sources"]["pubmed"]["filtered_out"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ranking_is_anchored_to_the_strategy_not_the_wall_clock(
+    monkeypatch, tmp_path: Path
+) -> None:
+    strategy = compile_strategy(
+        question(), mode="quick", limit_per_source=2, sources=["pubmed"]
+    )
+    strategy.created_at = "2024-03-05T12:00:00+00:00"
+    monkeypatch.setattr(
+        "hermes_medical_search.orchestrator.provider_for",
+        lambda source, _session, _credentials: FakeProvider(source),
+    )
+    store = RunStore(tmp_path / "run")
+    checked = available_preflight()
+    async with HttpSession(intervals={"ncbi": 0}) as session:
+        summary = await execute_search(strategy, store, session, Credentials(), checked)
+        first = (store.path / "ranked-results.jsonl").read_text(encoding="utf-8")
+        # Re-running a completed run must reproduce the artifact byte for byte.
+        await execute_search(strategy, store, session, Credentials(), checked)
+        second = (store.path / "ranked-results.jsonl").read_text(encoding="utf-8")
+    assert summary["ranked_as_of"] == "2024-03-05"
+    assert all(
+        json.loads(line)["ranking"]["ranked_as_of"] == "2024-03-05"
+        for line in first.splitlines()
+    )
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_resume_discards_records_written_past_the_checkpoint(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A crash between append_source and the manifest write must not duplicate records."""
+    strategy = compile_strategy(
+        question(), mode="review", limit_per_source=2, sources=["pubmed"]
+    )
+    monkeypatch.setattr(
+        "hermes_medical_search.orchestrator.provider_for",
+        lambda source, _session, _credentials: FakeProvider(source),
+    )
+    store = RunStore(tmp_path / "run")
+    manifest = store.initialize(strategy.question, strategy, Credentials())
+    # Simulate the crash window: the page is on disk, the checkpoint never advanced past zero.
+    store.append_source("pubmed", [article("pubmed", "pubmed-1", 1)])
+    manifest["sources"]["pubmed"].update(
+        status="running", cursor=None, retrieved=0, retained=0, reported_total=2
+    )
+    store.write_manifest(manifest)
+    checked = available_preflight()
+    async with HttpSession(intervals={"ncbi": 0}) as session:
+        summary = await execute_search(strategy, store, session, Credentials(), checked)
+    assert [item["source_id"] for item in store.read_source("pubmed")] == [
+        "pubmed-1",
+        "pubmed-2",
+    ]
+    assert summary["records_by_source"]["pubmed"] == 2

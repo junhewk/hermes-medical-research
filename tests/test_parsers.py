@@ -49,3 +49,44 @@ def test_parse_pmc_xml_and_reconstruct_abstract() -> None:
     assert item["pmid"] == "999"
     assert item["publication_date"] == "2026-08-02"
     assert reconstruct_abstract({"world": [1], "Hello": [0]}) == "Hello world"
+
+
+PUBMED_WITH_REFERENCES = """
+<PubmedArticleSet><PubmedArticle>
+  <MedlineCitation>
+    <PMID>42558455</PMID>
+    <Article><ArticleTitle>The actual article</ArticleTitle></Article>
+  </MedlineCitation>
+  <PubmedData>
+    <ArticleIdList>
+      <ArticleId IdType="pubmed">42558455</ArticleId>
+      <ArticleId IdType="doi">10.3389/fendo.2026.1884596</ArticleId>
+      <ArticleId IdType="pmc">PMC13437500</ArticleId>
+    </ArticleIdList>
+    <ReferenceList>
+      <Reference>
+        <Citation>Some cited paper</Citation>
+        <ArticleIdList>
+          <ArticleId IdType="pubmed">18191683</ArticleId>
+          <ArticleId IdType="doi">10.1016/S0140-6736(08)60104-X</ArticleId>
+          <ArticleId IdType="pmc">PMC8956973</ArticleId>
+        </ArticleIdList>
+      </Reference>
+    </ReferenceList>
+  </PubmedData>
+</PubmedArticle></PubmedArticleSet>
+"""
+
+
+def test_reference_identifiers_never_overwrite_the_article_identifiers() -> None:
+    """PubMed nests an <ArticleIdList> in every <Reference>; only the article's own may win.
+
+    A './/' search returns the cited papers' ids too, and the last one wins — which stamped a
+    random reference's DOI onto the record. DOI is the primary deduplication key, so this
+    silently merged unrelated papers.
+    """
+    (record,) = parse_pubmed_xml(PUBMED_WITH_REFERENCES)
+    assert record["doi"] == "10.3389/fendo.2026.1884596"
+    assert record["pmcid"] == "PMC13437500"
+    assert record["pmid"] == "42558455"
+    assert record["source_id"] == "42558455"

@@ -21,7 +21,17 @@ only configured/not-configured indicators.
 - Semantic Scholar review mode uses bulk search to preserve `+`/`|` groups. Quick relevance search
   accepts plain text only, so the CLI submits every canonical group text and records degradation.
 - Scopus preserves nested groups in `TITLE-ABS-KEY(...)`, translates MeSH to free text, and applies
-  publication-year clauses. Access depends on institutional entitlement.
+  publication-year clauses. Access depends on institutional entitlement. The STANDARD view stops
+  paginating at 5000 records, so a larger result set is marked `truncated` in the manifest.
+
+Language filters compare normalized ISO 639-1 codes, so a filter written as `english` matches
+PubMed's `eng`, OpenAlex's `en`, and the English name alike. Records whose provider reports no
+language, or reports it as undetermined, are retained rather than dropped.
+
+MeSH resolution validates each `candidate_mesh` entry and the group's canonical text against NCBI,
+and accepts a descriptor only when it shares real vocabulary with the candidate. A heading derived
+from the canonical text rather than an explicit candidate is recorded as a strategy warning,
+because it widens the PubMed query; re-plan with `--no-mesh` to drop it.
 
 Each provider strategy contains structured `degradations` with `feature`, `reason`, and `fallback`.
 Review these alongside general warnings before approval.
@@ -46,10 +56,16 @@ structured question and create a new run instead.
 - `approval.json`: digest-bound review and all-results confirmations.
 - `preflight.json`: source access, counts, strategy/preflight digests, and confirmation token.
 - `manifest.json`: state, checkpoints, redacted configuration, tool version, and errors.
-- `sources/<source>.jsonl`: native provider order and source rank.
+- `sources/<source>.jsonl`: native provider order and source rank. `source_rank` is the record's
+  position in the provider's own result list, so client-side filtering leaves gaps.
 - `results.jsonl`: deterministic deduplicated order.
-- `ranked-results.jsonl`: separate `mdr-v2-grouped` prioritization with per-group relevance.
-- `summary.json`: retrieval and deduplication counts; not a research report.
+- `ranked-results.jsonl`: separate `mdr-v2-grouped` prioritization with per-group relevance. Each
+  record carries `ranked_as_of`; recency is scored against the strategy's creation date, not the
+  wall clock, so resuming or re-running a run reproduces the file byte for byte.
+- `summary.json`: retrieval and deduplication counts; not a research report. `records_by_source`
+  counts retained records and `records_filtered_by_source` counts records the provider returned
+  that a language or publication-type filter then dropped. Report a non-zero filtered count:
+  a source that retrieves records and retains none is not an empty source.
 
 Deduplication uses DOI, then PMID/PMCID crosswalks, then normalized title plus year when strong
 identifiers are unavailable. Source records and native ranks remain attached to the canonical record.

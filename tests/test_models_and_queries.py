@@ -106,7 +106,8 @@ def test_pico_query_golden_dialects() -> None:
     assert "glycated hemoglobin" not in pubmed.query
     assert "glycated hemoglobin" in (pubmed.precision_query or "")
     assert '"2020-01-01"[Date - Publication]' in pubmed.query
-    assert '"English"[Language]' in pubmed.query
+    # Normalized to the full English name PubMed's [Language] requires, whatever the caller wrote.
+    assert '"english"[Language]' in pubmed.query
     assert strategy.strategies["pmc"].request_parameters["db"] == "pmc"
     assert strategy.strategies["openalex"].request_parameters["filter"] == (
         "from_publication_date:2020-01-01,to_publication_date:2026-08-08,language:en"
@@ -125,7 +126,7 @@ def test_precision_selection_and_round_trip() -> None:
         mode="review",
         limit_per_source="all",
         sources=["pubmed"],
-        precision=True,
+        variants={"pubmed": "precision"},
     )
     assert strategy.strategies["pubmed"].selected_variant == "precision"
     assert strategy.strategies["pubmed"].selected_query == strategy.strategies[

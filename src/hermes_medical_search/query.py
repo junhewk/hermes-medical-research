@@ -15,6 +15,7 @@ from .models import (
     Strategy,
     ValidationError,
     language_code,
+    language_name,
 )
 
 GroupFormatter = Callable[[ConceptGroup], str]
@@ -71,8 +72,10 @@ def _date_clause(question: Question) -> str | None:
     end = question.filters.to_date
     if not start and not end:
         return None
-    earliest = start or "1000/01/01"
-    latest = end or "3000/12/31"
+    # PubMed accepts both YYYY/MM/DD and YYYY-MM-DD and normalizes them identically; the open
+    # bounds use the same ISO form as user-supplied dates so one clause never mixes both.
+    earliest = start or "1000-01-01"
+    latest = end or "3000-12-31"
     return f'"{earliest}"[Date - Publication] : "{latest}"[Date - Publication]'
 
 
@@ -82,8 +85,15 @@ def _append_pubmed_filters(query: str, question: Question) -> str:
     if date_clause:
         filters.append(f"({date_clause})")
     if question.filters.languages:
+        # PubMed matches [Language] on the full English name only; "eng"/"en" silently match
+        # nothing, so a code supplied by the caller must be expanded here.
         filters.append(
-            _or_group([f'{_quoted(language)}[Language]' for language in question.filters.languages])
+            _or_group(
+                [
+                    f'{_quoted(language_name(language))}[Language]'
+                    for language in question.filters.languages
+                ]
+            )
         )
     if question.filters.publication_types:
         filters.append(
@@ -161,12 +171,9 @@ def compile_strategy(
     limit_per_source: int | str,
     sources: list[str],
     variants: dict[str, str] | None = None,
-    precision: bool = False,
 ) -> Strategy:
     if mode not in {"quick", "review"}:
         raise ValueError("mode must be quick or review")
-    if precision and variants:
-        raise ValidationError("precision and per-source variants cannot be combined")
     selected_variants = dict(variants or {})
     unknown_variant_sources = sorted(set(selected_variants) - set(sources))
     if unknown_variant_sources:
@@ -181,8 +188,6 @@ def compile_strategy(
     )
     if invalid_variants:
         raise ValidationError("invalid source variants: " + ", ".join(invalid_variants))
-    if precision:
-        selected_variants = {source: "precision" for source in sources}
 
     pubmed, pubmed_precision = _boolean_queries(question, _pubmed_group)
     pubmed = _append_pubmed_filters(pubmed, question)

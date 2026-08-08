@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from . import __version__
+
 
 class SourceError(RuntimeError):
     """A provider returned an unusable response."""
@@ -51,7 +53,7 @@ class HttpSession:
             timeout=timeout,
             follow_redirects=True,
             transport=transport,
-            headers={"User-Agent": "hermes-medical-search/0.1.0"},
+            headers={"User-Agent": f"hermes-medical-search/{__version__}"},
         )
 
     async def __aenter__(self) -> HttpSession:

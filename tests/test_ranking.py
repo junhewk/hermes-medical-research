@@ -152,3 +152,23 @@ def test_compound_concept_uses_weakest_required_group() -> None:
     assert relevance_score(complete, compound) > relevance_score(partial, compound)
     ranked = rank_records([partial, complete], compound, today=date(2026, 1, 1))
     assert ranked[0]["ranking"]["group_relevance"]["concept.training focus"] == 1.0
+
+
+def test_ranking_is_reproducible_for_a_fixed_as_of_date() -> None:
+    records = [record(), record(doi="10.1000/other", title="Cohort study of CGM in T2DM adults")]
+    first = rank_records(records, question(), today=date(2026, 1, 15))
+    second = rank_records(records, question(), today=date(2026, 1, 15))
+    assert first == second
+    assert {item["ranking"]["ranked_as_of"] for item in first} == {"2026-01-15"}
+
+
+def test_ranking_as_of_date_drives_recency_not_the_wall_clock() -> None:
+    """The whole artifact must move when the anchor date moves, and only then.
+
+    `execute_search` re-ranks on every resume, so anchoring recency to "now" made
+    ranked-results.jsonl change for identical inputs.
+    """
+    early = rank_records([record()], question(), today=date(2025, 1, 1))
+    late = rank_records([record()], question(), today=date(2026, 1, 1))
+    assert early[0]["ranking"]["recency_score"] > late[0]["ranking"]["recency_score"]
+    assert early[0]["ranking"]["composite_score"] != late[0]["ranking"]["composite_score"]

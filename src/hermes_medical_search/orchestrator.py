@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from .artifacts import (
@@ -29,7 +29,11 @@ async def preflight(
             count = await provider.count(strategy.strategies[source])
             return source, {"status": "available", "count": count, "error": None}
         except Exception as exc:  # provider failures are serialized for mode policy
-            return source, {"status": "unavailable", "count": None, "error": str(exc)}
+            return source, {
+                "status": "unavailable",
+                "count": None,
+                "error": credentials.redact(str(exc)),
+            }
 
     pairs = await asyncio.gather(*(inspect(source) for source in strategy.strategies))
     sources = dict(pairs)
@@ -91,20 +95,19 @@ async def execute_search(
             await persist()
             return source, None
         except Exception as exc:
+            message = credentials.redact(str(exc))
             state["status"] = "failed"
-            state["error"] = str(exc)
+            state["error"] = message
             await persist()
-            return source, str(exc)
+            return source, message
 
     outcomes = await asyncio.gather(*(search_source(source) for source in strategy.strategies))
     failures = {source: error for source, error in outcomes if error}
-    records = [
-        record
-        for source in strategy.strategies
-        for record in store.read_source(source)
-    ]
+    by_source = {source: store.read_source(source) for source in strategy.strategies}
+    records = [record for source_records in by_source.values() for record in source_records]
     deduplicated = deduplicate(records)
-    ranked = rank_records(deduplicated, strategy.question)
+    ranked_as_of = _ranking_date(strategy)
+    ranked = rank_records(deduplicated, strategy.question, today=ranked_as_of)
     store.write_jsonl("results.jsonl", deduplicated)
     store.write_jsonl("ranked-results.jsonl", ranked)
     summary = {
@@ -112,8 +115,11 @@ async def execute_search(
         "completed_at": datetime.now(UTC).isoformat(),
         "mode": strategy.mode,
         "ranking_version": RANKING_VERSION,
-        "records_by_source": {
-            source: len(store.read_source(source)) for source in strategy.strategies
+        "ranked_as_of": ranked_as_of.isoformat(),
+        "records_by_source": {source: len(values) for source, values in by_source.items()},
+        "records_filtered_by_source": {
+            source: int((manifest["sources"].get(source) or {}).get("filtered_out") or 0)
+            for source in strategy.strategies
         },
         "records_before_deduplication": len(records),
         "records_after_deduplication": len(deduplicated),
@@ -135,6 +141,19 @@ async def execute_search(
     return summary
 
 
+def _ranking_date(strategy: Strategy) -> date:
+    """Anchor recency scoring to the run itself.
+
+    `recency_score` is a function of "now", so ranking against the wall clock makes
+    `ranked-results.jsonl` change every time a run is resumed or re-executed. The strategy's
+    creation date is immutable and digest-bound, so ranking against it is reproducible.
+    """
+    try:
+        return datetime.fromisoformat(strategy.created_at).date()
+    except (TypeError, ValueError):
+        return datetime.now(UTC).date()
+
+
 async def _retrieve_source(
     strategy: Strategy,
     source: str,
@@ -147,8 +166,13 @@ async def _retrieve_source(
     target = None if limit == "all" else int(limit)
     retained = int(state.get("retained") or 0)
     retrieved = int(state.get("retrieved") or 0)
+    filtered_out = int(state.get("filtered_out") or 0)
     cursor = state.get("cursor")
-    seen_cursors: set[str] = set()
+    discarded = store.truncate_source(source, retained)
+    if discarded:
+        state["resume_discarded_records"] = discarded
+    # A resumed cursor has already been served once; it must count toward loop detection.
+    seen_cursors: set[str] = {str(cursor)} if cursor is not None else set()
     while target is None or retained < target:
         page_size = provider.page_size if target is None else min(
             provider.page_size, max(target - retained, 1)
@@ -156,10 +180,14 @@ async def _retrieve_source(
         page = await provider.fetch_page(strategy.strategies[source], cursor, page_size)
         records = page.records
         for offset, record in enumerate(records, start=1):
+            # Authoritative source_rank: only this layer knows the position across pages. Ranks
+            # are the provider's native positions, so a client-side filter leaves gaps in the
+            # retained set — `filtered_out` in the manifest accounts for them.
             record["source_rank"] = retrieved + offset
             record["retrieved_at"] = datetime.now(UTC).isoformat()
             record["query_variant"] = strategy.strategies[source].selected_variant
         filtered = [record for record in records if _passes_filters(record, strategy)]
+        filtered_out += len(records) - len(filtered)
         if target is not None:
             filtered = filtered[: target - retained]
         if filtered:
@@ -170,6 +198,7 @@ async def _retrieve_source(
             cursor=page.next_cursor,
             retrieved=retrieved,
             retained=retained,
+            filtered_out=filtered_out,
             reported_total=page.total if page.total is not None else state.get("reported_total"),
         )
         await persist()

@@ -8,7 +8,9 @@
         {
           "label": "learners",
           "text": "medical students",
-          "synonyms": ["undergraduate medical students"]
+          "synonyms": [
+            "undergraduate medical students"
+          ]
         }
       ]
     },
@@ -17,12 +19,16 @@
         {
           "label": "technology",
           "text": "large language models",
-          "synonyms": ["generative artificial intelligence"]
+          "synonyms": [
+            "generative artificial intelligence"
+          ]
         },
         {
           "label": "training focus",
           "text": "communication skills training",
-          "synonyms": ["clinical communication training"]
+          "synonyms": [
+            "clinical communication training"
+          ]
         }
       ]
     },
@@ -31,15 +37,18 @@
         {
           "label": "setting",
           "text": "undergraduate medical education",
-          "synonyms": ["medical school curriculum"]
+          "synonyms": [
+            "medical school curriculum"
+          ]
         }
       ]
     }
   },
   "filters": {
     "from_date": "2020-01-01",
-    "to_date": "2026-08-08",
-    "languages": ["English"],
+    "languages": [
+      "English"
+    ],
     "publication_types": []
   }
 }

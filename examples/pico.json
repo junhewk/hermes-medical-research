@@ -8,8 +8,13 @@
         {
           "label": "population",
           "text": "adults with type 2 diabetes",
-          "synonyms": ["adult type 2 diabetes", "T2DM"],
-          "candidate_mesh": ["Diabetes Mellitus, Type 2"]
+          "synonyms": [
+            "adult type 2 diabetes",
+            "type 2 diabetes mellitus"
+          ],
+          "candidate_mesh": [
+            "Diabetes Mellitus, Type 2"
+          ]
         }
       ]
     },
@@ -18,8 +23,13 @@
         {
           "label": "intervention",
           "text": "continuous glucose monitoring",
-          "synonyms": ["CGM"],
-          "candidate_mesh": ["Continuous Glucose Monitoring"]
+          "synonyms": [
+            "continuous glucose monitor",
+            "flash glucose monitoring"
+          ],
+          "candidate_mesh": [
+            "Continuous Glucose Monitoring"
+          ]
         }
       ]
     },
@@ -28,7 +38,10 @@
         {
           "label": "comparison",
           "text": "self-monitoring of blood glucose",
-          "synonyms": ["SMBG"]
+          "synonyms": [
+            "blood glucose self-monitoring",
+            "capillary blood glucose monitoring"
+          ]
         }
       ]
     },
@@ -37,7 +50,10 @@
         {
           "label": "outcome",
           "text": "glycated hemoglobin",
-          "synonyms": ["HbA1c"]
+          "synonyms": [
+            "glycated haemoglobin",
+            "hemoglobin A1c"
+          ]
         }
       ]
     }

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from collections.abc import Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -38,8 +39,23 @@ def preflight_digest(value: dict[str, Any]) -> str:
 
 def run_directory(base: Path, question: Question) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    slug = re.sub(r"[^a-z0-9]+", "-", question.question.casefold()).strip("-")[:48]
-    return base / f"{timestamp}-{slug or 'search'}"
+    return base / f"{timestamp}-{question_slug(question.question)}"
+
+
+def question_slug(question: str) -> str:
+    """Build a filesystem-safe, non-colliding directory suffix for a question.
+
+    ASCII-only slugification collapses every question written in a non-Latin script to the same
+    fallback, so Korean, Chinese, and Japanese runs would be distinguishable only by their
+    second-resolution timestamp. Transliterable accents are folded to ASCII; anything left
+    unrepresented falls back to a short digest of the question rather than a shared constant.
+    """
+    folded = unicodedata.normalize("NFKD", question).casefold()
+    ascii_only = "".join(char for char in folded if not unicodedata.combining(char))
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_only).strip("-")[:48].strip("-")
+    if slug:
+        return slug
+    return "q-" + hashlib.sha256(question.strip().casefold().encode()).hexdigest()[:12]
 
 
 class RunStore:
@@ -75,6 +91,7 @@ class RunStore:
                     "cursor": None,
                     "retrieved": 0,
                     "retained": 0,
+                    "filtered_out": 0,
                     "reported_total": None,
                     "error": None,
                     "truncated": False,
@@ -111,6 +128,24 @@ class RunStore:
                 handle.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+
+    def truncate_source(self, source: str, count: int) -> int:
+        """Drop native records past the last persisted checkpoint.
+
+        `append_source` writes before the manifest checkpoint is persisted, so a crash in that
+        window leaves records on disk that the checkpoint does not account for. Resuming would
+        refetch and re-append the same page, duplicating records and overshooting
+        `limit_per_source`. Truncating to the checkpointed count makes resume idempotent.
+        """
+        target = self.sources_dir / f"{source}.jsonl"
+        if not target.exists():
+            return 0
+        with target.open(encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+        if len(lines) <= count:
+            return 0
+        _atomic_write(target, "".join(lines[:count]))
+        return len(lines) - count
 
     def read_source(self, source: str) -> list[dict[str, Any]]:
         target = self.sources_dir / f"{source}.jsonl"
