@@ -1,0 +1,4 @@
+interface:
+  display_name: "Medical Literature Search"
+  short_description: "Plan and run reproducible medical searches"
+  default_prompt: "Use $medical-literature-search to structure my question and search medical literature reproducibly."

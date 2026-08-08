@@ -1,0 +1,34 @@
+name: Live API smoke tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keyless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run hermes-medical-search doctor --sources openalex,semantic-scholar --json
+
+  credentialed:
+    runs-on: ubuntu-latest
+    env:
+      NCBI_EMAIL: ${{ secrets.NCBI_EMAIL }}
+      NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+      SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
+      SCOPUS_INSTTOKEN: ${{ secrets.SCOPUS_INSTTOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - name: PubMed and PMC
+        if: env.NCBI_EMAIL != ''
+        run: uv run hermes-medical-search doctor --sources pubmed,pmc --json
+      - name: Scopus
+        if: env.SCOPUS_API_KEY != ''
+        run: uv run hermes-medical-search doctor --sources scopus --json

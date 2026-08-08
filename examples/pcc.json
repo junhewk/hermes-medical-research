@@ -1,0 +1,25 @@
+{
+  "schema_version": "1",
+  "framework": "PCC",
+  "question": "How are large language models used for communication training in medical students?",
+  "components": {
+    "population": {
+      "text": "medical students",
+      "synonyms": ["undergraduate medical education"]
+    },
+    "concept": {
+      "text": "large language models",
+      "synonyms": ["LLM", "generative AI"]
+    },
+    "context": {
+      "text": "communication skills training",
+      "synonyms": ["clinical communication"]
+    }
+  },
+  "filters": {
+    "from_date": "2020-01-01",
+    "to_date": "2026-08-08",
+    "languages": ["English"],
+    "publication_types": []
+  }
+}
