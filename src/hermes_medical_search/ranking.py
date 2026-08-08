@@ -6,9 +6,9 @@ from copy import deepcopy
 from datetime import UTC, date, datetime
 from typing import Any
 
-from .models import ConceptBlock, Question
+from .models import ConceptBlock, ConceptGroup, Question
 
-RANKING_VERSION = "mdr-v1-generalized"
+RANKING_VERSION = "mdr-v2-grouped"
 STOP_WORDS = {
     "about",
     "adult",
@@ -114,7 +114,7 @@ def rank_records(
             half_life_years=half_life,
             today=today,
         )
-        relevance = relevance_score(record, question)
+        relevance, group_relevance = _relevance_details(record, question)
         if question.framework == "PICO":
             base = evidence * (0.30 / 0.85) + citation * (0.15 / 0.85) + recency * (
                 0.40 / 0.85
@@ -133,6 +133,9 @@ def rank_records(
             "citation_score": round(citation, 6),
             "recency_score": round(recency, 6),
             "relevance_score": round(relevance, 6),
+            "group_relevance": {
+                key: round(value, 6) for key, value in group_relevance.items()
+            },
             "base_score": round(base, 6),
             "composite_score": round(composite, 6),
             "disclaimer": (
@@ -208,6 +211,13 @@ def recency_score(
 
 
 def relevance_score(record: dict[str, Any], question: Question) -> float:
+    relevance, _ = _relevance_details(record, question)
+    return relevance
+
+
+def _relevance_details(
+    record: dict[str, Any], question: Question
+) -> tuple[float, dict[str, float]]:
     haystack = " ".join(
         [
             str(record.get("title") or ""),
@@ -220,25 +230,35 @@ def relevance_score(record: dict[str, Any], question: Question) -> float:
     tokens = _tokens(haystack)
     all_terms = [term for block in question.components.values() for term in _block_terms(block)]
     query_score = _terms_score(all_terms, haystack, tokens)
-    population = _terms_score(_block_terms(question.components["population"]), haystack, tokens)
-    if question.framework == "PICO":
-        focus = _terms_score(
-            _block_terms(question.components["intervention"]), haystack, tokens
+    group_scores = {
+        f"{component}.{group.label}": _terms_score(
+            _group_terms(group), haystack, tokens
         )
-        optional_terms = [
-            term
+        for component, block in question.components.items()
+        for group in block.groups
+    }
+    population = _component_score(
+        question.components["population"], "population", group_scores
+    )
+    if question.framework == "PICO":
+        focus = _component_score(
+            question.components["intervention"], "intervention", group_scores
+        )
+        optional_scores = [
+            _component_score(question.components[name], name, group_scores)
             for name in ("comparison", "outcome")
             if name in question.components
-            for term in _block_terms(question.components[name])
         ]
-        optional = _terms_score(optional_terms, haystack, tokens) if optional_terms else 0.5
+        optional = max(optional_scores, default=0.5)
         relevance = focus * 0.50 + population * 0.20 + optional * 0.10 + query_score * 0.20
         if focus == 0.0:
             relevance = min(relevance, 0.28)
     else:
-        focus = _terms_score(_block_terms(question.components["concept"]), haystack, tokens)
+        focus = _component_score(
+            question.components["concept"], "concept", group_scores
+        )
         context = (
-            _terms_score(_block_terms(question.components["context"]), haystack, tokens)
+            _component_score(question.components["context"], "context", group_scores)
             if "context" in question.components
             else 0.5
         )
@@ -247,7 +267,7 @@ def relevance_score(record: dict[str, Any], question: Question) -> float:
             relevance = min(relevance, 0.28)
     if population == 0.0:
         relevance = min(relevance, 0.60)
-    return max(0.0, min(relevance, 1.0))
+    return max(0.0, min(relevance, 1.0)), group_scores
 
 
 def _prepare(record: dict[str, Any]) -> dict[str, Any]:
@@ -341,7 +361,19 @@ def _tokens(value: str) -> set[str]:
 
 
 def _block_terms(block: ConceptBlock) -> list[str]:
-    return list(dict.fromkeys([*block.free_terms(), *block.resolved_mesh]))
+    return list(dict.fromkeys(term for group in block.groups for term in _group_terms(group)))
+
+
+def _group_terms(group: ConceptGroup) -> list[str]:
+    return list(dict.fromkeys(group.all_terms()))
+
+
+def _component_score(
+    block: ConceptBlock,
+    component: str,
+    group_scores: dict[str, float],
+) -> float:
+    return min(group_scores[f"{component}.{group.label}"] for group in block.groups)
 
 
 def _terms_score(terms: list[str], haystack: str, haystack_tokens: set[str]) -> float:

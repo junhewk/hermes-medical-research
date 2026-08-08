@@ -48,6 +48,40 @@ def test_question_validation_requires_framework_components() -> None:
         )
 
 
+def test_v1_question_is_upgraded_to_one_group_per_component() -> None:
+    question = pico_question()
+    assert question.schema_version == "2"
+    assert question.migrated_from_schema == "1"
+    assert question.components["population"].groups[0].label == "population"
+    assert question.to_dict()["components"]["population"]["groups"][0]["text"] == (
+        "adults with type 2 diabetes"
+    )
+
+
+def test_v2_rejects_empty_groups_and_duplicate_labels() -> None:
+    base = {
+        "schema_version": "2",
+        "framework": "PCC",
+        "question": "Question",
+        "components": {
+            "population": {"groups": []},
+            "concept": {
+                "groups": [{"label": "technology", "text": "large language models"}]
+            },
+        },
+    }
+    with pytest.raises(ValidationError, match="non-empty"):
+        Question.from_dict(base)
+    base["components"]["population"] = {
+        "groups": [
+            {"label": "Learners", "text": "medical students"},
+            {"label": "learners", "text": "undergraduates"},
+        ]
+    }
+    with pytest.raises(ValidationError, match="labels must be unique"):
+        Question.from_dict(base)
+
+
 def test_question_rejects_unknown_source_and_bad_date() -> None:
     payload = pico_question().to_dict()
     payload["sources"] = ["google-scholar"]
@@ -75,11 +109,11 @@ def test_pico_query_golden_dialects() -> None:
     assert '"English"[Language]' in pubmed.query
     assert strategy.strategies["pmc"].request_parameters["db"] == "pmc"
     assert strategy.strategies["openalex"].request_parameters["filter"] == (
-        "from_publication_date:2020-01-01,to_publication_date:2026-08-08,language:English"
+        "from_publication_date:2020-01-01,to_publication_date:2026-08-08,language:en"
     )
     assert strategy.strategies["semantic-scholar"].request_parameters["year"] == "2020-2026"
-    assert strategy.strategies["semantic-scholar"].request_parameters["endpoint"] == "relevance"
-    assert " AND " not in strategy.strategies["semantic-scholar"].query
+    assert strategy.strategies["semantic-scholar"].request_parameters["endpoint"] == "bulk"
+    assert " + " in strategy.strategies["semantic-scholar"].query
     assert strategy.strategies["scopus"].query.startswith("TITLE-ABS-KEY(")
     assert "PUBYEAR AFT 2019" in strategy.strategies["scopus"].query
     assert "PUBYEAR BEF 2027" in strategy.strategies["scopus"].query
@@ -117,13 +151,36 @@ def test_semantic_scholar_all_uses_bulk_boolean_dialect() -> None:
 def test_pcc_default_excludes_context_but_preserves_precision_variant() -> None:
     question = Question.from_dict(
         {
-            "schema_version": "1",
+            "schema_version": "2",
             "framework": "PCC",
             "question": "Use of LLMs in communication education",
             "components": {
-                "population": {"text": "medical students"},
-                "concept": {"text": "large language models", "synonyms": ["LLM"]},
-                "context": {"text": "communication training"},
+                "population": {
+                    "groups": [{"label": "learners", "text": "medical students"}]
+                },
+                "concept": {
+                    "groups": [
+                        {
+                            "label": "technology",
+                            "text": "large language models",
+                            "synonyms": ["generative artificial intelligence"],
+                            "resolved_mesh": ["Artificial Intelligence"],
+                        },
+                        {
+                            "label": "training focus",
+                            "text": "communication skills training",
+                            "synonyms": ["clinical communication training"],
+                        },
+                    ]
+                },
+                "context": {
+                    "groups": [
+                        {
+                            "label": "setting",
+                            "text": "undergraduate medical education",
+                        }
+                    ]
+                },
             },
         }
     )
@@ -133,6 +190,39 @@ def test_pcc_default_excludes_context_but_preserves_precision_variant() -> None:
         limit_per_source=20,
         sources=["pubmed", "scopus"],
     )
-    assert "communication training" not in strategy.strategies["pubmed"].query
-    assert "communication training" in strategy.strategies["pubmed"].precision_query
-    assert "communication training" not in strategy.strategies["scopus"].query
+    pubmed = strategy.strategies["pubmed"]
+    assert '"large language models"[tiab]' in pubmed.query
+    assert '"communication skills training"[tiab]' in pubmed.query
+    assert "undergraduate medical education" not in pubmed.query
+    assert "undergraduate medical education" in (pubmed.precision_query or "")
+    scopus = strategy.strategies["scopus"]
+    assert '"Artificial Intelligence"' in scopus.query
+    assert "communication skills training" in scopus.query
+    assert "undergraduate medical education" not in scopus.query
+
+
+def test_review_supports_per_source_variants_and_selected_request_parameters() -> None:
+    question = pico_question()
+    strategy = compile_strategy(
+        question,
+        mode="review",
+        limit_per_source=10,
+        sources=["pubmed", "openalex"],
+        variants={"openalex": "precision"},
+    )
+    assert strategy.strategies["pubmed"].selected_variant == "sensitivity"
+    openalex = strategy.strategies["openalex"]
+    assert openalex.selected_variant == "precision"
+    assert openalex.request_parameters["search"] == openalex.precision_query
+
+
+def test_quick_semantic_scholar_records_boolean_group_degradation() -> None:
+    strategy = compile_strategy(
+        pico_question(),
+        mode="quick",
+        limit_per_source=20,
+        sources=["semantic-scholar"],
+    )
+    source = strategy.strategies["semantic-scholar"]
+    assert source.request_parameters["endpoint"] == "relevance"
+    assert any(item.feature == "boolean_groups" for item in source.degradations)

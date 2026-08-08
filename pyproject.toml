@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-medical-search"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reproducible PICO/PCC medical literature search for agent workflows"
 readme = "README.md"
 requires-python = ">=3.11"

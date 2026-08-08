@@ -15,7 +15,8 @@ def test_skill_metadata_and_progressive_disclosure() -> None:
     assert "name: medical-literature-search" in frontmatter
     assert "Use when" in frontmatter
     assert len(content.splitlines()) < 100
-    assert "@v0.1.0" in content
+    assert "@v0.2.0" in content
+    assert "approve <run-dir>" in content
     assert "report generation" in content
 
 

@@ -402,19 +402,27 @@ class MeshResolver:
             warnings.append("MeSH resolution skipped because NCBI_EMAIL is not configured.")
             return warnings
         for name, block in question.components.items():
-            candidates = list(dict.fromkeys([*block.candidate_mesh, block.text]))[:6]
-            for candidate in candidates:
-                try:
-                    heading = await self.resolve(candidate)
-                except SourceError as exc:
-                    warnings.append(f"MeSH resolution failed for {name}/{candidate}: {exc}")
-                    continue
-                if heading and heading.casefold() not in {
-                    value.casefold() for value in block.resolved_mesh
-                }:
-                    block.resolved_mesh.append(heading)
-                elif not heading and candidate in block.candidate_mesh:
-                    warnings.append(f"Candidate MeSH heading was not validated: {candidate}")
+            for group in block.groups:
+                candidates = list(
+                    dict.fromkeys([*group.candidate_mesh, group.text])
+                )[:6]
+                for candidate in candidates:
+                    try:
+                        heading = await self.resolve(candidate)
+                    except SourceError as exc:
+                        warnings.append(
+                            f"MeSH resolution failed for {name}/{group.label}/{candidate}: {exc}"
+                        )
+                        continue
+                    if heading and heading.casefold() not in {
+                        value.casefold() for value in group.resolved_mesh
+                    }:
+                        group.resolved_mesh.append(heading)
+                    elif not heading and candidate in group.candidate_mesh:
+                        warnings.append(
+                            "Candidate MeSH heading was not validated for "
+                            f"{name}/{group.label}: {candidate}"
+                        )
         return warnings
 
     async def resolve(self, candidate: str) -> str | None:

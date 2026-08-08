@@ -1,25 +1,45 @@
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "framework": "PICO",
   "question": "In adults with type 2 diabetes, does continuous glucose monitoring improve HbA1c compared with self-monitoring?",
   "components": {
     "population": {
-      "text": "adults with type 2 diabetes",
-      "synonyms": ["adult type 2 diabetes", "T2DM"],
-      "candidate_mesh": ["Diabetes Mellitus, Type 2"]
+      "groups": [
+        {
+          "label": "population",
+          "text": "adults with type 2 diabetes",
+          "synonyms": ["adult type 2 diabetes", "T2DM"],
+          "candidate_mesh": ["Diabetes Mellitus, Type 2"]
+        }
+      ]
     },
     "intervention": {
-      "text": "continuous glucose monitoring",
-      "synonyms": ["CGM"],
-      "candidate_mesh": ["Continuous Glucose Monitoring"]
+      "groups": [
+        {
+          "label": "intervention",
+          "text": "continuous glucose monitoring",
+          "synonyms": ["CGM"],
+          "candidate_mesh": ["Continuous Glucose Monitoring"]
+        }
+      ]
     },
     "comparison": {
-      "text": "self-monitoring of blood glucose",
-      "synonyms": ["SMBG"]
+      "groups": [
+        {
+          "label": "comparison",
+          "text": "self-monitoring of blood glucose",
+          "synonyms": ["SMBG"]
+        }
+      ]
     },
     "outcome": {
-      "text": "glycated hemoglobin",
-      "synonyms": ["HbA1c"]
+      "groups": [
+        {
+          "label": "outcome",
+          "text": "glycated hemoglobin",
+          "synonyms": ["HbA1c"]
+        }
+      ]
     }
   },
   "filters": {},

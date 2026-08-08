@@ -15,6 +15,8 @@ from . import __version__
 from .config import Credentials
 from .models import Question, Strategy
 
+ARTIFACT_SCHEMA_VERSION = "2"
+
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -27,6 +29,11 @@ def strategy_digest(strategy: Strategy) -> str:
 def confirmation_token(strategy: Strategy, counts: dict[str, int]) -> str:
     payload = f"{strategy_digest(strategy)}:{canonical_json(counts)}"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def preflight_digest(value: dict[str, Any]) -> str:
+    payload = {key: item for key, item in value.items() if key != "preflight_digest"}
+    return hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
 
 def run_directory(base: Path, question: Question) -> Path:
@@ -52,11 +59,14 @@ class RunStore:
                 raise ValueError("existing run directory belongs to a different strategy")
             return existing
         manifest = {
-            "schema_version": "1",
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
             "tool_version": __version__,
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
             "mode": strategy.mode,
+            "status": (
+                "awaiting_strategy_approval" if strategy.mode == "review" else "planned"
+            ),
             "strategy_digest": strategy_digest(strategy),
             "credentials": credentials.redacted(),
             "sources": {

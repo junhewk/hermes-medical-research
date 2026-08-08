@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
 from . import __version__
-from .models import CORE_SOURCES, Question, SourceStrategy, Strategy
+from .models import (
+    CORE_SOURCES,
+    ConceptGroup,
+    QueryDegradation,
+    Question,
+    SourceStrategy,
+    Strategy,
+    ValidationError,
+    language_code,
+)
+
+GroupFormatter = Callable[[ConceptGroup], str]
 
 
 def _escape(value: str) -> str:
@@ -16,36 +28,32 @@ def _quoted(value: str) -> str:
     return f'"{_escape(value)}"'
 
 
-def _or_group(parts: list[str]) -> str:
+def _or_group(parts: list[str], *, operator: str = " OR ") -> str:
     unique = list(dict.fromkeys(part for part in parts if part))
     if not unique:
         return ""
-    return unique[0] if len(unique) == 1 else f"({' OR '.join(unique)})"
+    return unique[0] if len(unique) == 1 else f"({operator.join(unique)})"
 
 
-def _pubmed_block(question: Question, name: str) -> str:
-    block = question.components[name]
-    mesh = [f'{_quoted(term)}[Mesh]' for term in block.resolved_mesh]
-    free = [f'{_quoted(term)}[tiab]' for term in block.free_terms()]
+def _pubmed_group(group: ConceptGroup) -> str:
+    mesh = [f'{_quoted(term)}[Mesh]' for term in group.resolved_mesh]
+    free = [f'{_quoted(term)}[tiab]' for term in group.free_terms()]
     return _or_group([*mesh, *free])
 
 
-def _scopus_block(question: Question, name: str) -> str:
-    block = question.components[name]
-    return _or_group([_quoted(term) for term in block.free_terms()])
+def _free_text_group(group: ConceptGroup) -> str:
+    return _or_group([_quoted(term) for term in group.all_terms()])
 
 
-def _plain_block(question: Question, name: str) -> str:
-    block = question.components[name]
-    return _or_group([_quoted(term) for term in block.free_terms()])
+def _s2_group(group: ConceptGroup) -> str:
+    return _or_group(
+        [_quoted(term) for term in group.all_terms()],
+        operator=" | ",
+    )
 
 
-def _s2_block(question: Question, name: str) -> str:
-    block = question.components[name]
-    terms = list(dict.fromkeys(_quoted(term) for term in block.free_terms()))
-    if not terms:
-        return ""
-    return terms[0] if len(terms) == 1 else f"({' | '.join(terms)})"
+def _component(question: Question, name: str, formatter: GroupFormatter, *, joiner: str) -> str:
+    return joiner.join(formatter(group) for group in question.components[name].groups)
 
 
 def _blocks(question: Question) -> tuple[list[str], list[str]]:
@@ -89,24 +97,61 @@ def _append_pubmed_filters(query: str, question: Question) -> str:
     return " AND ".join([query, *[part for part in filters if part]])
 
 
-def _boolean_queries(question: Question, formatter: Any) -> tuple[str, str | None]:
+def _boolean_queries(
+    question: Question,
+    formatter: GroupFormatter,
+    *,
+    joiner: str = " AND ",
+) -> tuple[str, str | None]:
     required, optional = _blocks(question)
-    sensitivity = " AND ".join(formatter(question, name) for name in required)
+    sensitivity = joiner.join(
+        _component(question, name, formatter, joiner=joiner) for name in required
+    )
     precision = None
     if optional:
-        precision = " AND ".join(
-            [sensitivity, *[formatter(question, name) for name in optional]]
+        precision = joiner.join(
+            [
+                sensitivity,
+                *[
+                    _component(question, name, formatter, joiner=joiner)
+                    for name in optional
+                ],
+            ]
         )
     return sensitivity, precision
 
 
 def _plain_queries(question: Question) -> tuple[str, str | None]:
     required, optional = _blocks(question)
-    sensitivity = " ".join(question.components[name].text for name in required)
-    precision = " ".join(
-        [sensitivity, *[question.components[name].text for name in optional]]
-    ) if optional else None
+
+    def texts(names: list[str]) -> list[str]:
+        return [
+            group.text
+            for name in names
+            for group in question.components[name].groups
+        ]
+
+    sensitivity = " ".join(texts(required))
+    precision = " ".join([sensitivity, *texts(optional)]) if optional else None
     return sensitivity, precision
+
+
+def _selected(
+    source: str,
+    query: str,
+    precision_query: str | None,
+    variants: dict[str, str],
+) -> tuple[str, str]:
+    variant = variants.get(source, "sensitivity")
+    if variant == "precision":
+        if not precision_query:
+            raise ValidationError(f"precision variant is unavailable for {source}")
+        return variant, precision_query
+    return variant, query
+
+
+def _degradation(feature: str, reason: str, fallback: str) -> QueryDegradation:
+    return QueryDegradation(feature=feature, reason=reason, fallback=fallback)
 
 
 def compile_strategy(
@@ -115,98 +160,173 @@ def compile_strategy(
     mode: str,
     limit_per_source: int | str,
     sources: list[str],
+    variants: dict[str, str] | None = None,
     precision: bool = False,
 ) -> Strategy:
     if mode not in {"quick", "review"}:
         raise ValueError("mode must be quick or review")
-    pubmed, pubmed_precision = _boolean_queries(question, _pubmed_block)
+    if precision and variants:
+        raise ValidationError("precision and per-source variants cannot be combined")
+    selected_variants = dict(variants or {})
+    unknown_variant_sources = sorted(set(selected_variants) - set(sources))
+    if unknown_variant_sources:
+        raise ValidationError(
+            "variants were provided for unselected sources: "
+            + ", ".join(unknown_variant_sources)
+        )
+    invalid_variants = sorted(
+        f"{source}={variant}"
+        for source, variant in selected_variants.items()
+        if variant not in {"sensitivity", "precision"}
+    )
+    if invalid_variants:
+        raise ValidationError("invalid source variants: " + ", ".join(invalid_variants))
+    if precision:
+        selected_variants = {source: "precision" for source in sources}
+
+    pubmed, pubmed_precision = _boolean_queries(question, _pubmed_group)
     pubmed = _append_pubmed_filters(pubmed, question)
     if pubmed_precision:
         pubmed_precision = _append_pubmed_filters(pubmed_precision, question)
-    plain, plain_precision = _boolean_queries(question, _plain_block)
-    s2, s2_precision = _boolean_queries(question, _s2_block)
-    s2 = s2.replace(" AND ", " + ")
-    if s2_precision:
-        s2_precision = s2_precision.replace(" AND ", " + ")
+    free_text, free_text_precision = _boolean_queries(question, _free_text_group)
+    s2_bulk, s2_bulk_precision = _boolean_queries(
+        question, _s2_group, joiner=" + "
+    )
     s2_plain, s2_plain_precision = _plain_queries(question)
-    scopus, scopus_precision = _boolean_queries(question, _scopus_block)
-    selected = "precision" if precision else "sensitivity"
     strategies: dict[str, SourceStrategy] = {}
 
     if "pubmed" in sources:
+        variant, active = _selected(
+            "pubmed", pubmed, pubmed_precision, selected_variants
+        )
         strategies["pubmed"] = SourceStrategy(
             source="pubmed",
             query=pubmed,
             precision_query=pubmed_precision,
-            selected_variant=selected,
-            request_parameters={"db": "pubmed", "term": pubmed, "retmode": "json"},
+            selected_variant=variant,
+            request_parameters={"db": "pubmed", "term": active, "retmode": "json"},
         )
     if "pmc" in sources:
+        variant, active = _selected("pmc", pubmed, pubmed_precision, selected_variants)
         strategies["pmc"] = SourceStrategy(
             source="pmc",
             query=pubmed,
             precision_query=pubmed_precision,
-            selected_variant=selected,
-            request_parameters={"db": "pmc", "term": pubmed, "retmode": "json"},
+            selected_variant=variant,
+            request_parameters={"db": "pmc", "term": active, "retmode": "json"},
             warnings=["PMC is queried directly; this is not Europe PMC."],
         )
     if "openalex" in sources:
-        parameters: dict[str, Any] = {"search": plain, "cursor": "*"}
+        variant, active = _selected(
+            "openalex", free_text, free_text_precision, selected_variants
+        )
+        parameters: dict[str, Any] = {"search": active, "cursor": "*"}
         date_filters: list[str] = []
         if question.filters.from_date:
             date_filters.append(f"from_publication_date:{question.filters.from_date}")
         if question.filters.to_date:
             date_filters.append(f"to_publication_date:{question.filters.to_date}")
         if question.filters.languages:
-            date_filters.append("language:" + "|".join(question.filters.languages))
+            date_filters.append(
+                "language:" + "|".join(language_code(value) for value in question.filters.languages)
+            )
         if date_filters:
             parameters["filter"] = ",".join(date_filters)
         strategies["openalex"] = SourceStrategy(
             source="openalex",
-            query=plain,
-            precision_query=plain_precision,
-            selected_variant=selected,
+            query=free_text,
+            precision_query=free_text_precision,
+            selected_variant=variant,
             request_parameters=parameters,
-            warnings=[
-                "MeSH and PubMed field tags are unavailable; concept blocks are submitted "
-                "as free text."
+            degradations=[
+                _degradation(
+                    "controlled_vocabulary",
+                    "OpenAlex has no MeSH field.",
+                    "Resolved MeSH headings are submitted as free-text alternatives.",
+                ),
+                _degradation(
+                    "field_tags",
+                    "OpenAlex has no PubMed title/abstract field tags.",
+                    "Terms are searched across title, abstract, and indexed full text.",
+                ),
             ],
         )
     if "semantic-scholar" in sources:
-        use_bulk = limit_per_source == "all" or int(limit_per_source) > 1000
-        s2_query = s2 if use_bulk else s2_plain
-        s2_query_precision = s2_precision if use_bulk else s2_plain_precision
-        parameters = {"query": s2_query, "endpoint": "bulk" if use_bulk else "relevance"}
+        use_bulk = mode == "review" or limit_per_source == "all" or int(limit_per_source) > 1000
+        s2_query = s2_bulk if use_bulk else s2_plain
+        s2_query_precision = s2_bulk_precision if use_bulk else s2_plain_precision
+        variant, active = _selected(
+            "semantic-scholar", s2_query, s2_query_precision, selected_variants
+        )
+        parameters = {
+            "query": active,
+            "endpoint": "bulk" if use_bulk else "relevance",
+        }
         if question.filters.from_date or question.filters.to_date:
             from_year = (question.filters.from_date or "").split("-")[0]
             to_year = (question.filters.to_date or "").split("-")[0]
             parameters["year"] = f"{from_year}-{to_year}"
+        degradations = [
+            _degradation(
+                "controlled_vocabulary",
+                "Semantic Scholar has no MeSH field.",
+                (
+                    "Resolved MeSH headings are submitted as free-text alternatives."
+                    if use_bulk
+                    else "Quick relevance search retains canonical group text and omits "
+                    "controlled-vocabulary alternatives that cannot be ORed safely."
+                ),
+            ),
+            _degradation(
+                "field_tags",
+                "Semantic Scholar has no PubMed field tags.",
+                "Terms are searched in title and abstract.",
+            ),
+        ]
+        if not use_bulk:
+            degradations.append(
+                _degradation(
+                    "boolean_groups",
+                    "Semantic Scholar relevance search accepts plain text only.",
+                    "Canonical text from every selected group is submitted without Boolean syntax.",
+                )
+            )
+        if question.filters.from_date or question.filters.to_date:
+            degradations.append(
+                _degradation(
+                    "date_precision",
+                    "Semantic Scholar filters publication dates at year precision.",
+                    "ISO date bounds are reduced to inclusive years.",
+                )
+            )
+        if question.filters.languages:
+            degradations.append(
+                _degradation(
+                    "language_filter",
+                    "Semantic Scholar search does not expose a language filter.",
+                    "Returned language metadata is filtered when available.",
+                )
+            )
+        if question.filters.publication_types:
+            degradations.append(
+                _degradation(
+                    "publication_type_filter",
+                    "Semantic Scholar search does not expose a publication-type filter.",
+                    "Returned publication types are filtered when available.",
+                )
+            )
         strategies["semantic-scholar"] = SourceStrategy(
             source="semantic-scholar",
             query=s2_query,
             precision_query=s2_query_precision,
-            selected_variant=selected,
+            selected_variant=variant,
             request_parameters=parameters,
-            warnings=[
-                (
-                    "MeSH and field tags are unavailable; concept groups use Semantic Scholar's "
-                    "+/| bulk-search syntax and publication-date filters are reduced to years."
-                    if use_bulk
-                    else "MeSH, field tags, and Boolean operators are unavailable in Semantic "
-                    "Scholar relevance search; core concepts are submitted as plain text and "
-                    "publication-date filters are reduced to years."
-                ),
-                *(
-                    ["Language and publication-type filters require post-retrieval filtering."]
-                    if question.filters.languages or question.filters.publication_types
-                    else []
-                ),
-            ],
+            degradations=degradations,
         )
     if "scopus" in sources:
-        scopus_query = f"TITLE-ABS-KEY({scopus})"
+        scopus_query = f"TITLE-ABS-KEY({free_text})"
         scopus_precision_query = (
-            f"TITLE-ABS-KEY({scopus_precision})" if scopus_precision else None
+            f"TITLE-ABS-KEY({free_text_precision})" if free_text_precision else None
         )
         year_parts: list[str] = []
         if question.filters.from_date:
@@ -218,27 +338,46 @@ def compile_strategy(
             scopus_query += suffix
             if scopus_precision_query:
                 scopus_precision_query += suffix
+        variant, active = _selected(
+            "scopus", scopus_query, scopus_precision_query, selected_variants
+        )
+        degradations = [
+            _degradation(
+                "controlled_vocabulary",
+                "Scopus has no MeSH field.",
+                "Resolved MeSH headings are submitted as free-text alternatives.",
+            )
+        ]
+        if question.filters.languages:
+            degradations.append(
+                _degradation(
+                    "language_filter",
+                    "This CLI does not compile Scopus language clauses.",
+                    "Returned language metadata is filtered when available.",
+                )
+            )
+        if question.filters.publication_types:
+            degradations.append(
+                _degradation(
+                    "publication_type_filter",
+                    "This CLI does not compile Scopus document-type clauses.",
+                    "Returned publication types are filtered when available.",
+                )
+            )
         strategies["scopus"] = SourceStrategy(
             source="scopus",
             query=scopus_query,
             precision_query=scopus_precision_query,
-            selected_variant=selected,
-            request_parameters={"query": scopus_query, "view": "STANDARD"},
-            warnings=[
-                "MeSH terms are translated to free text.",
-                *(
-                    ["Language and publication-type filters require post-retrieval filtering."]
-                    if question.filters.languages or question.filters.publication_types
-                    else []
-                ),
-            ],
+            selected_variant=variant,
+            request_parameters={"query": active, "view": "STANDARD"},
+            degradations=degradations,
         )
     warnings = [
-        "Comparison/outcome/context blocks are retained as optional precision blocks and are "
-        "not required by the default high-recall query."
+        "Comparison/outcome/context components are retained as optional precision additions "
+        "and are not required by the default high-recall query."
     ]
     return Strategy(
-        schema_version="1",
+        schema_version="2",
         tool_version=__version__,
         mode=mode,
         created_at=datetime.now(UTC).isoformat(),

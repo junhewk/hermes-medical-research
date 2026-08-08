@@ -5,11 +5,18 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from .artifacts import RunStore, confirmation_token, run_directory
+from .artifacts import (
+    ARTIFACT_SCHEMA_VERSION,
+    RunStore,
+    confirmation_token,
+    preflight_digest,
+    run_directory,
+    strategy_digest,
+)
 from .config import Credentials
 from .http import HttpSession
 from .models import SOURCES, Question, Strategy, ValidationError
@@ -23,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="hermes-medical-search",
         description="Plan and run reproducible PICO/PCC medical-literature searches.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
     commands = parser.add_subparsers(dest="command", required=True)
 
     doctor = commands.add_parser("doctor", help="Check source configuration and access")
@@ -33,6 +40,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = commands.add_parser("plan", help="Validate a question and compile source strategies")
     _add_question_arguments(plan, review_mode=True)
+    plan.add_argument("--json", action="store_true", help="Emit the complete plan as JSON")
+
+    approve = commands.add_parser(
+        "approve", help="Record approval of an exact review strategy"
+    )
+    approve.add_argument("run_dir", type=Path)
+    approve.add_argument(
+        "--strategy-digest",
+        required=True,
+        help="Full digest shown with the strategy under review",
+    )
 
     inspect = commands.add_parser("preflight", help="Count matches and validate source access")
     inspect.add_argument("run_dir", type=Path)
@@ -59,6 +77,13 @@ def _add_question_arguments(parser: argparse.ArgumentParser, *, review_mode: boo
     parser.add_argument("--sources", help="Comma-separated source names")
     parser.add_argument("--exclude", help="Comma-separated sources to exclude")
     parser.add_argument("--precision", action="store_true", help="Select optional precision blocks")
+    parser.add_argument(
+        "--variant",
+        action="append",
+        default=[],
+        metavar="SOURCE=VARIANT",
+        help="Select sensitivity or precision independently for a source; repeatable",
+    )
     parser.add_argument("--no-mesh", action="store_true", help="Skip online MeSH resolution")
 
 
@@ -78,9 +103,26 @@ async def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         return await _doctor(args)
     if args.command == "plan":
-        run_path, _ = await _create_plan(args, mode=args.mode)
-        print(run_path)
+        run_path, strategy = await _create_plan(args, mode=args.mode)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "run_dir": str(run_path),
+                        "strategy_digest": strategy_digest(strategy),
+                        "status": "awaiting_strategy_approval"
+                        if strategy.mode == "review"
+                        else "planned",
+                        "strategy": strategy.to_dict(),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(run_path)
         return 0
+    if args.command == "approve":
+        return await _approve_command(args.run_dir, args.strategy_digest)
     if args.command == "preflight":
         return await _preflight_command(args.run_dir)
     if args.command == "search":
@@ -105,6 +147,7 @@ async def _create_plan(args: argparse.Namespace, *, mode: str) -> tuple[Path, St
         question.filters.from_date = _years_ago(date.today(), 3).isoformat()
     limit = _parse_limit(args.limit_per_source, mode=mode)
     sources = _select_sources(question, credentials, args.sources, args.exclude)
+    variants = _parse_variants(args.variant, sources=sources, precision=args.precision)
     warnings: list[str] = []
     if not args.no_mesh:
         async with _session(credentials) as session:
@@ -116,9 +159,18 @@ async def _create_plan(args: argparse.Namespace, *, mode: str) -> tuple[Path, St
         mode=mode,
         limit_per_source=limit,
         sources=sources,
-        precision=args.precision,
+        variants=variants,
     )
     strategy.warnings.extend(warnings)
+    if args.precision:
+        strategy.warnings.append(
+            "--precision is deprecated; use repeatable --variant SOURCE=precision."
+        )
+    if question.migrated_from_schema:
+        strategy.warnings.append(
+            "Question schema v1 was upgraded to schema v2 by wrapping each component "
+            "in one labeled group."
+        )
     if mode == "quick" and not _input_has_from_date(args.input):
         strategy.warnings.append(
             f"Quick mode applied its visible three-year default from {question.filters.from_date}."
@@ -131,24 +183,53 @@ async def _create_plan(args: argparse.Namespace, *, mode: str) -> tuple[Path, St
 
 async def _preflight_command(run_dir: Path) -> int:
     store = RunStore(run_dir.resolve())
-    strategy = _load_strategy(store.path / "strategy.json")
+    strategy, manifest = _load_run(store)
+    if strategy.mode == "review":
+        _require_strategy_approval(store, strategy)
+        if manifest.get("status") not in {
+            "strategy_approved",
+            "preflight_ready",
+            "preflight_failed",
+        }:
+            raise ValueError(
+                f"review preflight is invalid while run status is {manifest.get('status')!r}"
+            )
     credentials = Credentials.from_env()
     async with _session(credentials) as session:
         result = await preflight(strategy, session, credentials)
     store.write_json("preflight.json", result)
+    manifest["status"] = "preflight_ready" if result["ready"] else "preflight_failed"
+    store.write_manifest(manifest)
     print(json.dumps(result, indent=2))
     return 0 if result["ready"] or strategy.mode == "quick" else 2
 
 
 async def _search_command(run_dir: Path, *, confirm_all: str | None) -> int:
     store = RunStore(run_dir.resolve())
-    strategy = _load_strategy(store.path / "strategy.json")
+    strategy, manifest = _load_run(store)
+    if strategy.mode == "review":
+        _require_strategy_approval(store, strategy)
     credentials = Credentials.from_env()
     async with _session(credentials) as session:
         result = store.read_json("preflight.json", default=None)
+        if not result and strategy.mode == "review":
+            raise ValueError(
+                "review search requires an explicit successful preflight after approval"
+            )
         if not result:
             result = await preflight(strategy, session, credentials)
             store.write_json("preflight.json", result)
+        _validate_preflight(strategy, result)
+        if strategy.mode == "review" and manifest.get("status") not in {
+            "preflight_ready",
+            "preflight_failed",
+            "running",
+            "failed",
+            "complete",
+        }:
+            raise ValueError(
+                f"review search is invalid while run status is {manifest.get('status')!r}"
+            )
         if strategy.mode == "review" and not result.get("ready"):
             unavailable = [
                 source
@@ -171,9 +252,82 @@ async def _search_command(run_dir: Path, *, confirm_all: str | None) -> int:
                 raise ValueError(
                     "all-results retrieval requires --confirm-all with the token from preflight"
                 )
+            approval = _require_strategy_approval(store, strategy)
+            approval["all_results"] = {
+                "strategy_digest": strategy_digest(strategy),
+                "preflight_digest": result["preflight_digest"],
+                "expected_total": sum(counts.values()),
+                "confirmed_at": datetime.now(UTC).isoformat(),
+            }
+            store.write_json("approval.json", approval)
         summary = await execute_search(strategy, store, session, credentials, result)
     print(json.dumps(summary, indent=2))
     return 2 if strategy.mode == "review" and summary["source_failures"] else 0
+
+
+async def _approve_command(run_dir: Path, supplied_digest: str) -> int:
+    store = RunStore(run_dir.resolve())
+    strategy, manifest = _load_run(store)
+    if strategy.mode != "review":
+        raise ValueError("only review strategies require approval")
+    current_digest = strategy_digest(strategy)
+    if supplied_digest != current_digest:
+        raise ValueError("supplied strategy digest does not match the stored strategy")
+    existing = store.read_json("approval.json", default=None)
+    if existing:
+        approved = (existing.get("strategy") or {}).get("strategy_digest")
+        if approved != current_digest:
+            raise ValueError("approval.json belongs to a different strategy")
+        print(json.dumps(existing, indent=2))
+        return 0
+    approval = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "strategy": {
+            "strategy_digest": current_digest,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "selected_variants": {
+                source: item.selected_variant
+                for source, item in strategy.strategies.items()
+            },
+        },
+        "all_results": None,
+    }
+    store.write_json("approval.json", approval)
+    manifest["status"] = "strategy_approved"
+    store.write_manifest(manifest)
+    print(json.dumps(approval, indent=2))
+    return 0
+
+
+def _load_run(store: RunStore) -> tuple[Strategy, dict[str, Any]]:
+    strategy = _load_strategy(store.path / "strategy.json")
+    manifest = store.read_json("manifest.json", default=None)
+    if not isinstance(manifest, dict):
+        raise ValueError("run directory has no manifest.json")
+    if str(manifest.get("schema_version")) != ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("v0.1 run directories must be re-planned with v0.2")
+    if manifest.get("strategy_digest") != strategy_digest(strategy):
+        raise ValueError("strategy.json does not match the immutable run manifest")
+    return strategy, manifest
+
+
+def _require_strategy_approval(
+    store: RunStore, strategy: Strategy
+) -> dict[str, Any]:
+    approval = store.read_json("approval.json", default=None)
+    if not isinstance(approval, dict):
+        raise ValueError("review strategy has not been approved")
+    strategy_approval = approval.get("strategy") or {}
+    if strategy_approval.get("strategy_digest") != strategy_digest(strategy):
+        raise ValueError("review approval does not match the stored strategy")
+    return approval
+
+
+def _validate_preflight(strategy: Strategy, result: dict[str, Any]) -> None:
+    if result.get("strategy_digest") != strategy_digest(strategy):
+        raise ValueError("preflight does not match the stored strategy")
+    if result.get("preflight_digest") != preflight_digest(result):
+        raise ValueError("preflight artifact digest is invalid")
 
 
 async def _doctor(args: argparse.Namespace) -> int:
@@ -294,6 +448,33 @@ def _parse_sources(raw: str) -> list[str]:
     if not values:
         raise ValidationError("source list is empty")
     return values
+
+
+def _parse_variants(
+    values: list[str], *, sources: list[str], precision: bool
+) -> dict[str, str]:
+    if precision and values:
+        raise ValidationError("--precision cannot be combined with --variant")
+    if precision:
+        return {source: "precision" for source in sources}
+    variants: dict[str, str] = {}
+    for raw in values:
+        source, separator, variant = raw.partition("=")
+        source = source.strip().casefold()
+        variant = variant.strip().casefold()
+        if not separator or source not in SOURCES or variant not in {
+            "sensitivity",
+            "precision",
+        }:
+            raise ValidationError(
+                "--variant must use SOURCE=sensitivity or SOURCE=precision"
+            )
+        if source not in sources:
+            raise ValidationError(f"--variant source is not selected: {source}")
+        if source in variants:
+            raise ValidationError(f"duplicate --variant for source: {source}")
+        variants[source] = variant
+    return variants
 
 
 def _years_ago(value: date, years: int) -> date:

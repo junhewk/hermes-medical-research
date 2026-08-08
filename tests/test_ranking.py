@@ -9,6 +9,7 @@ from hermes_medical_search.ranking import (
     evidence_score,
     rank_records,
     recency_score,
+    relevance_score,
 )
 
 
@@ -104,7 +105,7 @@ def test_scoring_components_and_no_journal_bonus() -> None:
     first = record(journal="New England Journal of Medicine")
     second = record(source_id="2", doi="10.1000/other", pmid="124", journal="Unknown Journal")
     ranked = rank_records([first, second], question(), today=date(2026, 1, 1))
-    assert ranked[0]["ranking"]["version"] == "mdr-v1-generalized"
+    assert ranked[0]["ranking"]["version"] == "mdr-v2-grouped"
     assert ranked[0]["ranking"]["evidence_category"] == "II"
     assert ranked[0]["ranking"]["composite_score"] == ranked[1]["ranking"][
         "composite_score"
@@ -116,3 +117,38 @@ def test_component_formula_regressions() -> None:
     assert evidence_score(record(publication_types=["Systematic Review"])) == ("I", 1.0)
     assert round(citation_score(999), 6) == 1.0
     assert round(recency_score("2023-01-01", half_life_years=3, today=date(2026, 1, 1)), 3) == 0.5
+
+
+def test_compound_concept_uses_weakest_required_group() -> None:
+    compound = Question.from_dict(
+        {
+            "schema_version": "2",
+            "framework": "PCC",
+            "question": "LLMs for communication training in medical students",
+            "components": {
+                "population": {
+                    "groups": [{"label": "learners", "text": "medical students"}]
+                },
+                "concept": {
+                    "groups": [
+                        {"label": "technology", "text": "large language models"},
+                        {
+                            "label": "training focus",
+                            "text": "communication skills training",
+                        },
+                    ]
+                },
+            },
+        }
+    )
+    partial = record(
+        title="Large language models for medical students",
+        abstract="Artificial intelligence in medical education.",
+    )
+    complete = record(
+        title="Large language models for communication skills training",
+        abstract="Communication skills training for medical students.",
+    )
+    assert relevance_score(complete, compound) > relevance_score(partial, compound)
+    ranked = rank_records([partial, complete], compound, today=date(2026, 1, 1))
+    assert ranked[0]["ranking"]["group_relevance"]["concept.training focus"] == 1.0

@@ -10,38 +10,50 @@ or store them.
 - Semantic Scholar: `SEMANTIC_SCHOLAR_API_KEY` or `S2_API_KEY` optional.
 - Scopus: `SCOPUS_API_KEY` required; `SCOPUS_INSTTOKEN` optional.
 
-Never include secret values in question JSON, commands, run artifacts, or chat. `manifest.json`
-contains only boolean configured/not-configured indicators.
+Never include secret values in question JSON, commands, artifacts, or chat. `manifest.json` contains
+only configured/not-configured indicators.
 
-## Query capability differences
+## Query capabilities
 
-- PubMed and PMC preserve validated MeSH headings, title/abstract synonyms, Boolean concept
-  groups, publication dates, languages, and publication types.
-- PMC is queried through NCBI E-utilities with `db=pmc`; it is not Europe PMC.
-- OpenAlex uses free-text search plus supported date/language filters. It cannot preserve MeSH or
-  PubMed field tags.
-- Semantic Scholar uses free-text Boolean concepts and year-level date filters. Language and
-  publication-type filtering is applied only when returned metadata supports it.
-- Scopus translates free-text groups to `TITLE-ABS-KEY(...)` and applies publication-year clauses.
-  Access depends on the API key's institutional entitlement.
+- PubMed and direct PMC preserve MeSH, title/abstract fields, dates, and nested Boolean groups.
+- OpenAlex preserves nested Boolean groups. It submits resolved MeSH as free text and lacks PubMed
+  field tags.
+- Semantic Scholar review mode uses bulk search to preserve `+`/`|` groups. Quick relevance search
+  accepts plain text only, so the CLI submits every canonical group text and records degradation.
+- Scopus preserves nested groups in `TITLE-ABS-KEY(...)`, translates MeSH to free text, and applies
+  publication-year clauses. Access depends on institutional entitlement.
 
-Every loss of query semantics appears in `strategy.json` warnings.
+Each provider strategy contains structured `degradations` with `feature`, `reason`, and `fallback`.
+Review these alongside general warnings before approval.
+
+## Review state and approval
+
+Review manifests progress through `awaiting_strategy_approval`, `strategy_approved`,
+`preflight_ready` or `preflight_failed`, `running`, and `complete` or `failed`.
+
+`approval.json` binds approval to the exact strategy digest and selected per-source variants. An
+all-results confirmation additionally records the preflight digest, expected total, and timestamp.
+This is an audit record of the user-confirmed action, not an authenticated signature.
+
+Review preflight requires strategy approval. Review search requires a successful digest-bound
+preflight and never runs preflight implicitly. Editing a strategy invalidates the run; revise the
+structured question and create a new run instead.
 
 ## Run artifacts
 
-- `question.json`: validated framework, concepts, and filters actually used.
-- `strategy.json`: exact sensitivity and optional precision queries for every source.
-- `preflight.json`: source availability, result counts, and full-retrieval confirmation token.
-- `manifest.json`: checkpoints, statuses, redacted configuration, tool version, and errors.
+- `question.json`: normalized schema-v2 groups and filters actually used.
+- `strategy.json`: exact sensitivity and precision queries, selected variants, and degradations.
+- `approval.json`: digest-bound review and all-results confirmations.
+- `preflight.json`: source access, counts, strategy/preflight digests, and confirmation token.
+- `manifest.json`: state, checkpoints, redacted configuration, tool version, and errors.
 - `sources/<source>.jsonl`: native provider order and source rank.
 - `results.jsonl`: deterministic deduplicated order.
-- `ranked-results.jsonl`: separate `mdr-v1-generalized` prioritization.
+- `ranked-results.jsonl`: separate `mdr-v2-grouped` prioritization with per-group relevance.
 - `summary.json`: retrieval and deduplication counts; not a research report.
 
 Deduplication uses DOI, then PMID/PMCID crosswalks, then normalized title plus year when strong
-identifiers are unavailable. Source records and native ranks remain attached to the canonical
-record.
+identifiers are unavailable. Source records and native ranks remain attached to the canonical record.
 
-Review source queries before execution. If a source is unavailable, configure it or create a new
-strategy that explicitly excludes it. Quick mode may finish with omissions, which must be reported
-prominently.
+Quick mode may finish with omissions and must report them prominently. Review mode stops before
+retrieval when any selected source is unavailable; failures during retrieval retain partial artifacts
+and mark the run failed.

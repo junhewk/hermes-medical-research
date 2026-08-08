@@ -4,10 +4,16 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
-from .artifacts import RunStore, confirmation_token
+from .artifacts import (
+    ARTIFACT_SCHEMA_VERSION,
+    RunStore,
+    confirmation_token,
+    preflight_digest,
+    strategy_digest,
+)
 from .config import Credentials
 from .http import HttpSession
-from .models import Strategy
+from .models import Strategy, language_code
 from .providers import Provider, provider_for
 from .ranking import RANKING_VERSION, deduplicate, rank_records
 
@@ -33,10 +39,11 @@ async def preflight(
         if detail["status"] == "available"
     }
     result: dict[str, Any] = {
-        "schema_version": "1",
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
         "created_at": datetime.now(UTC).isoformat(),
         "mode": strategy.mode,
         "limit_per_source": strategy.limit_per_source,
+        "strategy_digest": strategy_digest(strategy),
         "sources": sources,
         "ready": all(detail["status"] == "available" for detail in sources.values()),
     }
@@ -44,6 +51,7 @@ async def preflight(
         result["confirmation_token"] = confirmation_token(strategy, counts)
         result["confirmation_required"] = True
         result["expected_total"] = sum(counts.values())
+    result["preflight_digest"] = preflight_digest(result)
     return result
 
 
@@ -55,6 +63,8 @@ async def execute_search(
     preflight_result: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = store.initialize(strategy.question, strategy, credentials)
+    manifest["status"] = "running"
+    store.write_manifest(manifest)
     lock = asyncio.Lock()
 
     async def persist() -> None:
@@ -98,7 +108,7 @@ async def execute_search(
     store.write_jsonl("results.jsonl", deduplicated)
     store.write_jsonl("ranked-results.jsonl", ranked)
     summary = {
-        "schema_version": "1",
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
         "completed_at": datetime.now(UTC).isoformat(),
         "mode": strategy.mode,
         "ranking_version": RANKING_VERSION,
@@ -176,10 +186,10 @@ async def _retrieve_source(
 
 def _passes_filters(record: dict[str, Any], strategy: Strategy) -> bool:
     filters = strategy.question.filters
-    language = str(record.get("language") or "").casefold()
+    language = language_code(str(record.get("language") or ""))
     if filters.languages and language:
-        allowed = {value.casefold() for value in filters.languages}
-        if language not in allowed and language[:2] not in {value[:2] for value in allowed}:
+        allowed = {language_code(value) for value in filters.languages}
+        if language not in allowed:
             return False
     types = {str(value).casefold() for value in record.get("publication_types") or []}
     if filters.publication_types and types:

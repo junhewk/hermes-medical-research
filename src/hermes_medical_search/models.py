@@ -5,13 +5,34 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+LEGACY_SCHEMA_VERSION = "1"
 SOURCES = ("pubmed", "pmc", "openalex", "semantic-scholar", "scopus")
 CORE_SOURCES = SOURCES[:-1]
+LANGUAGE_CODES = {
+    "arabic": "ar",
+    "chinese": "zh",
+    "english": "en",
+    "french": "fr",
+    "german": "de",
+    "italian": "it",
+    "japanese": "ja",
+    "korean": "ko",
+    "portuguese": "pt",
+    "russian": "ru",
+    "spanish": "es",
+}
 
 
 class ValidationError(ValueError):
     """Raised when a versioned input or strategy is invalid."""
+
+
+def language_code(value: str) -> str:
+    normalized = value.strip().casefold()
+    if len(normalized) == 2:
+        return normalized
+    return LANGUAGE_CODES.get(normalized, normalized)
 
 
 def _strings(value: Any, field_name: str) -> list[str]:
@@ -41,35 +62,78 @@ def _date(value: Any, field_name: str) -> str | None:
 
 
 @dataclass(slots=True)
-class ConceptBlock:
+class ConceptGroup:
+    label: str
     text: str
     synonyms: list[str] = field(default_factory=list)
     candidate_mesh: list[str] = field(default_factory=list)
     resolved_mesh: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: Any, name: str) -> ConceptBlock:
+    def from_dict(cls, data: Any, field_name: str) -> ConceptGroup:
         if not isinstance(data, dict):
-            raise ValidationError(f"components.{name} must be an object")
+            raise ValidationError(f"{field_name} must be an object")
+        label = " ".join(str(data.get("label", "")).split())
         text = " ".join(str(data.get("text", "")).split())
+        if not label:
+            raise ValidationError(f"{field_name}.label is required")
         if not text:
-            raise ValidationError(f"components.{name}.text is required")
+            raise ValidationError(f"{field_name}.text is required")
         return cls(
+            label=label,
             text=text,
-            synonyms=_strings(data.get("synonyms"), f"components.{name}.synonyms"),
+            synonyms=_strings(data.get("synonyms"), f"{field_name}.synonyms"),
             candidate_mesh=_strings(
-                data.get("candidate_mesh"), f"components.{name}.candidate_mesh"
+                data.get("candidate_mesh"), f"{field_name}.candidate_mesh"
             ),
             resolved_mesh=_strings(
-                data.get("resolved_mesh"), f"components.{name}.resolved_mesh"
+                data.get("resolved_mesh"), f"{field_name}.resolved_mesh"
             ),
         )
 
     def free_terms(self) -> list[str]:
         return _dedupe([self.text, *self.synonyms])
 
+    def all_terms(self) -> list[str]:
+        return _dedupe([*self.free_terms(), *self.resolved_mesh])
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class ConceptBlock:
+    groups: list[ConceptGroup]
+
+    @classmethod
+    def from_dict(cls, data: Any, name: str, *, schema_version: str) -> ConceptBlock:
+        field_name = f"components.{name}"
+        if not isinstance(data, dict):
+            raise ValidationError(f"{field_name} must be an object")
+        if schema_version == LEGACY_SCHEMA_VERSION:
+            legacy = dict(data)
+            legacy["label"] = name
+            return cls(groups=[ConceptGroup.from_dict(legacy, field_name)])
+        raw_groups = data.get("groups")
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise ValidationError(f"{field_name}.groups must be a non-empty array")
+        groups = [
+            ConceptGroup.from_dict(value, f"{field_name}.groups[{index}]")
+            for index, value in enumerate(raw_groups)
+        ]
+        labels = [group.label.casefold() for group in groups]
+        if len(labels) != len(set(labels)):
+            raise ValidationError(f"{field_name}.groups labels must be unique")
+        return cls(groups=groups)
+
+    def free_terms(self) -> list[str]:
+        return _dedupe([term for group in self.groups for term in group.free_terms()])
+
+    def all_terms(self) -> list[str]:
+        return _dedupe([term for group in self.groups for term in group.all_terms()])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"groups": [group.to_dict() for group in self.groups]}
 
 
 @dataclass(slots=True)
@@ -110,15 +174,16 @@ class Question:
     filters: SearchFilters = field(default_factory=SearchFilters)
     sources: list[str] = field(default_factory=list)
     exclude_sources: list[str] = field(default_factory=list)
+    migrated_from_schema: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, data: Any) -> Question:
         if not isinstance(data, dict):
             raise ValidationError("question input must be a JSON object")
-        version = str(data.get("schema_version", ""))
-        if version != SCHEMA_VERSION:
+        input_version = str(data.get("schema_version", ""))
+        if input_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
             raise ValidationError(
-                f"unsupported schema_version {version!r}; expected {SCHEMA_VERSION!r}"
+                f"unsupported schema_version {input_version!r}; expected '1' or '2'"
             )
         framework = str(data.get("framework", "")).upper()
         if framework not in {"PICO", "PCC"}:
@@ -137,19 +202,24 @@ class Question:
         components: dict[str, ConceptBlock] = {}
         for name in (*required, *optional):
             if name in raw_components and raw_components[name] not in (None, ""):
-                components[name] = ConceptBlock.from_dict(raw_components[name], name)
+                components[name] = ConceptBlock.from_dict(
+                    raw_components[name], name, schema_version=input_version
+                )
             elif name in required:
                 raise ValidationError(f"components.{name} is required for {framework}")
         sources = _validate_sources(data.get("sources", []), "sources")
         excluded = _validate_sources(data.get("exclude_sources", []), "exclude_sources")
         return cls(
-            schema_version=version,
+            schema_version=SCHEMA_VERSION,
             framework=framework,
             question=question,
             components=components,
             filters=SearchFilters.from_dict(data.get("filters")),
             sources=sources,
             exclude_sources=excluded,
+            migrated_from_schema=(
+                input_version if input_version != SCHEMA_VERSION else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,6 +235,29 @@ class Question:
 
 
 @dataclass(slots=True)
+class QueryDegradation:
+    feature: str
+    reason: str
+    fallback: str
+
+    @classmethod
+    def from_dict(cls, data: Any, field_name: str) -> QueryDegradation:
+        if not isinstance(data, dict):
+            raise ValidationError(f"{field_name} must be an object")
+        values = {
+            key: " ".join(str(data.get(key, "")).split())
+            for key in ("feature", "reason", "fallback")
+        }
+        for key, value in values.items():
+            if not value:
+                raise ValidationError(f"{field_name}.{key} is required")
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class SourceStrategy:
     source: str
     query: str
@@ -172,6 +265,7 @@ class SourceStrategy:
     selected_variant: str
     request_parameters: dict[str, Any]
     warnings: list[str] = field(default_factory=list)
+    degradations: list[QueryDegradation] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> SourceStrategy:
@@ -187,6 +281,8 @@ class SourceStrategy:
         precision = data.get("precision_query")
         if not query:
             raise ValidationError(f"empty query for {source}")
+        if selected == "precision" and not precision:
+            raise ValidationError(f"precision variant is unavailable for {source}")
         return cls(
             source=source,
             query=query,
@@ -194,6 +290,10 @@ class SourceStrategy:
             selected_variant=selected,
             request_parameters=dict(data.get("request_parameters") or {}),
             warnings=_strings(data.get("warnings"), f"strategies.{source}.warnings"),
+            degradations=[
+                QueryDegradation.from_dict(value, f"strategies.{source}.degradations[{index}]")
+                for index, value in enumerate(data.get("degradations") or [])
+            ],
         )
 
     @property
@@ -203,7 +303,15 @@ class SourceStrategy:
         return self.query
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "source": self.source,
+            "query": self.query,
+            "precision_query": self.precision_query,
+            "selected_variant": self.selected_variant,
+            "request_parameters": self.request_parameters,
+            "warnings": self.warnings,
+            "degradations": [item.to_dict() for item in self.degradations],
+        }
 
 
 @dataclass(slots=True)
@@ -221,7 +329,12 @@ class Strategy:
     def from_dict(cls, data: Any) -> Strategy:
         if not isinstance(data, dict):
             raise ValidationError("strategy must be a JSON object")
-        if str(data.get("schema_version")) != SCHEMA_VERSION:
+        version = str(data.get("schema_version"))
+        if version != SCHEMA_VERSION:
+            if version == LEGACY_SCHEMA_VERSION:
+                raise ValidationError(
+                    "v0.1 run directories cannot be resumed by v0.2; re-plan the v1 question"
+                )
             raise ValidationError("unsupported strategy schema_version")
         mode = str(data.get("mode", ""))
         if mode not in {"quick", "review"}:

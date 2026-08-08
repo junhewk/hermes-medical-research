@@ -1,7 +1,7 @@
 # Hermes Medical Literature Search
 
 A portable Agent Skill and deterministic CLI for reproducible medical-literature retrieval.
-It structures PICO/PCC questions, creates transparent database-specific strategies, searches
+It structures simple or compound PICO/PCC questions into AND-of-OR groups, creates transparent database-specific strategies, searches
 PubMed, PMC, OpenAlex, Semantic Scholar, and optionally Scopus, then preserves native and
 deduplicated MDR-ranked results. It does not generate research reports and is not an MCP server.
 
@@ -33,8 +33,14 @@ Configure `NCBI_EMAIL` for PubMed/PMC. Optional credentials are `NCBI_API_KEY`,
 Create a strategy:
 
 ```bash
-uv run hermes-medical-search plan question.json --mode review --limit-per-source 100
+uv run hermes-medical-search plan question.json --mode review --limit-per-source 100 --json
+uv run hermes-medical-search approve runs/<run> --strategy-digest <sha256>
+uv run hermes-medical-search preflight runs/<run>
+uv run hermes-medical-search search runs/<run>
 ```
+
+Review mode requires digest-bound strategy approval and a successful explicit preflight. Select
+database variants independently with repeatable `--variant SOURCE=sensitivity|precision`.
 
 Quick mode defaults to 20 results per source and the previous three years:
 
@@ -42,5 +48,5 @@ Quick mode defaults to 20 results per source and the previous three years:
 uv run hermes-medical-search run question.json
 ```
 
-The score in `ranked-results.jsonl` is a transparent prioritization heuristic. It is not GRADE,
+The `mdr-v2-grouped` score in `ranked-results.jsonl` is a transparent prioritization heuristic. It is not GRADE,
 risk-of-bias assessment, evidence quality, or a systematic-review conclusion.
