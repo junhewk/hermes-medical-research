@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Complete the Hermes setup instructions with `skills.external_dirs` so the installed report skill
+  appears in the startup index and loads as `medical-deep-research` or `/medical-deep-research`.
+- Extend Hermes integration checks to verify those user-facing surfaces and references after a
+  same-process configuration change. Qualified plugin registration remains tested separately.
+
 ## 0.3.1
 
 - Fix a Hermes Plugin Guard false positive in a URL-rejection test by using a harmless temporary

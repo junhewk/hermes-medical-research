@@ -46,48 +46,58 @@ hermes plugins enable medical-deep-research-plugin --no-allow-tool-override
 hermes plugins list --user --json
 ```
 
-**Use a fresh Hermes process after enabling or updating for automatic plugin discovery.**
-A new terminal `hermes` session in the same profile leaves an existing gateway running. For discovery
-inside that gateway, restarting it with `hermes gateway restart` refreshes its plugin registry.
-The running process caches plugin discovery; starting another conversation in that process may
-still use its old registry. In the tested Hermes 0.21.2 revision, `/reload-skills` rescans standalone
-skill directories and does not force portable plugin discovery.
+For the usual short name and automatic skill selection, append the installed skills directory to
+`skills.external_dirs` in the active profile's `config.yaml` (normally `~/.hermes/config.yaml`).
+Preserve any existing directory entries:
 
-You can also use an already-installed, enabled skill in the current chat without a restart:
+```yaml
+skills:
+  external_dirs:
+    - plugins/medical-deep-research-plugin/skills
+```
 
-> Read `skills/medical-deep-research/SKILL.md` from this profile's installed
-> `medical-deep-research-plugin` directory, load its linked references, and follow it for my report.
+The relative path resolves inside the active Hermes profile. This is Hermes's supported way to
+include shared skills in its startup index, `skills_list`, `skill_view`, and slash commands. It reads
+the installed package directly, so plugin updates also update these instructions.
 
-The default location is `~/.hermes/plugins/medical-deep-research-plugin/`; other profiles have their
-own plugin directories. This loads the existing instructions directly, without repairing automatic
-skill registration. It assumes installation and enabling have already succeeded.
+In an existing chat, send:
 
-Ask Hermes to call `skills_list`, then `skill_view` with the complete name it returns. For a normal
-installation, the report skill is:
+```text
+/reload-skills
+```
+
+Then invoke `/medical-deep-research` followed by the report request, or ask Hermes to load
+`skill_view(name="medical-deep-research")`. The startup index includes the short name when the
+session's prompt is next built; the slash command explicitly loads the instructions in the current
+chat. A gateway restart is not needed for this external-directory setup.
+
+Hermes also retains an internal portable-plugin identifier:
 
 ```text
 agent-plugin-medical-deep-research-plugin-71b62b59:medical-deep-research
 ```
 
-The other bundled skill ends in `:medical-literature-search`. Hermes derives the namespace from
-the installed directory key, so use the name returned by `skills_list` if it differs. The bare
-name `medical-deep-research` does not resolve a portable plugin skill through `skill_view`.
+This generated namespace is normal. **Installing and enabling a portable plugin alone does not put
+its skills in Hermes's startup skill index or expose bare names.** Without `external_dirs`, discover
+the qualified name using `skills_list` and load it with `skill_view`; the bare name won't resolve.
+The namespace can differ if the installed directory key differs. Portable-plugin registration is
+cached by the hosting process; `/reload-skills` refreshes the configured skill directories, not that
+plugin registry.
 
-If the plugin is enabled but absent from `skills_list`, compare with a fresh terminal process.
-Check that the chat uses the installation's profile, that Hermes safe mode is not active, and that
-neither plugin skill is disabled separately. Record the Hermes version/source revision and loader
-errors if it is still missing. `plugins list` shows installed/enabled state; Plugin Doctor tests an
-isolated loader. Neither proves that the current chat has loaded the skill. Doctor reporting
-**0 tools, 0 hooks is expected**: this package contributes two skills, whose registration is separate.
-Hermes reads `skills/*/SKILL.md` automatically; adding a `skills` field to the portable manifest
-is not required. Older Hermes versions need Agent Plugins v1 support or standalone skill installation.
+The external-directory setting activates the instructions independently of the plugin registry.
+Remove its entry as well when deactivating these skills. Local skills with the same name take
+precedence; an existing standalone `medical-literature-search` remains the bare-name version until
+you intentionally update or remove that standalone copy.
+
+If the short name is missing, check `skills.external_dirs` in the chat's active profile, the path's
+existence, and skill-specific disabled settings. `plugins list` and Plugin Doctor check different
+parts of setup. Doctor reporting **0 tools, 0 hooks is expected**: this package contributes skills.
+Hermes reads `skills/*/SKILL.md`; adding a `skills` field to the portable manifest does not index them.
 
 Version 0.3.1 fixes an installation-scan false positive caused by a local-file rejection test in
-0.3.0. The test now uses a harmless temporary fixture and still rejects local file URLs. CI checks
-the actual Hermes installer with scanning enabled, then enables the plugin and reads both skills
-in a fresh process. No scanner override is needed. For an existing, unpinned Git installation, run
-`hermes plugins update medical-deep-research-plugin` to retrieve the fix. Use a fresh process for
-automatic discovery, or read the updated instructions directly as described above.
+0.3.0. The test now uses a harmless temporary fixture and still rejects local file URLs. The actual
+Hermes installation scan passes without a scanner override. For an existing, unpinned Git
+installation, run `hermes plugins update medical-deep-research-plugin` to retrieve the fix.
 
 The package includes portable, Codex, and Claude manifests and a Git marketplace catalog. Host docs:
 [Codex](https://developers.openai.com/plugins/build/plugins),
@@ -100,8 +110,9 @@ Load the skill explicitly before giving the research task:
 
 - **Codex CLI:** select or mention `$medical-deep-research` from the installed plugin.
 - **Claude Code:** invoke `/medical-deep-research-plugin:medical-deep-research`.
-- **Hermes:** ask it to call `skills_list` and then `skill_view` with the qualified report-skill name
-  shown above. A prompt mentioning a missing skill does not install or activate its package.
+- **Hermes:** after the directory setup above, invoke `/medical-deep-research` or ask it to load
+  `skill_view(name="medical-deep-research")`. A prompt mentioning a missing skill does not install
+  or configure its package.
 
 Then give the task and settings, for example:
 
@@ -256,8 +267,10 @@ uv run --with rich --with python-dotenv --with ruamel-yaml python scripts/valida
 
 This clones committed source locally, scans the complete tree including tests, checks disabled
 state, enables the package without tool-override privileges, and uses fresh processes to list/read
-both skills and their references. It changes only temporary Hermes profiles. CI pins the Hermes
-source revision; it does not run a model or generate a clinical report.
+both qualified skills and their references. It also adds the documented external-directory setting
+and verifies short-name listing/loading, the startup index, reference access, and slash invocation
+in the same process. It changes only temporary Hermes profiles. CI pins the Hermes source revision;
+it does not run a model or generate a clinical report.
 
 Optional public API check: `uv run python scripts/live_smoke.py`. CI tests use offline fixtures.
 The reproducible release ZIP excludes credentials, runs, environments, and session files.

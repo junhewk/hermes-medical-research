@@ -47,6 +47,44 @@ def probe(enabled: bool) -> None:
         print(f"Available and readable: {name}")
 
 
+def probe_short_names() -> None:
+    from agent.prompt_builder import build_skills_system_prompt
+    from agent.skill_commands import build_skill_invocation_message, reload_skills
+    from hermes_cli.config import load_config, save_config
+    from tools.skills_tool import skill_view, skills_list
+
+    # A portable install alone does not expose these names in the startup index.
+    before = build_skills_system_prompt()
+    assert all(f"- {name}:" not in before for name in SKILLS), before
+    reload_skills()
+    home = Path(os.environ["HERMES_HOME"])
+    root = home / "plugins" / PLUGIN / "skills"
+    config = load_config()
+    config.setdefault("skills", {}).setdefault("external_dirs", []).append(
+        f"plugins/{PLUGIN}/skills"
+    )
+    save_config(config)
+    # No process restart or manual cache clearing: exercise supported reload behavior.
+    reloaded = reload_skills()
+    assert {entry["name"] for entry in reloaded["added"]} >= SKILLS, reloaded
+    prompt = build_skills_system_prompt()
+    listing = json.loads(skills_list())
+    assert listing["success"], listing
+    assert {entry["name"] for entry in listing["skills"]} >= SKILLS, listing
+    for name in sorted(SKILLS):
+        assert f"- {name}:" in prompt, name
+        viewed = json.loads(skill_view(name))
+        assert viewed["success"] and Path(viewed["skill_dir"]) == root / name, viewed
+        assert (root / name / "SKILL.md").read_text() in viewed["content"], name
+        for reference in (root / name / "references").glob("*.md"):
+            linked = json.loads(skill_view(name, file_path=f"references/{reference.name}"))
+            assert linked["success"] and reference.read_text() in linked["content"], linked
+        invoked = build_skill_invocation_message(f"/{name}", "Run the requested research task.")
+        assert invoked and str(root / name) in invoked, name
+        assert "Run the requested research task." in invoked, name
+        print(f"Indexed, readable by short name, and invocable as /{name}")
+
+
 def validate(plugin_root: Path, hermes_source: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="mdr-hermes-validation-") as temporary:
         # Set before importing Hermes: each child is a new session in this profile.
@@ -92,17 +130,22 @@ def validate(plugin_root: Path, hermes_source: Path) -> None:
         subprocess.run([*command, "disabled"], check=True, cwd=temporary)
         cmd_enable(name, allow_tool_override=False)
         subprocess.run([*command, "enabled"], check=True, cwd=temporary)
+        subprocess.run([*command, "indexed"], check=True, cwd=temporary)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-source", type=Path, required=True)
     parser.add_argument("--plugin-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--probe", choices=("disabled", "enabled"), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--probe", choices=("disabled", "enabled", "indexed"), help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
     source = args.hermes_source.resolve(strict=True)
     sys.path.insert(0, str(source))
-    if args.probe:
+    if args.probe == "indexed":
+        probe_short_names()
+    elif args.probe:
         probe(args.probe == "enabled")
     else:
         validate(args.plugin_root.resolve(strict=True), source)

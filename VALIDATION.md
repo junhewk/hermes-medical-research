@@ -1,3 +1,22 @@
+# Hermes short-name integration correction
+
+Checked on 2026-09-12 against Hermes 0.21.2 source revision
+`044a77b3b6af4ce16138d42762f812a20b9f7a89`, using the Python 3.11 environment that runs the user's
+gateway. Plugin 0.3.1 was installed and enabled; both qualified skills loaded. The missing bare name
+was a startup-index/invocation integration gap, not evidence of a failed plugin registration.
+
+Hermes's portable plugin adapter omits plugin skills from the startup index and bare-name lookup.
+Adding the installed `skills/` directory to the profile's supported `skills.external_dirs` setting
+made `medical-deep-research` appear in the index and list, load by bare name, serve references, and
+expand through `/medical-deep-research`. A same-process check verified the configuration transition
+and `/reload-skills` behavior. No gateway restart was performed. The installed source also passed
+the unchanged Plugin Guard policy with verdict `safe`.
+
+The README now includes this setup step. `scripts/validate_hermes.py` additionally tests these
+user-facing surfaces on the CI-pinned Hermes revision. Earlier checks below tested qualified plugin
+registration; they did not establish short-name or startup-index integration. The two are now
+reported separately. These checks do not submit a model request or generate the clinical report.
+
 # Release validation: 0.3.1
 
 Checked on a headless Linux server on 2026-09-12.
