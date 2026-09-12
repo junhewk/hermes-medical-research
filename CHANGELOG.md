@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+- Fix a Hermes Plugin Guard false positive in a URL-rejection test by using a harmless temporary
+  file fixture. The local-file rejection remains tested; scanner rules and policy remain unchanged.
+- Add a pinned Hermes integration job covering the full-source installation scan, disabled state,
+  explicit enabling, and fresh-process listing/reading of both skills and their references.
+- Document Hermes process restart, qualified skill names, and the difference between Plugin Doctor,
+  installed/enabled status, and the running chat's skill registry.
+- Make report examples invoke the skill explicitly and state per-report settings and defaults.
+
 ## 0.3.0
 
 - Rename the search project to Medical Deep Research Plugin. Keep the legacy CLI alias and

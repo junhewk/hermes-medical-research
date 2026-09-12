@@ -416,7 +416,7 @@ async def test_fulltext_pending_resume_and_retry_do_not_double_count(tmp_path, m
             await fetch_fulltexts(workspace, [records[1]["record_id"]], session=session)
 
 
-def test_jats_tables_and_url_restrictions():
+def test_jats_tables_and_url_restrictions(tmp_path):
     segments = parse_jats(
         b"<article><body><sec><title>Results</title><p>A paragraph.</p>"
         b"<table-wrap><label>Table 1</label><table><tr><th>Arm</th><th>N</th></tr>"
@@ -424,7 +424,9 @@ def test_jats_tables_and_url_restrictions():
     )
     assert {s["locator"] for s in segments} == {"heading:1", "paragraph:1", "table:1"}
     assert "A | 42" in segments[-1]["text"]
-    for url in ("file:///etc/passwd", "https://127.0.0.1/file", "https://user:pass@example.org/a"):
+    local_file = tmp_path / "example.txt"
+    local_file.write_text("Harmless local-file fixture.")
+    for url in (local_file.as_uri(), "https://127.0.0.1/file", "https://user:pass@example.org/a"):
         with pytest.raises(ValidationError):
             public_url(url)
 

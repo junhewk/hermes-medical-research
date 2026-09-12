@@ -6,7 +6,7 @@
     "name": "medical-deep-research-plugin",
     "source": "./",
     "description": "Evidence-based medical reports and reproducible literature search.",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "category": "productivity"
   }]
 }

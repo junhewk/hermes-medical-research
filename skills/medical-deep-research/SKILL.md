@@ -11,7 +11,7 @@ the CLI manages records and exports. It runs on headless servers and needs Pytho
 Use the matching release for every command:
 
 ```bash
-uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 medical-deep-research-plugin --help
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.1 medical-deep-research-plugin --help
 ```
 
 Below, `medical-deep-research-plugin` means that complete pinned `uvx` invocation (or the same
@@ -22,10 +22,12 @@ version already installed locally). Write JSON inputs to files, then pass their 
 1. Read [protocol.md](references/protocol.md). Preserve the original question, choose its framework,
    and record eligibility, outcomes, scope, and the rationale for required search components.
    Use the user's language for the report and English biomedical synonyms for database queries.
-2. Initialize with `research init protocol.json --output <run-dir> --language en`. Default report
+2. Initialize with `research init protocol.json --output <run-dir> --language <language>`. Default report
    limits are 100 retrieved records per source and 30 full-text attempts. For systematic/scoping
    review preparation add `--mode review-prep` and explicit `--records-per-source N|all` and
-   `--fulltexts N|all`. Infer report mode for ordinary evidence reports.
+   `--fulltexts N|all`. Infer report mode for ordinary evidence reports. Before retrieval, state
+   the effective framework, mode, language, sources, filters, budgets, and output directory.
+   These are per-report settings; preserve explicit user choices in the initialized protocol.
 3. Run `doctor --json`; describe missing sources and configuration without reading secrets into
    chat or JSON. Split dated/filtered literature queries from undated registry queries.
 4. For each strategy call `plan <run-dir>/question.json --mode quick --limit-per-source N

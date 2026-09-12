@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "medical-deep-research-plugin",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Headless evidence-based medical research for Codex, Claude Code, and Hermes.",
   "author": {"name": "Junhewk", "url": "https://github.com/junhewk"},
   "repository": "https://github.com/junhewk/medical-deep-research-plugin",

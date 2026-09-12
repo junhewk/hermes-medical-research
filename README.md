@@ -22,7 +22,7 @@ Skills invoke the matching Git release through `uvx`.
 **Codex CLI**
 
 ```bash
-codex plugin marketplace add junhewk/medical-deep-research-plugin --ref v0.3.0
+codex plugin marketplace add junhewk/medical-deep-research-plugin --ref v0.3.1
 codex plugin add medical-deep-research-plugin@junhewk-medical-research
 codex plugin list
 ```
@@ -42,13 +42,52 @@ Start a new Claude session and invoke
 
 ```bash
 hermes plugins install junhewk/medical-deep-research-plugin --no-enable
-hermes plugins enable medical-deep-research-plugin
-hermes plugins list
+hermes plugins enable medical-deep-research-plugin --no-allow-tool-override
+hermes plugins list --user --json
 ```
 
-Use `skills_list` in Hermes to discover the qualified skill name, then `skill_view` to load it.
-Hermes namespaces portable skills automatically. Older Hermes versions without Agent Plugins v1
-support can install the shared skill directories through `hermes skills install` instead.
+**Use a fresh Hermes process after enabling or updating for automatic plugin discovery.**
+A new terminal `hermes` session in the same profile leaves an existing gateway running. For discovery
+inside that gateway, restarting it with `hermes gateway restart` refreshes its plugin registry.
+The running process caches plugin discovery; starting another conversation in that process may
+still use its old registry. In the tested Hermes 0.21.2 revision, `/reload-skills` rescans standalone
+skill directories and does not force portable plugin discovery.
+
+You can also use an already-installed, enabled skill in the current chat without a restart:
+
+> Read `skills/medical-deep-research/SKILL.md` from this profile's installed
+> `medical-deep-research-plugin` directory, load its linked references, and follow it for my report.
+
+The default location is `~/.hermes/plugins/medical-deep-research-plugin/`; other profiles have their
+own plugin directories. This loads the existing instructions directly, without repairing automatic
+skill registration. It assumes installation and enabling have already succeeded.
+
+Ask Hermes to call `skills_list`, then `skill_view` with the complete name it returns. For a normal
+installation, the report skill is:
+
+```text
+agent-plugin-medical-deep-research-plugin-71b62b59:medical-deep-research
+```
+
+The other bundled skill ends in `:medical-literature-search`. Hermes derives the namespace from
+the installed directory key, so use the name returned by `skills_list` if it differs. The bare
+name `medical-deep-research` does not resolve a portable plugin skill through `skill_view`.
+
+If the plugin is enabled but absent from `skills_list`, compare with a fresh terminal process.
+Check that the chat uses the installation's profile, that Hermes safe mode is not active, and that
+neither plugin skill is disabled separately. Record the Hermes version/source revision and loader
+errors if it is still missing. `plugins list` shows installed/enabled state; Plugin Doctor tests an
+isolated loader. Neither proves that the current chat has loaded the skill. Doctor reporting
+**0 tools, 0 hooks is expected**: this package contributes two skills, whose registration is separate.
+Hermes reads `skills/*/SKILL.md` automatically; adding a `skills` field to the portable manifest
+is not required. Older Hermes versions need Agent Plugins v1 support or standalone skill installation.
+
+Version 0.3.1 fixes an installation-scan false positive caused by a local-file rejection test in
+0.3.0. The test now uses a harmless temporary fixture and still rejects local file URLs. CI checks
+the actual Hermes installer with scanning enabled, then enables the plugin and reads both skills
+in a fresh process. No scanner override is needed. For an existing, unpinned Git installation, run
+`hermes plugins update medical-deep-research-plugin` to retrieve the fix. Use a fresh process for
+automatic discovery, or read the updated instructions directly as described above.
 
 The package includes portable, Codex, and Claude manifests and a Git marketplace catalog. Host docs:
 [Codex](https://developers.openai.com/plugins/build/plugins),
@@ -57,10 +96,29 @@ The package includes portable, Codex, and Claude manifests and a Git marketplace
 
 ## Start a report
 
-Ask the installed skill, for example:
+Load the skill explicitly before giving the research task:
 
-> Create a medical evidence report on exercise for adults with hypertension. Compare blood-pressure
-> effects and harms, explain disagreements, and export Markdown, HTML, and the evidence tables.
+- **Codex CLI:** select or mention `$medical-deep-research` from the installed plugin.
+- **Claude Code:** invoke `/medical-deep-research-plugin:medical-deep-research`.
+- **Hermes:** ask it to call `skills_list` and then `skill_view` with the qualified report-skill name
+  shown above. A prompt mentioning a missing skill does not install or activate its package.
+
+Then give the task and settings, for example:
+
+> Use the loaded medical-deep-research skill. Create a medical evidence report on exercise for
+> adults with hypertension. Compare blood-pressure effects and harms, explain disagreements,
+> and export Markdown, HTML, and the evidence tables.
+> Use report mode, a PICO protocol, English output, no publication-date restriction, the default
+> available sources, up to 100 raw records per source, and up to 30 full-text attempts. Show the
+> effective settings and source availability before retrieval. Save the run to
+> `runs/exercise-hypertension`.
+
+These are **per-report settings**, saved in the run's immutable protocol. There is no separate
+plugin settings screen or persistent plugin-wide report configuration. Specify scope, sources,
+and filters in the protocol JSON; set mode, language, budgets, and destination through
+`research init` options. Credentials come from the host environment. The skill translates the
+request into those inputs and reports unavailable sources. To change a saved protocol or budget,
+initialize a new run.
 
 Supported frameworks: **PICO** (interventions), **PECO** (exposures/harms), **DIAGNOSTIC**,
 **PROGNOSIS**, and **PCC** (scoping). Search components are explicit: sensitive PICO retrieval
@@ -189,6 +247,17 @@ uv run python scripts/validate_bundle.py
 uv build
 uv run python scripts/package_plugin.py
 ```
+
+Hermes integration check (Git, a committed plugin checkout, and a separate Hermes source checkout):
+
+```bash
+uv run --with rich --with python-dotenv --with ruamel-yaml python scripts/validate_hermes.py --hermes-source /path/to/hermes-agent
+```
+
+This clones committed source locally, scans the complete tree including tests, checks disabled
+state, enables the package without tool-override privileges, and uses fresh processes to list/read
+both skills and their references. It changes only temporary Hermes profiles. CI pins the Hermes
+source revision; it does not run a model or generate a clinical report.
 
 Optional public API check: `uv run python scripts/live_smoke.py`. CI tests use offline fixtures.
 The reproducible release ZIP excludes credentials, runs, environments, and session files.

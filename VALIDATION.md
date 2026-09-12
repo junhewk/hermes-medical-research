@@ -1,4 +1,35 @@
-# Release validation: 0.3.0
+# Release validation: 0.3.1
+
+Checked on a headless Linux server on 2026-09-12.
+
+- Python 3.12: all 131 deterministic tests, Ruff, and bundle consistency checks pass. Codex plugin
+  and both Agent Skills validators pass. Wheel, source distribution, and plugin ZIP build.
+- The local-file URL rejection test uses a harmless temporary fixture; rejection of local files,
+  loopback URLs, and embedded URL credentials remains covered. Production URL validation is unchanged.
+- Hermes 0.21.2, source commit `eec131b7163a8f287a9bddfc8ba11e6bd07ac49e`: the actual installation
+  core clones the committed source tree locally and passes Plugin Guard with its default policy.
+  The complete source, including tests, is scanned; no scanner rules are changed and no force flag
+  is used. The verdict is `safe`; medium execution/supply-chain findings remain visible.
+- The installed package exposes no skills while disabled. After enabling without tool-override
+  privileges, a fresh process's `skills_list` returns both qualified skills. `skill_view` reads their
+  instructions and every Markdown reference. All of this runs in a temporary Hermes profile.
+- The report skill's normal qualified name is
+  `agent-plugin-medical-deep-research-plugin-71b62b59:medical-deep-research`.
+  Plugin Doctor's tool/hook counts do not count skills. The pinned host's process-level discovery
+  cache is separate from installed/enabled state and the standalone `/reload-skills` command.
+- CI repeats the integration against the pinned upstream source using
+  `scripts/validate_hermes.py`. This tests installation mechanics and actual skill serving without
+  a model, a gateway restart, or changes to a user's Hermes installation. It does not test remote
+  catalog admission or prove that an existing gateway has refreshed its registry.
+
+The 0.3.0 validation below did **not** cover installation scanning or enabled-state/fresh-process
+skill access. A subsequent clean-source scan reproduced the user's 28 findings: 26 medium `uv_run`,
+one medium `python_subprocess`, and one critical `system_passwd_access` match in a negative test.
+The critical match caused the blocked verdict. The test's fixture change removes that false
+positive while keeping local-file rejection tested. This corrects the earlier validation gap;
+it is not a claim that heuristic scanning establishes the absence of all security issues.
+
+# Previous release validation: 0.3.0
 
 Checked on a headless Linux server on 2026-09-12.
 
