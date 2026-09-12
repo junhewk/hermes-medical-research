@@ -53,7 +53,7 @@ class HttpSession:
             timeout=timeout,
             follow_redirects=True,
             transport=transport,
-            headers={"User-Agent": f"hermes-medical-search/{__version__}"},
+            headers={"User-Agent": f"medical-deep-research-plugin/{__version__}"},
         )
 
     async def __aenter__(self) -> HttpSession:

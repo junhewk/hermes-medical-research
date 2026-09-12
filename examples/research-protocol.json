@@ -1,0 +1,62 @@
+{
+  "schema_version": "3",
+  "framework": "PICO",
+  "question": "In adults with hypertension, how does exercise affect systolic blood pressure?",
+  "components": {
+    "population": {
+      "groups": [
+        {
+          "label": "condition",
+          "text": "hypertension",
+          "synonyms": [
+            "high blood pressure"
+          ],
+          "candidate_mesh": [
+            "Hypertension"
+          ]
+        }
+      ]
+    },
+    "intervention": {
+      "groups": [
+        {
+          "label": "activity",
+          "text": "exercise",
+          "synonyms": [
+            "physical activity"
+          ],
+          "candidate_mesh": [
+            "Exercise"
+          ]
+        }
+      ]
+    },
+    "outcome": {
+      "groups": [
+        {
+          "label": "blood-pressure",
+          "text": "systolic blood pressure"
+        }
+      ]
+    }
+  },
+  "search_components": [
+    "population",
+    "intervention"
+  ],
+  "filters": {},
+  "eligibility": {
+    "include": [
+      "Adults with hypertension",
+      "Exercise compared with usual care or no structured exercise"
+    ],
+    "exclude": [
+      "Animal studies"
+    ]
+  },
+  "outcomes": [
+    "Systolic blood pressure",
+    "Adverse events"
+  ],
+  "search_rationale": "Search population and intervention sensitively; assess blood-pressure outcomes and adult populations during screening."
+}

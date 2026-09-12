@@ -35,6 +35,8 @@ class Credentials:
 
     def configuration_status(self) -> dict[str, dict[str, object]]:
         return {
+            "europe-pmc": {"configured": True, "required": []},
+            "clinicaltrials": {"configured": True, "required": []},
             "pubmed": {
                 "configured": bool(self.ncbi_email),
                 "required": ["NCBI_EMAIL"],
@@ -90,9 +92,7 @@ class Credentials:
             "ncbi_email_configured": bool(self.ncbi_email),
             "ncbi_api_key_configured": bool(self.ncbi_api_key),
             "openalex_api_key_configured": bool(self.openalex_api_key),
-            "semantic_scholar_api_key_configured": bool(
-                self.semantic_scholar_api_key
-            ),
+            "semantic_scholar_api_key_configured": bool(self.semantic_scholar_api_key),
             "scopus_api_key_configured": bool(self.scopus_api_key),
             "scopus_insttoken_configured": bool(self.scopus_insttoken),
         }

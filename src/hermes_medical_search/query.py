@@ -37,8 +37,8 @@ def _or_group(parts: list[str], *, operator: str = " OR ") -> str:
 
 
 def _pubmed_group(group: ConceptGroup) -> str:
-    mesh = [f'{_quoted(term)}[Mesh]' for term in group.resolved_mesh]
-    free = [f'{_quoted(term)}[tiab]' for term in group.free_terms()]
+    mesh = [f"{_quoted(term)}[Mesh]" for term in group.resolved_mesh]
+    free = [f"{_quoted(term)}[tiab]" for term in group.free_terms()]
     return _or_group([*mesh, *free])
 
 
@@ -58,13 +58,14 @@ def _component(question: Question, name: str, formatter: GroupFormatter, *, join
 
 
 def _blocks(question: Question) -> tuple[list[str], list[str]]:
+    if question.schema_version == "3":
+        required = question.search_components
+        return required, [key for key in question.components if key not in required]
     if question.framework == "PICO":
         return ["population", "intervention"], [
             key for key in ("comparison", "outcome") if key in question.components
         ]
-    return ["population", "concept"], [
-        key for key in ("context",) if key in question.components
-    ]
+    return ["population", "concept"], [key for key in ("context",) if key in question.components]
 
 
 def _date_clause(question: Question) -> str | None:
@@ -90,7 +91,7 @@ def _append_pubmed_filters(query: str, question: Question) -> str:
         filters.append(
             _or_group(
                 [
-                    f'{_quoted(language_name(language))}[Language]'
+                    f"{_quoted(language_name(language))}[Language]"
                     for language in question.filters.languages
                 ]
             )
@@ -99,7 +100,7 @@ def _append_pubmed_filters(query: str, question: Question) -> str:
         filters.append(
             _or_group(
                 [
-                    f'{_quoted(publication_type)}[Publication Type]'
+                    f"{_quoted(publication_type)}[Publication Type]"
                     for publication_type in question.filters.publication_types
                 ]
             )
@@ -122,10 +123,7 @@ def _boolean_queries(
         precision = joiner.join(
             [
                 sensitivity,
-                *[
-                    _component(question, name, formatter, joiner=joiner)
-                    for name in optional
-                ],
+                *[_component(question, name, formatter, joiner=joiner) for name in optional],
             ]
         )
     return sensitivity, precision
@@ -135,11 +133,7 @@ def _plain_queries(question: Question) -> tuple[str, str | None]:
     required, optional = _blocks(question)
 
     def texts(names: list[str]) -> list[str]:
-        return [
-            group.text
-            for name in names
-            for group in question.components[name].groups
-        ]
+        return [group.text for name in names for group in question.components[name].groups]
 
     sensitivity = " ".join(texts(required))
     precision = " ".join([sensitivity, *texts(optional)]) if optional else None
@@ -178,8 +172,7 @@ def compile_strategy(
     unknown_variant_sources = sorted(set(selected_variants) - set(sources))
     if unknown_variant_sources:
         raise ValidationError(
-            "variants were provided for unselected sources: "
-            + ", ".join(unknown_variant_sources)
+            "variants were provided for unselected sources: " + ", ".join(unknown_variant_sources)
         )
     invalid_variants = sorted(
         f"{source}={variant}"
@@ -194,16 +187,72 @@ def compile_strategy(
     if pubmed_precision:
         pubmed_precision = _append_pubmed_filters(pubmed_precision, question)
     free_text, free_text_precision = _boolean_queries(question, _free_text_group)
-    s2_bulk, s2_bulk_precision = _boolean_queries(
-        question, _s2_group, joiner=" + "
-    )
+    s2_bulk, s2_bulk_precision = _boolean_queries(question, _s2_group, joiner=" + ")
     s2_plain, s2_plain_precision = _plain_queries(question)
     strategies: dict[str, SourceStrategy] = {}
 
-    if "pubmed" in sources:
-        variant, active = _selected(
-            "pubmed", pubmed, pubmed_precision, selected_variants
+    if "europe-pmc" in sources:
+
+        def epmc_group(group: ConceptGroup) -> str:
+            return _or_group(
+                [
+                    *[f"MESH_HEADING:{_quoted(term)}" for term in group.resolved_mesh],
+                    *[f"TITLE_ABS:{_quoted(term)}" for term in group.free_terms()],
+                ]
+            )
+
+        epmc, epmc_precision = _boolean_queries(question, epmc_group)
+        if question.filters.from_date or question.filters.to_date:
+            suffix = (
+                f" AND FIRST_PDATE:[{question.filters.from_date or '1000-01-01'}"
+                f" TO {question.filters.to_date or '3000-12-31'}]"
+            )
+            epmc += suffix
+            if epmc_precision:
+                epmc_precision += suffix
+        variant, active = _selected("europe-pmc", epmc, epmc_precision, selected_variants)
+        strategies["europe-pmc"] = SourceStrategy(
+            source="europe-pmc",
+            query=epmc,
+            precision_query=epmc_precision,
+            selected_variant=variant,
+            request_parameters={"query": active},
+            warnings=[
+                "Language and publication-type filters use returned metadata when available."
+            ],
         )
+    if "clinicaltrials" in sources:
+        trial, trial_precision = free_text, free_text_precision
+        variant, active = _selected("clinicaltrials", trial, trial_precision, selected_variants)
+        degradations = [
+            _degradation(
+                "controlled_vocabulary",
+                "Registry search has no MeSH descriptor field.",
+                "Search synonyms and headings as registry text; "
+                "registrations are not publications.",
+            )
+        ]
+        if question.filters.from_date or question.filters.to_date:
+            raise ValidationError(
+                "ClinicalTrials.gov has no publication-date equivalent; exclude clinicaltrials "
+                "from the dated strategy and create a separate undated registry search."
+            )
+        if question.filters.languages or question.filters.publication_types:
+            raise ValidationError(
+                "Publication language/type filters do not apply to registrations; "
+                "use a separate unfiltered clinicaltrials strategy."
+            )
+        strategies["clinicaltrials"] = SourceStrategy(
+            source="clinicaltrials",
+            query=trial,
+            precision_query=trial_precision,
+            selected_variant=variant,
+            request_parameters={"query.term": active},
+            degradations=degradations,
+        )
+
+    if "pubmed" in sources:
+        variant, active = _selected("pubmed", pubmed, pubmed_precision, selected_variants)
         strategies["pubmed"] = SourceStrategy(
             source="pubmed",
             query=pubmed,
@@ -222,9 +271,7 @@ def compile_strategy(
             warnings=["PMC is queried directly; this is not Europe PMC."],
         )
     if "openalex" in sources:
-        variant, active = _selected(
-            "openalex", free_text, free_text_precision, selected_variants
-        )
+        variant, active = _selected("openalex", free_text, free_text_precision, selected_variants)
         parameters: dict[str, Any] = {"search": active, "cursor": "*"}
         date_filters: list[str] = []
         if question.filters.from_date:

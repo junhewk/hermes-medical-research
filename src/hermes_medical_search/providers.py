@@ -56,9 +56,7 @@ class Provider:
 class NCBIProvider(Provider):
     page_size = 200
 
-    def __init__(
-        self, session: HttpSession, credentials: Credentials, *, database: str
-    ) -> None:
+    def __init__(self, session: HttpSession, credentials: Credentials, *, database: str) -> None:
         super().__init__(session, credentials)
         self.database = database
         self.source = database
@@ -129,7 +127,7 @@ class NCBIProvider(Provider):
 
 class OpenAlexProvider(Provider):
     source = "openalex"
-    page_size = 200
+    page_size = 100
 
     def _params(self, strategy: SourceStrategy, *, cursor: str, per_page: int) -> dict[str, Any]:
         params = dict(strategy.request_parameters)
@@ -352,8 +350,10 @@ class ScopusProvider(Provider):
         entries = [item for item in result.get("entry") or [] if isinstance(item, dict)]
         records = [self._record(item) for item in entries]
         next_start = start + len(entries)
-        exhausted = not entries or next_start >= SCOPUS_MAX_START or (
-            total is not None and next_start >= total
+        exhausted = (
+            not entries
+            or next_start >= SCOPUS_MAX_START
+            or (total is not None and next_start >= total)
         )
         return Page(
             records=records,
@@ -407,9 +407,7 @@ class MeshResolver:
             return warnings
         for name, block in question.components.items():
             for group in block.groups:
-                candidates = list(
-                    dict.fromkeys([*group.candidate_mesh, group.text])
-                )[:6]
+                candidates = list(dict.fromkeys([*group.candidate_mesh, group.text]))[:6]
                 for candidate in candidates:
                     try:
                         heading = await self.resolve(candidate)
@@ -483,6 +481,11 @@ class MeshResolver:
 
 
 def provider_for(source: str, session: HttpSession, credentials: Credentials) -> Provider:
+    if source in {"europe-pmc", "clinicaltrials"}:
+        from .biomedical import ClinicalTrialsProvider, EuropePMCProvider
+
+        cls = EuropePMCProvider if source == "europe-pmc" else ClinicalTrialsProvider
+        return cls(session, credentials)
     if source in {"pubmed", "pmc"}:
         return NCBIProvider(session, credentials, database=source)
     if source == "openalex":

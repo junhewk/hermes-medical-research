@@ -66,23 +66,21 @@ class RunStore:
     def initialize(
         self, question: Question, strategy: Strategy, credentials: Credentials
     ) -> dict[str, Any]:
-        self.sources_dir.mkdir(parents=True, exist_ok=True)
-        self.write_json("question.json", question.to_dict())
-        self.write_json("strategy.json", strategy.to_dict())
         existing = self.read_json("manifest.json", default=None)
         if existing:
             if existing.get("strategy_digest") != strategy_digest(strategy):
                 raise ValueError("existing run directory belongs to a different strategy")
             return existing
+        self.sources_dir.mkdir(parents=True, exist_ok=True)
+        self.write_json("question.json", question.to_dict())
+        self.write_json("strategy.json", strategy.to_dict())
         manifest = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
             "tool_version": __version__,
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
             "mode": strategy.mode,
-            "status": (
-                "awaiting_strategy_approval" if strategy.mode == "review" else "planned"
-            ),
+            "status": ("awaiting_strategy_approval" if strategy.mode == "review" else "planned"),
             "strategy_digest": strategy_digest(strategy),
             "credentials": credentials.redacted(),
             "sources": {

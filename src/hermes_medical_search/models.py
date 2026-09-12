@@ -7,8 +7,18 @@ from typing import Any
 
 SCHEMA_VERSION = "2"
 LEGACY_SCHEMA_VERSION = "1"
-SOURCES = ("pubmed", "pmc", "openalex", "semantic-scholar", "scopus")
-CORE_SOURCES = SOURCES[:-1]
+CORE_SOURCES = ("pubmed", "pmc", "openalex", "semantic-scholar")
+SOURCES = (*CORE_SOURCES, "europe-pmc", "clinicaltrials", "scopus")
+FRAMEWORKS = {
+    "PICO": (("population", "intervention"), ("comparison", "outcome", "timepoint")),
+    "PECO": (("population", "exposure"), ("comparison", "outcome", "timepoint")),
+    "PCC": (("population", "concept"), ("context",)),
+    "DIAGNOSTIC": (("population", "index_test", "target_condition"), ("reference_standard",)),
+    "PROGNOSIS": (
+        ("population",),
+        ("prognostic_factor", "prediction_model", "outcome", "timepoint"),
+    ),
+}
 # (ISO 639-1, English name, *aliases) for the languages PubMed reports. PubMed emits ISO 639-2/B
 # ("eng", "ger", "fre"), OpenAlex emits ISO 639-1 ("en"), and users write English names, so all
 # three must normalize to one value before a language filter can compare them. Where 639-2/B and
@@ -75,17 +85,13 @@ _LANGUAGE_ALIASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("zh", "chinese", ("chi", "zho")),
 )
 LANGUAGE_CODES = {
-    alias: code
-    for code, name, aliases in _LANGUAGE_ALIASES
-    for alias in (name, code, *aliases)
+    alias: code for code, name, aliases in _LANGUAGE_ALIASES for alias in (name, code, *aliases)
 }
 # PubMed's [Language] field matches the full English name only: "eng"[Language] and
 # "en"[Language] both return zero results silently, so a code must be expanded before it is
 # compiled into a query.
 LANGUAGE_NAMES = {
-    alias: name
-    for code, name, aliases in _LANGUAGE_ALIASES
-    for alias in (name, code, *aliases)
+    alias: name for code, name, aliases in _LANGUAGE_ALIASES for alias in (name, code, *aliases)
 }
 # PubMed's "undetermined" and "multiple languages" markers carry no filterable language, so they
 # normalize to the empty string and _passes_filters treats them as missing metadata rather than
@@ -157,12 +163,8 @@ class ConceptGroup:
             label=label,
             text=text,
             synonyms=_strings(data.get("synonyms"), f"{field_name}.synonyms"),
-            candidate_mesh=_strings(
-                data.get("candidate_mesh"), f"{field_name}.candidate_mesh"
-            ),
-            resolved_mesh=_strings(
-                data.get("resolved_mesh"), f"{field_name}.resolved_mesh"
-            ),
+            candidate_mesh=_strings(data.get("candidate_mesh"), f"{field_name}.candidate_mesh"),
+            resolved_mesh=_strings(data.get("resolved_mesh"), f"{field_name}.resolved_mesh"),
         )
 
     def free_terms(self) -> list[str]:
@@ -227,9 +229,7 @@ class SearchFilters:
             from_date=_date(data.get("from_date"), "filters.from_date"),
             to_date=_date(data.get("to_date"), "filters.to_date"),
             languages=_strings(data.get("languages"), "filters.languages"),
-            publication_types=_strings(
-                data.get("publication_types"), "filters.publication_types"
-            ),
+            publication_types=_strings(data.get("publication_types"), "filters.publication_types"),
         )
         if result.from_date and result.to_date and result.from_date > result.to_date:
             raise ValidationError("filters.from_date must not be after filters.to_date")
@@ -249,30 +249,41 @@ class Question:
     sources: list[str] = field(default_factory=list)
     exclude_sources: list[str] = field(default_factory=list)
     migrated_from_schema: str | None = field(default=None, repr=False)
+    search_components: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> Question:
         if not isinstance(data, dict):
             raise ValidationError("question input must be a JSON object")
         input_version = str(data.get("schema_version", ""))
-        if input_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        if input_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, "3"}:
             raise ValidationError(
-                f"unsupported schema_version {input_version!r}; expected '1' or '2'"
+                f"unsupported schema_version {input_version!r}; expected '1', '2', or '3'"
             )
         framework = str(data.get("framework", "")).upper()
-        if framework not in {"PICO", "PCC"}:
-            raise ValidationError("framework must be PICO or PCC")
+        allowed = FRAMEWORKS if input_version == "3" else {"PICO", "PCC"}
+        if framework not in allowed:
+            raise ValidationError(f"unsupported framework {framework!r} for schema {input_version}")
         question = str(data.get("question", "")).strip()
         if not question:
             raise ValidationError("question is required")
         raw_components = data.get("components")
         if not isinstance(raw_components, dict):
             raise ValidationError("components must be an object")
-        required = ("population", "intervention") if framework == "PICO" else (
-            "population",
-            "concept",
+        required = (
+            ("population", "intervention")
+            if framework == "PICO"
+            else (
+                "population",
+                "concept",
+            )
         )
         optional = ("comparison", "outcome") if framework == "PICO" else ("context",)
+        if input_version == "3":
+            required, optional = FRAMEWORKS[framework]
+            unknown = set(raw_components) - set(required) - set(optional)
+            if unknown:
+                raise ValidationError(f"unknown components: {', '.join(sorted(unknown))}")
         components: dict[str, ConceptBlock] = {}
         for name in (*required, *optional):
             if name in raw_components and raw_components[name] not in (None, ""):
@@ -283,21 +294,34 @@ class Question:
                 raise ValidationError(f"components.{name} is required for {framework}")
         sources = _validate_sources(data.get("sources", []), "sources")
         excluded = _validate_sources(data.get("exclude_sources", []), "exclude_sources")
+        search_components = _strings(data.get("search_components"), "search_components")
+        if input_version == "3":
+            defaults = list(required)
+            if framework == "DIAGNOSTIC":
+                defaults = ["index_test", "target_condition"]
+            if framework == "PROGNOSIS":
+                defaults += [
+                    key for key in ("prognostic_factor", "prediction_model") if key in components
+                ]
+            search_components = search_components or defaults
+            if set(search_components) - set(components):
+                raise ValidationError("search_components must name defined components")
         return cls(
-            schema_version=SCHEMA_VERSION,
+            schema_version="3" if input_version == "3" else SCHEMA_VERSION,
             framework=framework,
             question=question,
             components=components,
             filters=SearchFilters.from_dict(data.get("filters")),
             sources=sources,
             exclude_sources=excluded,
+            search_components=search_components,
             migrated_from_schema=(
-                input_version if input_version != SCHEMA_VERSION else None
+                input_version if input_version == LEGACY_SCHEMA_VERSION else None
             ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "framework": self.framework,
             "question": self.question,
@@ -306,6 +330,9 @@ class Question:
             "sources": self.sources,
             "exclude_sources": self.exclude_sources,
         }
+        if self.schema_version == "3":
+            result["search_components"] = self.search_components
+        return result
 
 
 @dataclass(slots=True)
@@ -414,9 +441,7 @@ class Strategy:
         if mode not in {"quick", "review"}:
             raise ValidationError("mode must be quick or review")
         limit: int | str = data.get("limit_per_source", 0)
-        if limit != "all" and (
-            not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0
-        ):
+        if limit != "all" and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
             raise ValidationError("limit_per_source must be a positive integer or 'all'")
         strategies = {
             name: SourceStrategy.from_dict(value)

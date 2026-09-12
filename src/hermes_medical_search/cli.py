@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
@@ -29,8 +30,8 @@ from .query import compile_strategy, default_sources
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hermes-medical-search",
-        description="Plan and run reproducible PICO/PCC medical-literature searches.",
+        prog="medical-deep-research-plugin",
+        description="Headless medical literature search and evidence research workflows.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -44,9 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_question_arguments(plan, review_mode=True)
     plan.add_argument("--json", action="store_true", help="Emit the complete plan as JSON")
 
-    approve = commands.add_parser(
-        "approve", help="Record approval of an exact review strategy"
-    )
+    approve = commands.add_parser("approve", help="Record approval of an exact review strategy")
     approve.add_argument("run_dir", type=Path)
     approve.add_argument(
         "--strategy-digest",
@@ -67,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="Plan and execute a bounded quick search")
     _add_question_arguments(run, review_mode=False)
+    from medical_deep_research_plugin.commands import add_commands
+
+    add_commands(commands)
     return parser
 
 
@@ -87,6 +89,9 @@ def _add_question_arguments(parser: argparse.ArgumentParser, *, review_mode: boo
         help="Select sensitivity or precision independently for a source; repeatable",
     )
     parser.add_argument("--no-mesh", action="store_true", help="Skip online MeSH resolution")
+    parser.add_argument(
+        "--research-run", type=Path, help="Bind this search to a research protocol and budget"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -102,6 +107,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "research":
+        from medical_deep_research_plugin.commands import dispatch
+
+        return await dispatch(args)
     if args.command == "doctor":
         return await _doctor(args)
     if args.command == "plan":
@@ -148,7 +157,10 @@ async def _create_plan(
     question = _load_question(args.input)
     credentials = Credentials.from_env()
     supplied_from_date = bool(question.filters.from_date)
-    if mode == "quick" and not question.filters.from_date:
+    apply_date_default = (
+        mode == "quick" and question.schema_version != "3" and not question.filters.from_date
+    )
+    if apply_date_default:
         question.filters.from_date = _years_ago(date.today(), 3).isoformat()
     limit = _parse_limit(args.limit_per_source, mode=mode)
     sources = _select_sources(question, credentials, args.sources, args.exclude)
@@ -177,13 +189,27 @@ async def _create_plan(
             "Question schema v1 was upgraded to schema v2 by wrapping each component "
             "in one labeled group."
         )
-    if mode == "quick" and not supplied_from_date:
+    if apply_date_default and not supplied_from_date:
         strategy.warnings.append(
             f"Quick mode applied its visible three-year default from {question.filters.from_date}."
         )
-    run_path = args.output or run_directory(Path.cwd() / "runs", question)
+    research_path = getattr(args, "research_run", None)
+    if research_path:
+        from uuid import uuid4
+
+        from medical_deep_research_plugin.workspace import Workspace
+
+        workspace = Workspace(research_path)
+        run_path = args.output or workspace.path / "searches" / ("search-" + uuid4().hex[:12])
+        with workspace.lock:
+            workspace.reserve(run_path, strategy)
+    else:
+        run_path = args.output or run_directory(Path.cwd() / "runs", question)
     store = RunStore(run_path.resolve())
-    store.initialize(question, strategy, credentials)
+    manifest = store.initialize(question, strategy, credentials)
+    if research_path:
+        manifest["research_parent"] = os.path.relpath(research_path.resolve(), store.path)
+        store.write_manifest(manifest)
     return store.path, strategy
 
 
@@ -292,8 +318,7 @@ async def _approve_command(run_dir: Path, supplied_digest: str) -> int:
             "strategy_digest": current_digest,
             "approved_at": datetime.now(UTC).isoformat(),
             "selected_variants": {
-                source: item.selected_variant
-                for source, item in strategy.strategies.items()
+                source: item.selected_variant for source, item in strategy.strategies.items()
             },
         },
         "all_results": None,
@@ -317,9 +342,7 @@ def _load_run(store: RunStore) -> tuple[Strategy, dict[str, Any]]:
     return strategy, manifest
 
 
-def _require_strategy_approval(
-    store: RunStore, strategy: Strategy
-) -> dict[str, Any]:
+def _require_strategy_approval(store: RunStore, strategy: Strategy) -> dict[str, Any]:
     approval = store.read_json("approval.json", default=None)
     if not isinstance(approval, dict):
         raise ValueError("review strategy has not been approved")
@@ -362,6 +385,7 @@ async def _doctor(args: argparse.Namespace) -> int:
             sources=selected,
         )
         async with _session(credentials) as session:
+
             async def check(source: str) -> tuple[str, str | None, int | None]:
                 try:
                     count = await provider_for(source, session, credentials).count(
@@ -454,9 +478,7 @@ def _parse_sources(raw: str) -> list[str]:
     return values
 
 
-def _parse_variants(
-    values: list[str], *, sources: list[str], precision: bool
-) -> dict[str, str]:
+def _parse_variants(values: list[str], *, sources: list[str], precision: bool) -> dict[str, str]:
     if precision and values:
         raise ValidationError("--precision cannot be combined with --variant")
     if precision:
@@ -466,13 +488,16 @@ def _parse_variants(
         source, separator, variant = raw.partition("=")
         source = source.strip().casefold()
         variant = variant.strip().casefold()
-        if not separator or source not in SOURCES or variant not in {
-            "sensitivity",
-            "precision",
-        }:
-            raise ValidationError(
-                "--variant must use SOURCE=sensitivity or SOURCE=precision"
-            )
+        if (
+            not separator
+            or source not in SOURCES
+            or variant
+            not in {
+                "sensitivity",
+                "precision",
+            }
+        ):
+            raise ValidationError("--variant must use SOURCE=sensitivity or SOURCE=precision")
         if source not in sources:
             raise ValidationError(f"--variant source is not selected: {source}")
         if source in variants:

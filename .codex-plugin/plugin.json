@@ -1,0 +1,18 @@
+{
+  "name": "medical-deep-research-plugin",
+  "version": "0.3.0",
+  "description": "Headless evidence-based medical research for Codex, Claude Code, and Hermes.",
+  "author": {"name": "Junhewk", "url": "https://github.com/junhewk"},
+  "repository": "https://github.com/junhewk/medical-deep-research-plugin",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Medical Deep Research",
+    "shortDescription": "Search, appraise, and synthesize medical evidence",
+    "longDescription": "Create traceable medical evidence reports and review-preparation records using your host agent and an on-demand Python CLI. Supports a fully headless workflow.",
+    "developerName": "Junhewk",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Create a medical evidence report for my research question.", "Prepare an auditable literature review search."]
+  }
+}

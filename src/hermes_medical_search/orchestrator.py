@@ -67,6 +67,19 @@ async def execute_search(
     preflight_result: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = store.initialize(strategy.question, strategy, credentials)
+    if manifest.get("research_parent"):
+        from medical_deep_research_plugin.workspace import Workspace
+
+        parent = Workspace(store.path / manifest["research_parent"])
+        key = strategy_digest(strategy)
+        with parent.lock:
+            entry = parent.load()["searches"].get(key)
+            if not entry:
+                raise ValueError("research search has no matching budget reservation")
+            if manifest["status"] != "complete":
+                parent.reserve(store.path, strategy)
+            else:
+                parent.check_budget(entry["allocation"], excluding=key)
     manifest["status"] = "running"
     store.write_manifest(manifest)
     lock = asyncio.Lock()
@@ -164,6 +177,7 @@ async def _retrieve_source(
 ) -> None:
     limit = strategy.limit_per_source
     target = None if limit == "all" else int(limit)
+    raw_budget = bool(store.read_json("manifest.json").get("research_parent"))
     retained = int(state.get("retained") or 0)
     retrieved = int(state.get("retrieved") or 0)
     filtered_out = int(state.get("filtered_out") or 0)
@@ -173,9 +187,11 @@ async def _retrieve_source(
         state["resume_discarded_records"] = discarded
     # A resumed cursor has already been served once; it must count toward loop detection.
     seen_cursors: set[str] = {str(cursor)} if cursor is not None else set()
-    while target is None or retained < target:
-        page_size = provider.page_size if target is None else min(
-            provider.page_size, max(target - retained, 1)
+    while target is None or (retrieved if raw_budget else retained) < target:
+        page_size = (
+            provider.page_size
+            if target is None
+            else min(provider.page_size, max(target - (retrieved if raw_budget else retained), 1))
         )
         page = await provider.fetch_page(strategy.strategies[source], cursor, page_size)
         records = page.records

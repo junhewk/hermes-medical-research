@@ -56,7 +56,7 @@ def test_skill_metadata_and_progressive_disclosure() -> None:
 def test_skill_pins_the_current_release() -> None:
     """The pin must track __version__ so a release bump cannot leave the skill on a stale tag."""
     content = SKILL_MD.read_text(encoding="utf-8")
-    pins = set(re.findall(r"hermes-medical-search\.git@(v[^\s]+)", content))
+    pins = set(re.findall(r"medical-deep-research-plugin\.git@(v[^\s]+)", content))
     assert pins == {f"v{__version__}"}
 
 

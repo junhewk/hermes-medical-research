@@ -72,11 +72,7 @@ def deduplicate(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         strong_roots = [
             root
             for root in roots
-            if any(
-                _strong_keys(prepared[index])
-                for index in indices
-                if find(index) == root
-            )
+            if any(_strong_keys(prepared[index]) for index in indices if find(index) == root)
         ]
         weak_roots = [root for root in roots if root not in strong_roots]
         if len(strong_roots) == 1:
@@ -119,9 +115,7 @@ def rank_records(
         )
         relevance, group_relevance = _relevance_details(record, question)
         if question.framework == "PICO":
-            base = evidence * (0.30 / 0.85) + citation * (0.15 / 0.85) + recency * (
-                0.40 / 0.85
-            )
+            base = evidence * (0.30 / 0.85) + citation * (0.15 / 0.85) + recency * (0.40 / 0.85)
             # Retained verbatim for artifact stability: the journal bonus this name refers to was
             # removed before v0.2.0 and no longer exists anywhere in the scorer.
             profile = "pico-clinical-no-journal-bonus"
@@ -139,9 +133,7 @@ def rank_records(
             "citation_score": round(citation, 6),
             "recency_score": round(recency, 6),
             "relevance_score": round(relevance, 6),
-            "group_relevance": {
-                key: round(value, 6) for key, value in group_relevance.items()
-            },
+            "group_relevance": {key: round(value, 6) for key, value in group_relevance.items()},
             "base_score": round(base, 6),
             "composite_score": round(composite, 6),
             "disclaimer": (
@@ -205,9 +197,7 @@ def citation_score(value: Any) -> float:
     return min(math.log(count + 1) / math.log(1000), 1.0) if count > 0 else 0.0
 
 
-def recency_score(
-    value: Any, *, half_life_years: int, today: date | None = None
-) -> float:
+def recency_score(value: Any, *, half_life_years: int, today: date | None = None) -> float:
     parsed = _parse_date(value)
     if parsed is None:
         return 0.5
@@ -237,19 +227,20 @@ def _relevance_details(
     all_terms = [term for block in question.components.values() for term in _block_terms(block)]
     query_score = _terms_score(all_terms, haystack, tokens)
     group_scores = {
-        f"{component}.{group.label}": _terms_score(
-            _group_terms(group), haystack, tokens
-        )
+        f"{component}.{group.label}": _terms_score(_group_terms(group), haystack, tokens)
         for component, block in question.components.items()
         for group in block.groups
     }
-    population = _component_score(
-        question.components["population"], "population", group_scores
-    )
+    if question.schema_version == "3":
+        selected = [
+            score
+            for key, score in group_scores.items()
+            if key.split(".", 1)[0] in question.search_components
+        ]
+        return min(selected, default=0.0) * 0.7 + query_score * 0.3, group_scores
+    population = _component_score(question.components["population"], "population", group_scores)
     if question.framework == "PICO":
-        focus = _component_score(
-            question.components["intervention"], "intervention", group_scores
-        )
+        focus = _component_score(question.components["intervention"], "intervention", group_scores)
         optional_scores = [
             _component_score(question.components[name], name, group_scores)
             for name in ("comparison", "outcome")
@@ -260,9 +251,7 @@ def _relevance_details(
         if focus == 0.0:
             relevance = min(relevance, 0.28)
     else:
-        focus = _component_score(
-            question.components["concept"], "concept", group_scores
-        )
+        focus = _component_score(question.components["concept"], "concept", group_scores)
         context = (
             _component_score(question.components["context"], "context", group_scores)
             if "context" in question.components
@@ -310,10 +299,17 @@ def _merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     )
     for name in ("publication_types", "mesh_terms"):
         result[name] = list(dict.fromkeys([*(result.get(name) or []), *(right.get(name) or [])]))
+    for name in ("trial_ids", "related_pmids"):
+        if name in left or name in right:
+            result[name] = list(dict.fromkeys([*(left.get(name) or []), *(right.get(name) or [])]))
+    if "is_retracted" in left or "is_retracted" in right:
+        result["is_retracted"] = bool(left.get("is_retracted") or right.get("is_retracted"))
     return result
 
 
 def _strong_keys(record: dict[str, Any]) -> list[str]:
+    if record.get("record_kind") == "registration":
+        return [f"nct:{record['nct_id']}"] if record.get("nct_id") else []
     return [
         key
         for key in (
@@ -327,10 +323,13 @@ def _strong_keys(record: dict[str, Any]) -> list[str]:
 
 def _title_year_key(record: dict[str, Any]) -> str:
     title = re.sub(r"[^a-z0-9]+", " ", str(record.get("title") or "").casefold()).strip()
-    return f"{title}:{record.get('year') or ''}" if title else ""
+    prefix = "registration:" if record.get("record_kind") == "registration" else ""
+    return f"{prefix}{title}:{record.get('year') or ''}" if title else ""
 
 
 def _canonical_id(record: dict[str, Any], index: int) -> str:
+    if record.get("record_kind") == "registration" and record.get("nct_id"):
+        return f"nct:{record['nct_id']}"
     if record.get("doi"):
         return f"doi:{record['doi']}"
     if record.get("pmid"):

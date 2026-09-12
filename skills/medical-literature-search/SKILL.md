@@ -8,7 +8,7 @@ description: Structures simple or compound PICO/PCC questions, compiles transpar
 Use the pinned, on-demand CLI. Do not start an MCP server:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search --help
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search --help
 ```
 
 Read [question-schema.md](references/question-schema.md) when converting a question to JSON. Read
@@ -18,7 +18,7 @@ degradations, obtaining review approval, resuming work, or interpreting artifact
 Check access before a first run or after any source failure; it needs no run directory:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search doctor --json
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search doctor --json
 ```
 
 ## Choose the workflow
@@ -45,7 +45,7 @@ uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 herme
 Run from the chosen working directory:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search run question.json
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search run question.json
 ```
 
 Quick mode defaults to 20 retained records per source and a visible three-year date bound. Continue
@@ -56,7 +56,7 @@ after provider failure, but report the run directory and every omitted or failed
 1. Require an explicit per-source limit or `all`. Generate but do not retrieve:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search plan question.json --mode review --limit-per-source 100 --json
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search plan question.json --mode review --limit-per-source 100 --json
 ```
 
 2. Show the grouped question, exact source queries, selected per-source variants, filters,
@@ -64,21 +64,21 @@ uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 herme
 3. After explicit approval, bind it to the displayed digest:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search approve <run-dir> --strategy-digest <sha256>
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search preflight <run-dir>
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search approve <run-dir> --strategy-digest <sha256>
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search preflight <run-dir>
 ```
 
 4. Stop if any source is unavailable. Otherwise retrieve:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search search <run-dir>
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search search <run-dir>
 ```
 
 5. For `all`, show the preflight counts and obtain a second explicit confirmation first, then pass
    the preflight token:
 
 ```bash
-uvx --from git+https://github.com/junhewk/hermes-medical-search.git@v0.2.1 hermes-medical-search search <run-dir> --confirm-all TOKEN
+uvx --from git+https://github.com/junhewk/medical-deep-research-plugin.git@v0.3.0 hermes-medical-search search <run-dir> --confirm-all TOKEN
 ```
 
 6. Re-run the same search command to resume a checkpointed retrieval; never edit `strategy.json`.
