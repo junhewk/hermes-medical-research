@@ -42,6 +42,7 @@ jobs:
             hermes_cli
             tools
             agent
+            gateway
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
