@@ -31,7 +31,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "jsonschema>=4", "pyyam
 packages = ["src/hermes_medical_search", "src/medical_deep_research_plugin"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "skills", "scripts", "examples", "tests", ".codex-plugin", ".claude-plugin", "plugin.json", "README.md", "LICENSE", "CHANGELOG.md", "VALIDATION.md", "pyproject.toml", "uv.lock"]
+include = ["hooks", "agents", "src", "skills", "scripts", "examples", "tests", ".codex-plugin", ".claude-plugin", "plugin.json", "plugin.yaml", "__init__.py", "README.md", "LICENSE", "CHANGELOG.md", "VALIDATION.md", "pyproject.toml", "uv.lock"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

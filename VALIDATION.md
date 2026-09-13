@@ -1,65 +1,66 @@
 # Release candidate validation: 0.4.0
 
-Validation began on 2026-09-13 on headless Linux. **Release qualification is still pending.**
-The behavioral candidate is `7ba0983` in the isolated test checkout (the same code was applied to
-the main checkout as `2f92adc`). Production gateway settings and the original hypertension draft
-were not changed.
+Status on 2026-09-14: **release withheld**. Draft PR:
+https://github.com/junhewk/medical-deep-research-plugin/pull/1
+Production Hermes and the original hypertension report remain unchanged.
 
-- All 153 deterministic tests pass. They cover the earlier workflow contracts plus atomic batch
-  submission, aggregate validation, pending/unavailable assessment, estimate and harms semantics,
-  source-grounded overlap mappings, review freshness and resumable finalization.
-- Ruff, bundle consistency, Codex plugin validation and the report skill validator pass.
-- The pinned Hermes integration passes installation scanning with the unchanged Plugin Guard
-  policy (`safe`, 32 medium and one low finding), disabled/enabled discovery, short-name index,
-  qualified and bare-name loading, reference serving and slash invocation. This is a loader test,
-  separate from model-driven report qualification.
-- Wheel, source distribution and plugin ZIP build. Their contents were checked for local sessions,
-  credentials, caches, test-run artifacts and unrelated workspace state; none were included.
+## Why separate native review is required
 
-The initial candidate (`0d69a7a`, applied as `bc124a9`) completed these behavioral runs:
+The previous self-review candidate (`c7b42d9` in the test checkout, `e4b2f27` in the
+main checkout) passed 155 deterministic tests and CI on Python 3.11/3.12, but failed
+semantic qualification. All three final Qwen runs produced the 11 artifacts:
 
-| Host | Completion | Review result |
-| --- | --- | --- |
-| Codex 0.154.0 | 34 terminal calls; 17 extractions; all 11 artifacts | Key fixture distinctions preserved |
-| Claude Code 2.1.268 / Opus 5 | 94 host turns; 18 extractions; all 11 artifacts | Self-review corrected two unsupported premises before export |
-| Hermes 0.21.2 / qwen3.8-flash-next, repeat 1 | 53 model calls / 59 tool calls; all 11 artifacts | Failed semantic qualification: assumed outcome-pool membership entered certainty reasons |
-| Same Hermes, repeat 2 | 51 model calls / 58 tool calls; all 11 artifacts | The same unsupported outcome-pool inference remained |
-| Same Hermes, repeat 3 | 53 model calls / 56 tool calls; all 11 artifacts | Unsupported certainty reasoning and overstatement in prose remained |
+| Hermes / qwen3.8-flash-next | Model calls | Tool calls | Outcome |
+| --- | ---: | ---: | --- |
+| repeat 1 | 68 | 74 | Completed; not independently medically validated |
+| repeat 2 | 68 | 71 | Failed: assumed DBP pool membership in GRADE; false absence of isometric trial |
+| repeat 3 | 58 | 68 | Failed: unverified DBP pool membership in certainty rationale; overstated harms counts |
 
-All Hermes tests kept `max_turns=150`. Completion alone did not qualify the initial candidate for
-release. These failures led to explicit source-grounded review-versus-outcome membership mappings
-and stronger review of factual premises in certainty, alignment, overlap and weighting rationales.
-Fresh Codex, Claude Code and three sequential Hermes runs of the corrected candidate are pending.
+Each incorrect premise passed that author's self-review. File completion, quoted text and
+structural consistency therefore cannot serve as semantic acceptance criteria.
+Codex's revised fixture run completed in 38 terminal calls; Claude's final run in 84 host
+turns. Both preserved the main fixture distinctions. A bounded live-source Codex run
+produced 11 files, with six online identity checks and explicit unavailable evidence limits.
+These results establish workflow behavior, not medical correctness. Europe PMC citation
+traversal returned 503 maintenance; successful live traversal is not claimed.
 
-A separate bounded live-source Codex run completed in 61 terminal calls on the initial candidate.
-It retrieved 54 raw / 50 deduplicated records from Europe PMC, OpenAlex and ClinicalTrials.gov,
-screened all 50, selected six of 12 included records for detailed assessment, recorded 21 extractions,
-and produced all 11 artifacts with six citation identities verified online. The run preserved its
-20-record/source and eight-full-text ceilings (six attempts used). It qualified its conclusions:
-four full texts were unavailable, six included records were deferred, one eligibility decision was
-uncertain, and important harms and applicability gaps remained. This bounded run is workflow
-evidence, not an exhaustive or independently adjudicated medical review.
+## Native reviewer revision (in progress)
 
-Live connectivity checks also retrieved Europe PMC literature, an OA XML article, Crossref DOI
-metadata and a ClinicalTrials.gov record. Europe PMC citation traversal returned HTTP 503 maintenance
-after four attempts. No successful live citation traversal is claimed.
+The replacement freezes every finding and the complete corpus, omits prior reviews/chat,
+requires a distinct native task identity, and gates finalization on its recorded verdict.
+A persistent shared budget charges author work, reviewers and retries; unknown termination
+retains reservations. Hermes uses native iterations with code refunds disabled; Codex/Claude
+conservatively count local tool calls through native lifecycle hooks. The latter is explicitly
+not an API-request or hosted-web-tool cap. No new model API setup is introduced.
 
-## Reproducing the behavioral corpus
+The first isolated native Claude reviewer found unsupported statements that self-review had
+accepted. Its long JSON handoff was truncated, so the adapter correctly did not accept it.
+The first isolated Hermes reviewer found several errors but missed the DBP certainty premise;
+it also hit the host's 420-second synchronous tool timeout. These are failed integration/
+quality probes, not release passes. The revision now gives each reviewer a dedicated result
+file, highlights outcome-specific membership, and uses bounded asynchronous Hermes polling.
+New frozen integration and semantic tests are required before release.
+
+Regression tests cover distinct author/reviewer identities, whole-corpus freshness, missing
+and invalid native output, quote checks, budget reservations, overruns, interrupted/resumed
+accounting, per-session Hermes caps, native hook identities, duplicate events and restricted
+reviewer file access. Current test counts and host results must be updated after the final
+candidate is frozen. Do not promote this draft based on historical green CI alone.
+
+## Reproducing behavioral qualification
 
 Run `uv run python scripts/behavioral_fixture.py /tmp/mdr-eval/HOST-RUN` in a clean checkout.
-It initializes `HOST-RUN/run` with eight explicitly synthetic records and stored source documents.
-Use a fresh headless host session with the candidate skill and matching installed CLI. Ask it to
-create the hypertension/exercise report, compare benefits and harms, explain disagreements and
-export Markdown, HTML and evidence tables. State that retrieval is frozen, online identity checks
-are disabled (`finalize --offline`), all outputs must be labeled simulated, and writes belong only
-in the test directory. The host must perform its own screening, appraisal, synthesis and review.
-Do not correct its evidence files manually or count a resumed/repaired run as a fresh pass.
+Use the matching installed CLI and skill, native reviewer tools/hooks, a fresh author session,
+and a shared 150-unit total. The eight-record corpus is explicitly synthetic. Freeze retrieval,
+use `finalize --offline`, label outputs simulated, and write only in the test directory.
+The author must perform screening, appraisal, synthesis, native review, corrections and export.
+Do not manually correct evidence or count a repaired/resumed run as a fresh pass.
 
-Inspect the actual exports as well as completion status. Check group means versus treatment effects,
-within-arm changes, active comparators, credible intervals, missing harms versus zero events,
-comparator-arm event attribution, overlapping reviews, unknown outcome-pool membership, unsupported
-GRADE premises, modality rankings, and the absence of equivalence or safety claims from null/missing
-data. Synthetic acceptance testing cannot establish medical accuracy or replace human adjudication.
+Inspect the actual reports for group means versus contrasts, within-arm changes, active
+comparators, interval types, missing harms versus zero events, comparator event attribution,
+review overlap, unknown outcome pools, GRADE premises and unsupported superiority/equivalence.
+Record author plus all reviewer usage and retry costs. Three fresh Qwen report passes,
+Codex/Claude native integration, package checks and a bounded live-source run remain release gates.
 
 # Hermes short-name integration correction
 

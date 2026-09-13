@@ -9,7 +9,7 @@ record the host agent's assessments, and export a cited report.
 - **medical-literature-search**: reproducible literature retrieval without report generation.
 
 The host agent performs the reasoning. Version 0.4 adds source packets, atomic batch submissions,
-a separate claim-review stage, and one-command finalization. The CLI validates references and quotes, manages budgets
+a separate native reviewer, a shared author/reviewer budget, and one-command finalization. The CLI validates references and quotes, manages budgets
 and resumable artifacts, and renders the result. No MCP server or separate model API key is needed.
 This replaces `hermes-medical-search`; the desktop
 [medical-deep-research](https://github.com/junhewk/medical-deep-research) application remains separate.
@@ -72,18 +72,13 @@ Then invoke `/medical-deep-research` followed by the report request, or ask Herm
 session's prompt is next built; the slash command explicitly loads the instructions in the current
 chat. A gateway restart is not needed for this external-directory setup.
 
-Hermes also retains an internal portable-plugin identifier:
-
-```text
-agent-plugin-medical-deep-research-plugin-71b62b59:medical-deep-research
-```
-
-This generated namespace is normal. **Installing and enabling a portable plugin alone does not put
-its skills in Hermes's startup skill index or expose bare names.** Without `external_dirs`, discover
-the qualified name using `skills_list` and load it with `skill_view`; the bare name won't resolve.
-The namespace can differ if the installed directory key differs. Portable-plugin registration is
-cached by the hosting process; `/reload-skills` refreshes the configured skill directories, not that
-plugin registry.
+Version 0.4 adds a native Hermes adapter. Doctor should report two tools
+(`medical_research_session`, `medical_research_review`) and one `pre_tool_call` hook.
+The native qualified skill is `medical-deep-research-plugin:medical-deep-research`.
+Older portable installations used `agent-plugin-medical-deep-research-plugin-71b62b59:`;
+that namespace is historical, not another Hermes installation. The short name still uses
+`skills.external_dirs`. Reloading skills refreshes instructions, not already imported Python
+plugin code; verify the two native tools in the actual chat before starting research.
 
 The external-directory setting activates the instructions independently of the plugin registry.
 Remove its entry as well when deactivating these skills. Local skills with the same name take
@@ -122,7 +117,9 @@ Then give the task and settings, for example:
 > and export Markdown, HTML, and the evidence tables.
 > Use report mode, a PICO protocol, English output, no publication-date restriction, the default
 > available sources, up to 100 raw records per source, and up to 30 full-text attempts. Show the
-> effective settings and source availability before retrieval. Save the run to
+> effective settings and source availability before retrieval. Use a separate native reviewer,
+> inherit the host model/authentication, and share a total budget of 150 across author and reviewers.
+> Save the run to
 > `runs/exercise-hypertension`.
 
 These are **per-report settings**, saved in the run's immutable protocol. There is no separate
@@ -131,6 +128,11 @@ and filters in the protocol JSON; set mode, language, budgets, and destination t
 `research init` options. Credentials come from the host environment. The skill translates the
 request into those inputs and reports unavailable sources. To change a saved protocol or budget,
 initialize a new run.
+
+The report also requires a working native review adapter. See
+[native review and budget settings](skills/medical-deep-research/references/native-review.md).
+A saved self-review cannot satisfy this requirement, and a changed candidate requires another
+review. No additional model API key is used.
 
 Supported frameworks: **PICO** (interventions), **PECO** (exposures/harms), **DIAGNOSTIC**,
 **PROGNOSIS**, and **PCC** (scoping). Search components are explicit: sensitive PICO retrieval

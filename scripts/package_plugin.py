@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     "plugin.json",
+    "plugin.yaml",
+    "__init__.py",
     "pyproject.toml",
     "uv.lock",
     "README.md",
@@ -17,7 +19,16 @@ FILES = (
     "CHANGELOG.md",
     "VALIDATION.md",
 )
-DIRECTORIES = (".codex-plugin", ".claude-plugin", "skills", "src", "examples", "scripts")
+DIRECTORIES = (
+    ".codex-plugin",
+    ".claude-plugin",
+    "skills",
+    "src",
+    "examples",
+    "scripts",
+    "hooks",
+    "agents",
+)
 
 
 def package(root: Path = ROOT, output: Path | None = None) -> Path:

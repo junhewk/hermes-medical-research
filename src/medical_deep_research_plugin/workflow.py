@@ -288,6 +288,9 @@ async def finalize(
     if not verification["ready"]:
         return {"completed": False, "verification": verification}
     artifacts = export(workspace)
+    from .native_review import STATE, budget_status
+
+    native = workspace.store.read_json(STATE, default=None)
     completion = {
         "schema_version": "2",
         "completed": True,
@@ -302,8 +305,9 @@ async def finalize(
         },
         "warnings": artifacts["warnings"],
         "checked_at": verification["checked_at"],
+        "native_review_budget": budget_status(native) if native else None,
         "citation_verification": {rid: v["status"] for rid, v in verification["identity"].items()},
-        "claim_review": "recorded-host-review"
+        "claim_review": "separate-native-host-review"
         if workspace.evidence_version == "2"
         else "legacy-unreviewed",
     }

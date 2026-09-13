@@ -27,7 +27,16 @@ DEPENDENCIES = {
     "appraisals": ("extractions",),
     "coverage": ("records", "screening"),
     "synthesis": ("extractions", "appraisals", "studies"),
-    "reviews": ("synthesis", "extractions", "appraisals", "studies", "documents"),
+    "reviews": (
+        "synthesis",
+        "extractions",
+        "appraisals",
+        "studies",
+        "documents",
+        "records",
+        "screening",
+        "coverage",
+    ),
 }
 ID_FIELDS = {
     "records": "record_id",

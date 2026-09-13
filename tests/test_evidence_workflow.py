@@ -81,29 +81,58 @@ def modern_workspace(tmp_path):
 
 
 def record_reviews(workspace):
-    workspace.put(
-        "reviews",
-        {
-            "schema_version": "2",
-            "records": [
-                {
-                    "finding_id": f["finding_id"],
-                    "review_digest": review_digest(workspace, f),
-                    "status": "pass",
-                    "checks": {
-                        k: {
-                            "status": "pass",
-                            "rationale": (
-                                "Reviewed synthetic claim against its source; methods limitations "
-                                "remain explicit."
-                            ),
-                        }
-                        for k in REVIEW_CHECKS
-                    },
-                }
-                for f in workspace.read("synthesis")["findings"]
-            ],
-        },
+    payload = {
+        "schema_version": "2",
+        "records": [
+            {
+                "finding_id": f["finding_id"],
+                "review_digest": review_digest(workspace, f),
+                "status": "pass",
+                "checks": {
+                    k: {
+                        "status": "pass",
+                        "rationale": (
+                            "Reviewed synthetic claim against its source; methods limitations "
+                            "remain explicit."
+                        ),
+                    }
+                    for k in REVIEW_CHECKS
+                },
+            }
+            for f in workspace.read("synthesis")["findings"]
+        ],
+    }
+    from medical_deep_research_plugin import native_review
+
+    state = workspace.store.read_json(native_review.STATE, default={})
+    native_review.bind(
+        workspace,
+        host="hermes",
+        author_session_id="fixture-author",
+        total_turns=150,
+        used_turns=10,
+        unit="fixture turns",
+    )
+    task = native_review.prepare(workspace, author_session_id="fixture-author", review_turns=5)
+    for row in payload["records"]:
+        row["observations"] = [
+            {
+                "check": c,
+                "field": "conclusion",
+                "assertion": "Synthetic claim",
+                "verdict": "supported",
+                "rationale": "Fixture source checked",
+                "sources": [],
+            }
+            for c in REVIEW_CHECKS
+        ]
+    native_review.finish(
+        workspace,
+        task_id=task["task_id"],
+        reviewer_session_id=f"fixture-reviewer-{len(state.get('tasks', {}))}",
+        used_turns=2,
+        result=payload,
+        completed=True,
     )
 
 
@@ -124,17 +153,19 @@ def mapped_review_workspace(tmp_path):
     f["overlap"] = {
         "status": "mapped",
         "rationale": "General inclusion is known; outcome-pool membership remains unknown.",
-        "mappings": [{
-            "review_study_id": "s0",
-            "primary_study_ids": ["s1"],
-            "scope": "review",
-            "protocol_outcome": None,
-            "source_location": {
-                "document_id": docs["records"][0]["document_id"],
-                "locator": "membership",
-                "quote": "This synthetic review includes trial s1.",
-            },
-        }],
+        "mappings": [
+            {
+                "review_study_id": "s0",
+                "primary_study_ids": ["s1"],
+                "scope": "review",
+                "protocol_outcome": None,
+                "source_location": {
+                    "document_id": docs["records"][0]["document_id"],
+                    "locator": "membership",
+                    "quote": "This synthetic review includes trial s1.",
+                },
+            }
+        ],
     }
     return w, saved["synthesis"]
 
@@ -159,12 +190,20 @@ def test_overlap_requires_review_source_and_primary_identities(tmp_path):
     for field, value, error in [
         ("primary_study_ids", ["s0"], "primary studies"),
         ("review_study_id", "s1", "systematic review"),
-        ("source_location", {
-            "document_id": w.rows("documents")[1]["document_id"],
-            "locator": "abstract", "quote": "Synthetic effect was 2 units at week 12.",
-        }, "mapped review"),
-        ("source_location", {**original["source_location"], "quote": "Invented membership"},
-         "does not occur"),
+        (
+            "source_location",
+            {
+                "document_id": w.rows("documents")[1]["document_id"],
+                "locator": "abstract",
+                "quote": "Synthetic effect was 2 units at week 12.",
+            },
+            "mapped review",
+        ),
+        (
+            "source_location",
+            {**original["source_location"], "quote": "Invented membership"},
+            "does not occur",
+        ),
     ]:
         overlap["mappings"][0] = {**original, field: value}
         with pytest.raises(ValidationError, match=error):

@@ -28,6 +28,12 @@ def add_commands(commands: Any) -> None:
         "research", help="Create, resume, and export an evidence research workspace"
     )
     actions = research.add_subparsers(dest="research_command", required=True)
+    host_session = actions.add_parser(
+        "host-session", help="Check native hook binding and shared budget"
+    )
+    host_session.add_argument("run_dir", type=Path)
+    host_session.add_argument("--total-turns", type=int, default=150)
+    host_session.add_argument("--hook-token", help=argparse.SUPPRESS)
     init = actions.add_parser("init", help="Initialize a protocol and research budgets")
     init.add_argument("input", type=Path)
     init.add_argument("--output", type=Path, required=True)
@@ -150,6 +156,19 @@ async def dispatch(args: argparse.Namespace) -> int:
                 indent=2,
             )
         )
+        return 0
+    if action == "host-session":
+        from .native_review import STATE, budget_status
+
+        workspace = Workspace(args.run_dir)
+        state = workspace.store.read_json(STATE, default=None)
+        binding = workspace.store.read_json("native-binding.json", default={})
+        if not state or not args.hook_token or binding.get("token") != args.hook_token:
+            raise ValidationError(
+                "Native hooks did not bind this report. Enable/trust plugin hooks; "
+                "do not self-review."
+            )
+        print(json.dumps({"host": state["host"], "budget": budget_status(state)}))
         return 0
     if action == "init":
         workspace = Workspace(args.output)

@@ -9,7 +9,7 @@ from pathlib import Path
 from hermes_medical_search.artifacts import _atomic_write
 from hermes_medical_search.models import ValidationError
 
-from .evidence import REVIEW_CHECKS, review_digest
+from .evidence import review_digest
 from .validation import GRADE_DOMAINS, METHODS
 from .workflow import Preview, current_digests
 from .workspace import Workspace, digest
@@ -323,13 +323,22 @@ def next_packet(
             " do not use an assumed contributor or follow-up in certainty reasons."
         )
     elif stage == "review":
+        from .native_review import validate_receipt
+
+        def reviewed(finding, row):
+            try:
+                validate_receipt(view, row)
+                return row.get("status") == "pass"
+            except (ValidationError, KeyError, TypeError):
+                return False
+
         findings = view.read("synthesis")["findings"]
         previous = {r["finding_id"]: r for r in view.rows("reviews", fresh=False)}
         pending = [
             f
             for f in findings
             if f["finding_id"] not in previous
-            or previous[f["finding_id"]].get("status") != "pass"
+            or not reviewed(f, previous[f["finding_id"]])
             or previous[f["finding_id"]].get("review_digest") != review_digest(view, f)
         ]
         # Re-record an unchanged, stale review stage after checking its evidence digests.
@@ -338,18 +347,6 @@ def next_packet(
             if view.stale("reviews") or "reviews" not in manifest["datasets"]
             else pending
         )[:size]
-        rows(
-            "reviews",
-            [
-                {
-                    "finding_id": f["finding_id"],
-                    "review_digest": review_digest(view, f),
-                    "status": "revise",
-                    "checks": {k: {"status": "revise", "rationale": ""} for k in REVIEW_CHECKS},
-                }
-                for f in chosen
-            ],
-        )
         ids = list(
             dict.fromkeys(
                 e["record_id"]
@@ -360,12 +357,13 @@ def next_packet(
             )
         )
         task = (
-            "Separate claim-review pass: re-read each conclusion AND every factual "
-            "assertion in certainty, weighting, alignment and overlap rationales against its "
-            "sources. Inspect estimates, scope/comparators, harms, overlap, and "
-            "certainty. Actively look for unsupported inferences, including which trials "
-            "contributed to a particular outcome. Explain each check; fix synthesis first "
-            "if any claim fails. Do not repair a claim only inside the review rationale."
+            "Delegate to a fresh native medical evidence reviewer. Hermes: use "
+            "medical_research_review. Codex: spawn medical-evidence-reviewer with "
+            "the tool's fresh-context option; Claude: Agent subagent_type "
+            "medical-deep-research-plugin:medical-evidence-reviewer. Native adapters "
+            "freeze all findings and the entire source corpus, reserve review turns "
+            "from the shared total, and record the verdict. Do not author reviews yourself. "
+            "Correct required revisions, then delegate a fresh review before finalizing."
         )
         if not chosen and "reviews" in manifest["datasets"]:
             stage, payloads, task = (
@@ -412,6 +410,8 @@ def next_packet(
         "check": cli + ["check", str(workspace.path)],
         "finalize": cli + ["finalize", str(workspace.path)],
     }
+    if stage == "review":
+        commands.pop("submit", None)
     if stage == "fulltext":
         commands["acquire"] = cli + ["fulltext", str(workspace.path), "--ids", ",".join(ids)]
     packet = {
@@ -425,8 +425,8 @@ def next_packet(
         "commands": commands,
         "sources": [_source(view, rid) for rid in ids],
         "budget_guidance": (
-            "Reserve the last 20% of a known host turn budget for "
-            "review/finalization. CLI does not measure host turns."
+            "Use the native adapter shared total; reserve at least 25 units "
+            "for review and finalization. All reviewer retries consume the same total."
         ),
     }
     if stage in {"synthesis", "review"}:

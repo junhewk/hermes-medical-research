@@ -328,6 +328,9 @@ def validate_v2(workspace: Workspace, stage: str, payload: dict) -> None:
             finding = _known(row.get("finding_id"), findings, "review finding_id")
             if row.get("review_digest") != review_digest(workspace, finding):
                 raise ValidationError("review_digest differs from the current claim and evidence")
+            from .native_review import validate_receipt
+
+            validate_receipt(workspace, row)
             _choice(row.get("status"), {"pass", "revise"}, "claim review status")
             checks = object_field(row, "checks")
             if set(checks) != set(REVIEW_CHECKS):
