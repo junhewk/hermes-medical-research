@@ -1,3 +1,66 @@
+# Release candidate validation: 0.4.0
+
+Validation began on 2026-09-13 on headless Linux. **Release qualification is still pending.**
+The behavioral candidate is `7ba0983` in the isolated test checkout (the same code was applied to
+the main checkout as `2f92adc`). Production gateway settings and the original hypertension draft
+were not changed.
+
+- All 153 deterministic tests pass. They cover the earlier workflow contracts plus atomic batch
+  submission, aggregate validation, pending/unavailable assessment, estimate and harms semantics,
+  source-grounded overlap mappings, review freshness and resumable finalization.
+- Ruff, bundle consistency, Codex plugin validation and the report skill validator pass.
+- The pinned Hermes integration passes installation scanning with the unchanged Plugin Guard
+  policy (`safe`, 32 medium and one low finding), disabled/enabled discovery, short-name index,
+  qualified and bare-name loading, reference serving and slash invocation. This is a loader test,
+  separate from model-driven report qualification.
+- Wheel, source distribution and plugin ZIP build. Their contents were checked for local sessions,
+  credentials, caches, test-run artifacts and unrelated workspace state; none were included.
+
+The initial candidate (`0d69a7a`, applied as `bc124a9`) completed these behavioral runs:
+
+| Host | Completion | Review result |
+| --- | --- | --- |
+| Codex 0.154.0 | 34 terminal calls; 17 extractions; all 11 artifacts | Key fixture distinctions preserved |
+| Claude Code 2.1.268 / Opus 5 | 94 host turns; 18 extractions; all 11 artifacts | Self-review corrected two unsupported premises before export |
+| Hermes 0.21.2 / qwen3.8-flash-next, repeat 1 | 53 model calls / 59 tool calls; all 11 artifacts | Failed semantic qualification: assumed outcome-pool membership entered certainty reasons |
+| Same Hermes, repeat 2 | 51 model calls / 58 tool calls; all 11 artifacts | The same unsupported outcome-pool inference remained |
+| Same Hermes, repeat 3 | 53 model calls / 56 tool calls; all 11 artifacts | Unsupported certainty reasoning and overstatement in prose remained |
+
+All Hermes tests kept `max_turns=150`. Completion alone did not qualify the initial candidate for
+release. These failures led to explicit source-grounded review-versus-outcome membership mappings
+and stronger review of factual premises in certainty, alignment, overlap and weighting rationales.
+Fresh Codex, Claude Code and three sequential Hermes runs of the corrected candidate are pending.
+
+A separate bounded live-source Codex run completed in 61 terminal calls on the initial candidate.
+It retrieved 54 raw / 50 deduplicated records from Europe PMC, OpenAlex and ClinicalTrials.gov,
+screened all 50, selected six of 12 included records for detailed assessment, recorded 21 extractions,
+and produced all 11 artifacts with six citation identities verified online. The run preserved its
+20-record/source and eight-full-text ceilings (six attempts used). It qualified its conclusions:
+four full texts were unavailable, six included records were deferred, one eligibility decision was
+uncertain, and important harms and applicability gaps remained. This bounded run is workflow
+evidence, not an exhaustive or independently adjudicated medical review.
+
+Live connectivity checks also retrieved Europe PMC literature, an OA XML article, Crossref DOI
+metadata and a ClinicalTrials.gov record. Europe PMC citation traversal returned HTTP 503 maintenance
+after four attempts. No successful live citation traversal is claimed.
+
+## Reproducing the behavioral corpus
+
+Run `uv run python scripts/behavioral_fixture.py /tmp/mdr-eval/HOST-RUN` in a clean checkout.
+It initializes `HOST-RUN/run` with eight explicitly synthetic records and stored source documents.
+Use a fresh headless host session with the candidate skill and matching installed CLI. Ask it to
+create the hypertension/exercise report, compare benefits and harms, explain disagreements and
+export Markdown, HTML and evidence tables. State that retrieval is frozen, online identity checks
+are disabled (`finalize --offline`), all outputs must be labeled simulated, and writes belong only
+in the test directory. The host must perform its own screening, appraisal, synthesis and review.
+Do not correct its evidence files manually or count a resumed/repaired run as a fresh pass.
+
+Inspect the actual exports as well as completion status. Check group means versus treatment effects,
+within-arm changes, active comparators, credible intervals, missing harms versus zero events,
+comparator-arm event attribution, overlapping reviews, unknown outcome-pool membership, unsupported
+GRADE premises, modality rankings, and the absence of equivalence or safety claims from null/missing
+data. Synthetic acceptance testing cannot establish medical accuracy or replace human adjudication.
+
 # Hermes short-name integration correction
 
 Checked on 2026-09-12 against Hermes 0.21.2 source revision
