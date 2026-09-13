@@ -239,7 +239,15 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", pre_tool_call)
     for name, handler, properties in (
         ("medical_research_session", session, {"total_turns": {"type": "integer", "minimum": 1}}),
-        ("medical_research_review", review, {"review_turns": {"type": "integer", "minimum": 1}}),
+        (
+            "medical_research_review",
+            review,
+            {
+                "review_turns": {"type": "integer", "minimum": 1},
+                "action": {"type": "string", "enum": ["start", "status"]},
+                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 45},
+            },
+        ),
     ):
 
         def handle(args, _handler=handler, **kwargs):

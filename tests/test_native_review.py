@@ -257,7 +257,7 @@ def test_hook_scope_and_read_only_policy(tmp_path):
         event(tmp_path, tool_input={"command": f"cat {directory}/packet.json; echo bad"}), directory
     )
     assert not native_hooks._read_only(
-        event(tmp_path, tool_input={"command": "cat /etc/passwd"}), directory
+        event(tmp_path, tool_input={"command": f"cat {tmp_path / 'outside.txt'}"}), directory
     )
     assert native_hooks._read_only(
         event(tmp_path, tool_input={"command": f"sed -n 1,20p {directory}/sources.json"}), directory
@@ -301,3 +301,21 @@ def test_native_registry_follows_session_after_cwd_changes(tmp_path):
     blocked = native_hooks.handle(event(w.path, tool_use_id="call-4"), "claude-code", registry)
     assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert native_review.budget_status(w.store.read_json(native_review.STATE))["author_turns"] == 3
+
+
+def test_hermes_review_tool_exposes_bounded_polling():
+    from medical_deep_research_plugin.hermes_host import register
+
+    captured = {}
+
+    class Context:
+        def register_hook(self, *args):
+            pass
+
+        def register_tool(self, **kwargs):
+            captured[kwargs["name"]] = kwargs["schema"]
+
+    register(Context())
+    properties = captured["medical_research_review"]["parameters"]["properties"]
+    assert properties["action"]["enum"] == ["start", "status"]
+    assert properties["wait_seconds"]["maximum"] == 45
