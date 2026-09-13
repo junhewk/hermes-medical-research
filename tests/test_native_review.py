@@ -289,7 +289,8 @@ def test_native_registry_follows_session_after_cwd_changes(tmp_path):
         event(
             tmp_path,
             tool_input={
-                "command": f"medical-deep-research-plugin research host-session {w.path} --total-turns 3"
+                "command": f"medical-deep-research-plugin research host-session {w.path} "
+                "--total-turns 3"
             },
         ),
         "claude-code",
