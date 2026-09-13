@@ -222,6 +222,29 @@ def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) ->
         validate_v2(workspace, stage, payload)
 
 
+def validate_contribution(workspace: Workspace, finding: dict, contribution: Any) -> None:
+    """Check one contribution in the context of its unchanged, complete finding."""
+    if not isinstance(contribution, dict):
+        raise ValidationError("evidence contribution must be an object")
+    eid = contribution.get("extraction_id")
+    extraction = _known(eid, workspace.index("extractions"), "extraction_id")
+    _known(eid, workspace.index("appraisals"), "appraised extraction")
+    _choice(contribution.get("relationship"), RELATIONSHIPS, "evidence relationship")
+    require_text(contribution.get("weight_rationale"), "weight_rationale")
+    if any(extraction[field] != finding[field] for field in SCOPE_FIELDS):
+        require_text(
+            contribution.get("alignment_rationale"), "alignment_rationale for differing scopes"
+        )
+    if contribution.get("claim_support_checked") is not True:
+        raise ValidationError(
+            "host must check each finding against its contributing source evidence"
+        )
+    if workspace.evidence_version == "2":
+        from .evidence import validate_contribution_v2
+
+        validate_contribution_v2(workspace, finding, contribution)
+
+
 def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
     require_text(payload.get("title"), "report title")
     findings = payload.get("findings")
@@ -231,7 +254,6 @@ def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
         raise ValidationError("synthesis.limitations must be an array")
     for limitation in payload["limitations"]:
         require_text(limitation, "synthesis limitation")
-    extractions, appraisals = workspace.index("extractions"), workspace.index("appraisals")
     seen: set[str] = set()
     for finding in findings:
         if not isinstance(finding, dict):
@@ -248,25 +270,11 @@ def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
             raise ValidationError("each finding needs linked evidence or an explicit evidence gap")
         refs: set[str] = set()
         for contribution in evidence:
-            if not isinstance(contribution, dict):
-                raise ValidationError("evidence contribution must be an object")
+            validate_contribution(workspace, finding, contribution)
             eid = contribution.get("extraction_id")
-            extraction = _known(eid, extractions, "extraction_id")
-            _known(eid, appraisals, "appraised extraction")
             if eid in refs:
                 raise ValidationError("duplicate evidence contribution")
             refs.add(eid)
-            _choice(contribution.get("relationship"), RELATIONSHIPS, "evidence relationship")
-            require_text(contribution.get("weight_rationale"), "weight_rationale")
-            if any(extraction[field] != finding[field] for field in SCOPE_FIELDS):
-                require_text(
-                    contribution.get("alignment_rationale"),
-                    "alignment_rationale for differing scopes",
-                )
-            if contribution.get("claim_support_checked") is not True:
-                raise ValidationError(
-                    "host must check each finding against its contributing source evidence"
-                )
         certainty = finding.get("certainty")
         if not isinstance(certainty, dict):
             raise ValidationError("finding needs a certainty assessment")

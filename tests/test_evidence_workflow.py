@@ -13,7 +13,13 @@ from hermes_medical_search.models import ValidationError
 from medical_deep_research_plugin.evidence import REVIEW_CHECKS, review_digest
 from medical_deep_research_plugin.packets import documents, next_packet
 from medical_deep_research_plugin.validation import validate_stage
-from medical_deep_research_plugin.workflow import check, current_digests, finalize, submit_batch
+from medical_deep_research_plugin.workflow import (
+    check,
+    current_digests,
+    finalize,
+    stage_errors,
+    submit_batch,
+)
 
 
 def modern_workspace(tmp_path):
@@ -179,6 +185,30 @@ def test_overlap_source_is_bound_to_claim_review(tmp_path):
     for s in ("extractions", "appraisals"):
         w.put(s, w.read(s, fresh=False))
     assert review_digest(w, finding) != old_digest
+
+
+def test_aggregate_check_preserves_mapped_review_and_primary_contributors(tmp_path):
+    w, synthesis = mapped_review_workspace(tmp_path)
+    assert stage_errors(w, "synthesis", synthesis) == []
+    result = submit_batch(w, batch(w, synthesis=synthesis))
+    assert result["accepted"]
+    assert len(w.read("synthesis")["findings"][0]["evidence"]) == 2
+
+
+def test_aggregate_check_assesses_certainty_across_the_whole_evidence_body(tmp_path):
+    w = modern_workspace(tmp_path)
+    appraisals = w.read("appraisals")
+    complete = appraisals["records"][0]
+    complete.update(completion="complete", overall_judgment="some_concerns")
+    loc = w.rows("extractions")[0]["source_location"]
+    for domain in complete["domains"].values():
+        domain.update(status="assessed", judgment="some_concerns", source_locations=[loc])
+    w.put("appraisals", appraisals)
+    synthesis = w.read("synthesis", fresh=False)
+    synthesis["findings"][0]["certainty"]["rating"] = "low"
+    # One completed and one limited appraisal may support a qualified assessed body.
+    assert stage_errors(w, "synthesis", synthesis) == []
+    assert submit_batch(w, batch(w, synthesis=synthesis))["accepted"]
 
 
 def batch(workspace, **stages):

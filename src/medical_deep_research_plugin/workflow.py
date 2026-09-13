@@ -8,7 +8,7 @@ from typing import Any
 
 from hermes_medical_search.models import ValidationError
 
-from .validation import validate_complete, validate_stage
+from .validation import validate_complete, validate_contribution, validate_stage
 from .workspace import DEPENDENCIES, ID_FIELDS, Workspace, digest
 
 EDITABLE = set(DEPENDENCIES) - {"records", "documents"}
@@ -102,21 +102,22 @@ def stage_errors(workspace: Workspace, stage: str, payload: dict) -> list[dict]:
                 )
             else:
                 seen.add(rid)
-            parts = [row]
-            if stage == "synthesis" and isinstance(row.get("evidence"), list) and row["evidence"]:
-                parts += [{**row, "evidence": [c]} for c in row["evidence"]]
-            for part in parts:
+            try:
+                validate_stage(workspace, stage, {**payload, key: [row]})
+            except (ValidationError, KeyError, TypeError, AttributeError) as exc:
+                errors.append(error(stage, str(rid), exc))
+            # Collect per-contribution diagnostics without changing the finding's evidence body.
+            # Body-level certainty and overlap rules must see all contributors together.
+            contributions = row.get("evidence") if stage == "synthesis" else None
+            for contribution in contributions if isinstance(contributions, list) else []:
                 try:
-                    validate_stage(workspace, stage, {**payload, key: [part]})
+                    validate_contribution(workspace, row, contribution)
                 except (ValidationError, KeyError, TypeError, AttributeError) as exc:
-                    field = ""
-                    if part is not row:
-                        c = part["evidence"][0]
-                        field = (
-                            f"evidence.{c.get('extraction_id', '?')}"
-                            if isinstance(c, dict)
-                            else "evidence"
-                        )
+                    field = (
+                        f"evidence.{contribution.get('extraction_id', '?')}"
+                        if isinstance(contribution, dict)
+                        else "evidence"
+                    )
                     errors.append(error(stage, str(rid), exc, field))
         # Cross-record rules (e.g. assigning a report to two study groups).
         try:

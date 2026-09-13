@@ -180,6 +180,29 @@ def validate_appraisal(workspace: Workspace, row: dict) -> None:
         )
 
 
+def validate_contribution_v2(workspace: Workspace, finding: dict, contribution: dict) -> None:
+    use = contribution.get("use")
+    _choice(use, {"direct", "indirect", "context"}, "contribution use")
+    require_text(contribution.get("alignment_rationale"), "alignment_rationale")
+    extraction = workspace.index("extractions")[contribution["extraction_id"]]
+    if use == "context" and contribution["relationship"] not in {"context", "incomparable"}:
+        raise ValidationError(
+            "context-only evidence cannot directly support or contradict an effect"
+        )
+    if use != "context" and finding["claim_basis"] == "comparative":
+        if extraction["effect"]["basis"] != "between_group":
+            raise ValidationError(
+                "comparative claims require between_group effects; classify other data as context"
+            )
+        if use == "direct" and extraction["comparator_type"] != finding["comparator_type"]:
+            raise ValidationError("different comparator types require indirect or context use")
+    appraisal = workspace.index("appraisals")[extraction["extraction_id"]]
+    if use != "context" and appraisal["completion"] == "pending":
+        raise ValidationError(
+            "substantive contributions require completed or explicitly limited assessment"
+        )
+
+
 def validate_finding(workspace: Workspace, finding: dict) -> None:
     outcomes = workspace.load()["protocol"]["outcomes"]
     for outcome in strings(finding, "protocol_outcomes"):
@@ -206,27 +229,6 @@ def validate_finding(workspace: Workspace, finding: dict) -> None:
             raise ValidationError("evidence gaps cannot have an assessed certainty rating")
     extractions = workspace.index("extractions")
     appraisals = workspace.index("appraisals")
-    for contribution in finding["evidence"]:
-        use = contribution.get("use")
-        _choice(use, {"direct", "indirect", "context"}, "contribution use")
-        require_text(contribution.get("alignment_rationale"), "alignment_rationale")
-        extraction = extractions[contribution["extraction_id"]]
-        if use == "context" and contribution["relationship"] not in {"context", "incomparable"}:
-            raise ValidationError(
-                "context-only evidence cannot directly support or contradict an effect"
-            )
-        if use != "context" and finding["claim_basis"] == "comparative":
-            if extraction["effect"]["basis"] != "between_group":
-                raise ValidationError(
-                    "comparative claims require between_group effects; classify other data "
-                    "as context"
-                )
-            if use == "direct" and extraction["comparator_type"] != finding["comparator_type"]:
-                raise ValidationError("different comparator types require indirect or context use")
-        if use != "context" and appraisals[extraction["extraction_id"]]["completion"] == "pending":
-            raise ValidationError(
-                "substantive contributions require completed or explicitly limited assessment"
-            )
     substantive = [
         appraisals[c["extraction_id"]] for c in finding["evidence"] if c["use"] != "context"
     ]
