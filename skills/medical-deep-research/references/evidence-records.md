@@ -108,9 +108,15 @@ estimates for substantive contributions; within-group changes, group summaries a
 in separately labeled findings or context. Different comparator types cannot be direct evidence.
 Do not call a BP-variability result evidence about mean BP, or a secondary outcome a primary outcome.
 
-`overlap` has status (not_applicable/mapped/suspected/unknown) and rationale. Mapped overlap also lists
-study_ids with recorded identity evidence. Suspected overlap is not independent corroboration.
-Never sum participants across overlapping reviews.
+`overlap` has status (not_applicable/mapped/suspected/unknown) and rationale. Mapped overlap requires
+`mappings`: each has review_study_id (a systematic-review study), primary_study_ids (primary studies),
+scope (review/outcome), protocol_outcome (null for review scope; an exact finding protocol outcome
+for outcome scope), and source_location with a quote from that review supporting membership.
+Use the packet's overlap_mapping_template. General inclusion lists support review scope only.
+They do not establish membership in every outcome pool. Unknown outcome membership must remain
+unknown in conclusions AND certainty/weighting reasons; do not use assumed contributors as GRADE
+premises. If no quoted mapping can be recorded, use suspected/unknown with an explanation.
+Suspected overlap is not independent corroboration. Never sum participants across overlapping reviews.
 
 `certainty` has origin report_assessment, framework GRADE-informed/descriptive, rating and rationale.
 GRADE-informed also needs starting_point, rating_explanation and all five domains: risk_of_bias,
@@ -130,6 +136,9 @@ including gaps, against its quoted sources and appraisals. Each review has findi
 status pass/revise and checks for estimates, scope, harms, overlap and certainty. Each check has
 status pass/revise/not_applicable and a substantive rationale. Never fill all checks mechanically.
 A required revision prevents a pass. Changed claims/evidence require new review digests and review.
+Review all factual premises in certainty, alignment, overlap and weighting reasons, not just the
+headline conclusion. Use claim_review_guidance from the packet. Correct the original synthesis
+when a premise is unsupported; a caveat written only in the review record does not repair the report.
 
 `research finalize RUN [--input LAST_REVIEW_BATCH]` checks readiness, performs online citation identity
 checks and exports. Missing domains may justify a qualified report only after actual inspection;

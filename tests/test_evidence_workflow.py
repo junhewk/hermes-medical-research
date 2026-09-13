@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from copy import deepcopy
 
 import pytest
 from test_research import assessed_workspace
@@ -98,6 +99,86 @@ def record_reviews(workspace):
             ],
         },
     )
+
+
+def mapped_review_workspace(tmp_path):
+    w = modern_workspace(tmp_path)
+    saved = {s: w.read(s) for s in ("extractions", "appraisals", "synthesis")}
+    studies = w.read("studies")
+    studies["records"][0]["kind"] = "systematic-review"
+    w.put("studies", studies)
+    docs = w.read("documents")
+    docs["records"][0]["segments"].append(
+        {"locator": "membership", "text": "This synthetic review includes trial s1."}
+    )
+    w.put("documents", docs)
+    for s in ("extractions", "appraisals"):
+        w.put(s, saved[s])
+    f = saved["synthesis"]["findings"][0]
+    f["overlap"] = {
+        "status": "mapped",
+        "rationale": "General inclusion is known; outcome-pool membership remains unknown.",
+        "mappings": [{
+            "review_study_id": "s0",
+            "primary_study_ids": ["s1"],
+            "scope": "review",
+            "protocol_outcome": None,
+            "source_location": {
+                "document_id": docs["records"][0]["document_id"],
+                "locator": "membership",
+                "quote": "This synthetic review includes trial s1.",
+            },
+        }],
+    }
+    return w, saved["synthesis"]
+
+
+def test_review_membership_cannot_declare_an_outcome_pool(tmp_path):
+    w, synthesis = mapped_review_workspace(tmp_path)
+    validate_stage(w, "synthesis", synthesis)
+    mapping = synthesis["findings"][0]["overlap"]["mappings"][0]
+    mapping["protocol_outcome"] = "Synthetic outcome"
+    with pytest.raises(ValidationError, match="review-level membership"):
+        validate_stage(w, "synthesis", synthesis)
+    mapping["scope"] = "outcome"
+    mapping["protocol_outcome"] = "Unrelated outcome"
+    with pytest.raises(ValidationError, match="protocol_outcome"):
+        validate_stage(w, "synthesis", synthesis)
+
+
+def test_overlap_requires_review_source_and_primary_identities(tmp_path):
+    w, synthesis = mapped_review_workspace(tmp_path)
+    overlap = synthesis["findings"][0]["overlap"]
+    original = deepcopy(overlap["mappings"][0])
+    for field, value, error in [
+        ("primary_study_ids", ["s0"], "primary studies"),
+        ("review_study_id", "s1", "systematic review"),
+        ("source_location", {
+            "document_id": w.rows("documents")[1]["document_id"],
+            "locator": "abstract", "quote": "Synthetic effect was 2 units at week 12.",
+        }, "mapped review"),
+        ("source_location", {**original["source_location"], "quote": "Invented membership"},
+         "does not occur"),
+    ]:
+        overlap["mappings"][0] = {**original, field: value}
+        with pytest.raises(ValidationError, match=error):
+            validate_stage(w, "synthesis", synthesis)
+    overlap["mappings"] = []
+    with pytest.raises(ValidationError, match="source-grounded mappings"):
+        validate_stage(w, "synthesis", synthesis)
+
+
+def test_overlap_source_is_bound_to_claim_review(tmp_path):
+    w, synthesis = mapped_review_workspace(tmp_path)
+    w.put("synthesis", synthesis)
+    finding = synthesis["findings"][0]
+    old_digest = review_digest(w, finding)
+    docs = w.read("documents")
+    docs["records"][0]["segments"][-1]["text"] += " Outcome membership is unspecified."
+    w.put("documents", docs)
+    for s in ("extractions", "appraisals"):
+        w.put(s, w.read(s, fresh=False))
+    assert review_digest(w, finding) != old_digest
 
 
 def batch(workspace, **stages):

@@ -293,8 +293,13 @@ def export(workspace: Workspace) -> dict[str, Any]:
         "## Summary of findings",
         "",
         *_table(
-            ["Outcome", "Finding", "Certainty", "Primary study groups", "References"], summary_rows
+            ["Outcome", "Finding", "Certainty", "Linked primary studies", "References"],
+            summary_rows,
         ),
+        "",
+        "Linked primary studies counts separately recorded primary studies contributing to each "
+        "finding. It does not count trials contained within reviews; zero does not mean a review "
+        "contains no trials. Review overlap is assessed separately.",
         "",
         "## Extracted evidence",
         "",

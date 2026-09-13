@@ -49,3 +49,13 @@ stored full texts before asserting access is unavailable. Consult the instrument
 signaling questions when applying it; do not call a domain-only record a fully implemented formal
 instrument. Source-author certainty is attributed separately from this report's GRADE-informed
 assessment. A descriptive appraisal alone does not establish low risk of bias for an effect estimate.
+
+Review conduct and underlying trial bias are separate. Low ROBIS does not establish low RoB 2.
+For network meta-analysis, inspect transitivity, coherence and the uncertainty of rankings within
+the synthesis domain; generic review methods do not establish these properties. Missing network
+detail remains unavailable rather than assumed satisfactory.
+
+Verify the factual premises of GRADE reasons. A review's general inclusion list does not establish
+which trials fed a specific outcome pool. Do not downgrade, upgrade or explain an outcome using an
+assumed contributor. Describe unresolved outcome-level overlap as uncertainty; do not invent its
+membership, sample size or pooled follow-up from the primary records available to this report.

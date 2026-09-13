@@ -57,7 +57,15 @@ def review_digest(workspace: Workspace, finding: dict) -> str:
                 "document": documents[extraction["source_location"]["document_id"]],
             }
         )
-    return digest({"finding": finding, "evidence": evidence})
+    overlap_sources = [
+        {
+            "document": documents[m["source_location"]["document_id"]],
+            "review": studies[m["review_study_id"]],
+            "primary_studies": [studies[sid] for sid in m["primary_study_ids"]],
+        }
+        for m in (finding.get("overlap", {}).get("mappings") or [])
+    ]
+    return digest({"finding": finding, "evidence": evidence, "overlap_sources": overlap_sources})
 
 
 def validate_extraction(workspace: Workspace, row: dict) -> None:
@@ -254,9 +262,38 @@ def validate_finding(workspace: Workspace, finding: dict) -> None:
     )
     require_text(overlap.get("rationale"), "overlap.rationale")
     if overlap["status"] == "mapped":
-        strings(overlap, "study_ids")
-        for sid in overlap["study_ids"]:
-            _known(sid, workspace.index("studies"), "overlap study_id")
+        mappings = overlap.get("mappings")
+        if not isinstance(mappings, list) or not mappings:
+            raise ValidationError("mapped overlap requires source-grounded mappings")
+        studies = workspace.index("studies")
+        contributing_studies = {
+            extractions[c["extraction_id"]]["study_id"] for c in finding["evidence"]
+        }
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                raise ValidationError("overlap mappings must be objects")
+            review = _known(mapping.get("review_study_id"), studies, "overlap review_study_id")
+            if review["kind"] != "systematic-review":
+                raise ValidationError("overlap review_study_id must identify a systematic review")
+            if mapping["review_study_id"] not in contributing_studies:
+                raise ValidationError("mapped review must contribute evidence to this finding")
+            for sid in strings(mapping, "primary_study_ids"):
+                if _known(sid, studies, "overlap primary_study_id")["kind"] != "primary":
+                    raise ValidationError("overlap primary_study_ids must identify primary studies")
+            _choice(mapping.get("scope"), {"review", "outcome"}, "overlap mapping scope")
+            outcome = mapping.get("protocol_outcome")
+            if mapping["scope"] == "outcome":
+                if outcome not in finding["protocol_outcomes"]:
+                    raise ValidationError("outcome overlap must name a finding protocol_outcome")
+            elif outcome is not None:
+                raise ValidationError("review-level membership cannot declare an outcome pool")
+            location = object_field(mapping, "source_location")
+            doc = _known(location.get("document_id"), workspace.index("documents"), "document_id")
+            if doc["record_id"] not in review["record_ids"]:
+                raise ValidationError("overlap source must belong to the mapped review")
+            validate_location(workspace, location, doc["record_id"])
+    elif overlap.get("mappings"):
+        raise ValidationError("overlap mappings require mapped status")
 
 
 def validate_v2(workspace: Workspace, stage: str, payload: dict) -> None:

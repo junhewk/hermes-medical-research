@@ -318,6 +318,9 @@ def next_packet(
             "scope alignment. Explain overlapping reviews and disagreements. Record"
             " gaps where unsupported; do not infer equivalence or safety from "
             "missing data."
+            " Review membership does not establish membership of each outcome pool."
+            " Leave outcome-specific membership unknown unless explicitly sourced;"
+            " do not use an assumed contributor or follow-up in certainty reasons."
         )
     elif stage == "review":
         findings = view.read("synthesis")["findings"]
@@ -357,9 +360,12 @@ def next_packet(
             )
         )
         task = (
-            "Separate claim-review pass: re-read each conclusion against its "
+            "Separate claim-review pass: re-read each conclusion AND every factual "
+            "assertion in certainty, weighting, alignment and overlap rationales against its "
             "sources. Inspect estimates, scope/comparators, harms, overlap, and "
-            "certainty. Explain each check; fix synthesis first if any claim fails."
+            "certainty. Actively look for unsupported inferences, including which trials "
+            "contributed to a particular outcome. Explain each check; fix synthesis first "
+            "if any claim fails. Do not repair a claim only inside the review rationale."
         )
         if not chosen and "reviews" in manifest["datasets"]:
             stage, payloads, task = (
@@ -424,6 +430,30 @@ def next_packet(
         ),
     }
     if stage in {"synthesis", "review"}:
+        packet["claim_review_guidance"] = {
+            "estimates": "Check the exact estimand, interval kind, denominator and reported "
+            "follow-up. Do not assign a review the endpoints of selected constituent trials.",
+            "scope": "Check each population/comparator/outcome assertion in the conclusion AND "
+            "its supporting rationales. A possible explanation is an untested hypothesis.",
+            "harms": "Use 'events were not reported' for missing data. 'No events occurred', "
+            "'acceptable', 'well tolerated' and safety claims require their own support. "
+            "A missing count cannot establish acceptability, even with a safety caveat.",
+            "overlap": "General review inclusion establishes review-level membership only. "
+            "Do not assume a trial contributed to every outcome pool. Require outcome-specific "
+            "source evidence for such assertions, including those inside GRADE reasons; "
+            "otherwise state outcome membership unknown and remove the assumed contribution.",
+            "certainty": "Check factual premises of every downgrade/non-downgrade. Review-level "
+            "ROBIS does not establish low trial-level risk of bias. A network analysis also needs "
+            "assessment of transitivity, coherence and ranking uncertainty. Neither missing "
+            "information nor unexplained overlap is independent corroboration.",
+        }
+        packet["overlap_mapping_template"] = {
+            "review_study_id": "",
+            "primary_study_ids": [],
+            "scope": "review",
+            "protocol_outcome": None,
+            "source_location": {"document_id": "", "locator": "", "quote": ""},
+        }
         packet["extractions"] = extractions
         packet["appraisals"] = list(appraisals.values())
         packet["studies"] = studies

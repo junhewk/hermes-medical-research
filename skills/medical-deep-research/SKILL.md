@@ -74,12 +74,19 @@ extractions/appraisals → synthesis → separate claim review → finalization.
   active/inactive comparators and main/secondary outcomes. Do not infer equivalence from a null test,
   safety from absent counts, or independent replication from overlapping reviews. Keep preprints,
   historical guideline context, and source-author certainty clearly attributed.
+- Review-level inclusion does not establish which trials contributed to each outcome pool.
+  Record quoted overlap mappings at their actual scope. If an outcome's membership or a review's
+  follow-up is unknown, keep it unknown throughout the conclusion and all certainty/weighting reasons.
+  Low review-level ROBIS does not establish low risk of bias in the underlying trials.
 
 ## Review, finalize, and deliver
 
 After recording synthesis, `research next RUN` supplies a separate claim-review packet with
 conclusions, estimates, appraisals and source locators. Re-read the evidence and explain each review
-check. If a claim fails, correct synthesis/evidence first and obtain a new review packet; its digest
+check. Check the factual premises in certainty, overlap, alignment and weighting reasons as carefully
+as the conclusion. Do not infer outcome-specific trial membership from a general review study list.
+Missing harms cannot support acceptability or tolerability, even when followed by a safety caveat.
+If a claim fails, correct synthesis/evidence first and obtain a new review packet; its digest
 must match the revised material. This is host-model review, not independent human adjudication.
 
 ```bash
