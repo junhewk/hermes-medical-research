@@ -45,6 +45,10 @@ The packet supplies all common fields. Each extraction has an `extraction_id`, `
 `source_location`, `support_checked`, and `support_rationale`.
 
 - `comparator_type`: inactive, active_exercise, active_other, mixed, none, not_applicable.
+  Inactive means no added intervention (e.g. usual care/waitlist). Structured education/counseling,
+  heat therapy, medication or another non-exercise treatment is active_other. A non-exercise arm
+  is not automatically inactive. Use active_exercise for an exercise comparator and mixed when
+  a reported pooled contrast actually combines comparator types.
 - `outcome_type`: benefit, harm, context.
 - `effect.basis`: between_group, within_group, group_summary, association, diagnostic_accuracy,
   ranking, qualitative. Preserve the actual estimate basis even when the study has a comparator.

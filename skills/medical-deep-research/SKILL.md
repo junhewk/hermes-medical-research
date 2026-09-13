@@ -70,6 +70,9 @@ extractions/appraisals → synthesis → separate claim review → finalization.
 - Preserve what each number measures: between-group effect, within-group change, group average,
   association, diagnostic accuracy, ranking, or qualitative result. A mean is not a treatment effect;
   SMD is not mmHg; a credible interval is not a confidence interval. Preserve reported uncertainty.
+- Classify the comparator's actual content. Structured education/counseling or another treatment
+  is `active_other` even if it contains no exercise. `inactive` means no added intervention, such
+  as usual care or a waiting list; it does not mean every non-exercise comparator.
 - In synthesis, align every contribution and explain its weight. Distinguish office/ambulatory BP,
   active/inactive comparators and main/secondary outcomes. Do not infer equivalence from a null test,
   safety from absent counts, or independent replication from overlapping reviews. Keep preprints,
