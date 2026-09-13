@@ -8,7 +8,8 @@ record the host agent's assessments, and export a cited report.
   extraction → appraisal → outcome-level synthesis → verification → report.
 - **medical-literature-search**: reproducible literature retrieval without report generation.
 
-The host agent performs the reasoning. The CLI validates references and quotes, manages budgets
+The host agent performs the reasoning. Version 0.4 adds source packets, atomic batch submissions,
+a separate claim-review stage, and one-command finalization. The CLI validates references and quotes, manages budgets
 and resumable artifacts, and renders the result. No MCP server or separate model API key is needed.
 This replaces `hermes-medical-search`; the desktop
 [medical-deep-research](https://github.com/junhewk/medical-deep-research) application remains separate.
@@ -22,7 +23,7 @@ Skills invoke the matching Git release through `uvx`.
 **Codex CLI**
 
 ```bash
-codex plugin marketplace add junhewk/medical-deep-research-plugin --ref v0.3.1
+codex plugin marketplace add junhewk/medical-deep-research-plugin --ref v0.4.0
 codex plugin add medical-deep-research-plugin@junhewk-medical-research
 codex plugin list
 ```
@@ -94,7 +95,7 @@ existence, and skill-specific disabled settings. `plugins list` and Plugin Docto
 parts of setup. Doctor reporting **0 tools, 0 hooks is expected**: this package contributes skills.
 Hermes reads `skills/*/SKILL.md`; adding a `skills` field to the portable manifest does not index them.
 
-Version 0.3.1 fixes an installation-scan false positive caused by a local-file rejection test in
+Version 0.4.0 fixes an installation-scan false positive caused by a local-file rejection test in
 0.3.0. The test now uses a harmless temporary fixture and still rejects local file URLs. The actual
 Hermes installation scan passes without a scanner override. For an existing, unpinned Git
 installation, run `hermes plugins update medical-deep-research-plugin` to retrieve the fix.
@@ -234,8 +235,16 @@ remain human work.
 
 ## Artifacts and resuming
 
+Start or resume recorded evidence work with `research next RUN`; read its packet and edit the
+provided input file. Submit it with `research record RUN --batch --input FILE`.
+`research check RUN [--input FILE]` reports errors without committing changes;
+`research finalize RUN [--input FILE]` checks, verifies and exports. See the
+[v2 record contract](skills/medical-deep-research/references/evidence-records.md).
+
 Exports: `report.md`, self-contained `report.html`, `report.json`, `evidence.csv`, `screening.csv`,
-`studies.csv`, `selection-counts.json`, and `references.ris`. Reports include search history, selection
+`studies.csv`, `findings.csv`, `appraisals.csv`, `coverage.csv`, `selection-counts.json`, and
+`references.ris`. `completion.json` records output paths/checksums and `resume.json` identifies the
+latest work packet. Reports include search history, selection
 counts, aligned findings, provisional certainty, source locations, limitations, and references.
 HTML needs no server or scripts and can be copied off a headless machine.
 

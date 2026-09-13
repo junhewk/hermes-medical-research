@@ -8,9 +8,10 @@ from typing import Any
 
 from hermes_medical_search.models import ValidationError
 
-from .workspace import DEPENDENCIES, Workspace, normalized_text, require_text
+from .workspace import Workspace, normalized_text, require_text
 
 METHODS = {
+    "robis": ("2016", "eligibility identification data_collection synthesis"),
     "rob2": ("2019-08-22", "randomization deviations missing_data measurement selection"),
     "rob2-cluster": (
         "2021-03-18",
@@ -213,8 +214,12 @@ def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) ->
                     validate_location(workspace, location, extraction["record_id"])
     elif stage == "synthesis":
         validate_synthesis(workspace, payload)
-    elif stage not in {"records", "documents"}:
+    elif stage not in {"records", "documents", "coverage", "reviews"}:
         raise ValidationError("unknown stage")
+    if workspace.evidence_version == "2":
+        from .evidence import validate_v2
+
+        validate_v2(workspace, stage, payload)
 
 
 def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
@@ -239,8 +244,8 @@ def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
         for field in SCOPE_FIELDS:
             require_text(finding.get(field), field)
         evidence = finding.get("evidence")
-        if not isinstance(evidence, list) or not evidence:
-            raise ValidationError("each finding needs linked evidence")
+        if not isinstance(evidence, list) or (not evidence and finding.get("claim_basis") != "gap"):
+            raise ValidationError("each finding needs linked evidence or an explicit evidence gap")
         refs: set[str] = set()
         for contribution in evidence:
             if not isinstance(contribution, dict):
@@ -292,7 +297,7 @@ def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
 
 def validate_complete(workspace: Workspace) -> list[str]:
     manifest = workspace.load()
-    for stage in DEPENDENCIES:
+    for stage in workspace.required_stages:
         if stage not in manifest["datasets"]:
             raise ValidationError(f"{stage} is missing")
         payload = workspace.read(stage)
@@ -336,4 +341,8 @@ def validate_complete(workspace: Workspace) -> list[str]:
                 warnings.append(f"{source} was {info['status']}: {info.get('error')}")
             if info.get("truncated"):
                 warnings.append(f"{source} retrieval was capped or truncated.")
+    if workspace.evidence_version == "2":
+        from .evidence import readiness
+
+        warnings.extend(readiness(workspace))
     return list(dict.fromkeys(warnings))

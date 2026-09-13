@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 — release candidate
+
+- Add source packets, exact source lookup, atomic related-stage updates, aggregate checks and resumable finalization.
+- Record estimate basis, comparator/interval types, harms availability and explicit appraisal completion.
+- Add ROBIS, detailed-assessment coverage and a separate digest-bound host claim-review stage.
+- Lead reports with findings and limitations; export flat estimates plus findings, appraisal and coverage tables.
+- Preserve legacy runs with explicit limits; update all hosts to the shared v2 report workflow.
+
+
 ## Unreleased
 
 - Complete the Hermes setup instructions with `skills.external_dirs` so the installed report skill

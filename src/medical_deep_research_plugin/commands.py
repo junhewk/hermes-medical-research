@@ -15,9 +15,11 @@ from hermes_medical_search.models import Question, SourceStrategy, ValidationErr
 from hermes_medical_search.query import compile_strategy
 
 from .fulltext import fetch_fulltexts
+from .packets import documents, next_packet
 from .reporting import export
 from .validation import METHODS
 from .verification import verify
+from .workflow import check, finalize, submit_batch
 from .workspace import DEPENDENCIES, Workspace
 
 
@@ -47,11 +49,20 @@ def add_commands(commands: Any) -> None:
     fulltext.add_argument("--retry", action="store_true")
     record = actions.add_parser("record", help="Validate and replace a complete stage payload")
     record.add_argument("run_dir", type=Path)
-    record.add_argument(
+    mode = record.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--stage",
-        choices=("screening", "studies", "extractions", "appraisals", "synthesis"),
-        required=True,
+        choices=(
+            "screening",
+            "studies",
+            "extractions",
+            "appraisals",
+            "coverage",
+            "synthesis",
+            "reviews",
+        ),
     )
+    mode.add_argument("--batch", action="store_true")
     record.add_argument("--input", type=Path, required=True)
     verify_parser = actions.add_parser(
         "verify", help="Validate evidence links and check cited identities"
@@ -67,6 +78,41 @@ def add_commands(commands: Any) -> None:
     status.add_argument("--stage", choices=tuple(DEPENDENCIES))
     status.add_argument("--offset", type=int, default=0)
     status.add_argument("--limit", type=int, default=50)
+    status.add_argument("--record-id")
+    status.add_argument("--document-id")
+    status.add_argument("--locator")
+    status.add_argument("--query", help="Literal case-insensitive text search in source segments")
+    next_parser = actions.add_parser(
+        "next", help="Write the next source packet and editable batch template"
+    )
+    next_parser.add_argument("run_dir", type=Path)
+    next_parser.add_argument(
+        "--stage",
+        choices=(
+            "retrieval",
+            "screening",
+            "coverage",
+            "fulltext",
+            "studies",
+            "assessment",
+            "synthesis",
+            "review",
+            "finalize",
+        ),
+    )
+    next_parser.add_argument("--limit", type=int)
+    next_parser.add_argument("--output", type=Path)
+    checker = actions.add_parser(
+        "check", help="Read-only, aggregated evidence and readiness checks"
+    )
+    checker.add_argument("run_dir", type=Path)
+    checker.add_argument("--input", type=Path, help="Preview a proposed batch without committing")
+    finalizer = actions.add_parser("finalize", help="Check, optionally submit, verify, and export")
+    finalizer.add_argument("run_dir", type=Path)
+    finalizer.add_argument("--input", type=Path)
+    finalizer.add_argument(
+        "--offline", action="store_true", help="Explicitly skip online identity checks"
+    )
     exporter = actions.add_parser(
         "export", help="Write Markdown, HTML, CSV, JSON, and RIS artifacts"
     )
@@ -119,12 +165,28 @@ async def dispatch(args: argparse.Namespace) -> int:
     else:
         workspace = Workspace(args.run_dir)
         workspace.load()
-        if action == "status":
+        if action == "check":
+            value = check(workspace, json.loads(args.input.read_text()) if args.input else None)
+        elif action == "status":
             value = workspace.status()
             if args.stage:
                 if args.offset < 0 or args.limit < 1:
                     raise ValidationError("offset must be nonnegative and limit must be positive")
                 data = workspace.read(args.stage, fresh=False)
+                if args.stage == "documents" and any(
+                    (args.record_id, args.document_id, args.locator, args.query)
+                ):
+                    value["data"] = documents(
+                        workspace,
+                        record_id=args.record_id,
+                        document_id=args.document_id,
+                        locator=args.locator,
+                        query=args.query,
+                        offset=args.offset,
+                        limit=args.limit,
+                    )
+                    print(json.dumps(value, ensure_ascii=False, indent=2))
+                    return 0
                 value["data"] = (
                     data
                     if args.stage == "synthesis"
@@ -146,8 +208,22 @@ async def dispatch(args: argparse.Namespace) -> int:
                     )
                     value = await fetch_fulltexts(workspace, ids, pdf=args.pdf, retry=args.retry)
                 elif action == "record":
-                    workspace.put(args.stage, json.loads(args.input.read_text(encoding="utf-8")))
-                    value = workspace.status()
+                    payload = json.loads(args.input.read_text(encoding="utf-8"))
+                    if args.batch:
+                        value = submit_batch(workspace, payload)
+                    else:
+                        workspace.put(args.stage, payload)
+                        value = workspace.status()
+                elif action == "next":
+                    value = next_packet(
+                        workspace, stage=args.stage, limit=args.limit, output=args.output
+                    )
+                elif action == "finalize":
+                    value = await finalize(
+                        workspace,
+                        json.loads(args.input.read_text()) if args.input else None,
+                        offline=args.offline,
+                    )
                 elif action == "verify":
                     value = await verify(workspace, offline=args.offline)
                 elif action == "export":
@@ -157,7 +233,12 @@ async def dispatch(args: argparse.Namespace) -> int:
                 else:
                     raise ValidationError("unknown research command")
     print(json.dumps(value, ensure_ascii=False, indent=2))
-    return 2 if action == "verify" and not value["ready"] else 0
+    failed = (
+        (action in {"verify", "check"} and not value["ready"])
+        or (action == "record" and value.get("accepted") is False)
+        or (action == "finalize" and not value["completed"])
+    )
+    return 2 if failed else 0
 
 
 def plan_snowball(

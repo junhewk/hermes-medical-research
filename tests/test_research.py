@@ -42,7 +42,14 @@ def protocol():
 
 def workspace_at(path: Path, *, records=100, fulltexts=30, mode="report"):
     workspace = Workspace(path)
-    workspace.init(protocol(), mode=mode, records=records, fulltexts=fulltexts, language="en")
+    workspace.init(
+        protocol(),
+        mode=mode,
+        records=records,
+        fulltexts=fulltexts,
+        language="en",
+        evidence_version="1",
+    )
     return workspace
 
 

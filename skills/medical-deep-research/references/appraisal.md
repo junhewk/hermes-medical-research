@@ -13,6 +13,7 @@ can help prioritize reading; they cannot establish certainty or determine clinic
 | Diagnostic accuracy estimates | quadas3 / 1.2 | [QUADAS-3](https://www.bristol.ac.uk/population-health-sciences/projects/quadas/quadas-3/quadas-3-tool/) |
 | Prognostic factors | quips / 2013 | [QUIPS](https://pubmed.ncbi.nlm.nih.gov/23420236/) |
 | Prediction models | probast-ai / 2025 | [PROBAST+AI](https://www.probast.org/) |
+| Systematic reviews used as central evidence | robis / 2016 | [ROBIS](https://www.bristol.ac.uk/population-health-sciences/projects/robis/) assesses review-level risk of bias; record eligibility, identification, data_collection and synthesis domains |
 | Descriptive maps, reviews/guidelines used as context, or insufficient methods | descriptive / 1 | Record limitations and applicability; do not imply a formal instrument was completed |
 
 These method identifiers route the agent to the cited instruments; the CLI checks the evidence
@@ -42,3 +43,9 @@ not an additional independent trial or an automatic source of high-certainty evi
 All generated assessments remain provisional. A report's implications should follow its certainty
 and applicability, with benefits, harms, uncertainty, and evidence gaps visible. This release
 produces narrative synthesis and evidence maps; it does not calculate pooled effects.
+
+Distinguish pending work from unavailable methods using the v2 completion/status fields. Inspect
+stored full texts before asserting access is unavailable. Consult the instrument's published
+signaling questions when applying it; do not call a domain-only record a fully implemented formal
+instrument. Source-author certainty is attributed separately from this report's GRADE-informed
+assessment. A descriptive appraisal alone does not establish low risk of bias for an effect estimate.

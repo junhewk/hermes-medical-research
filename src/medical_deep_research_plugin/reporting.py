@@ -81,6 +81,12 @@ def _csv(rows: list[dict[str, Any]], fields: list[str]) -> str:
 
 def export(workspace: Workspace) -> dict[str, Any]:
     warnings = validate_complete(workspace)
+    modern = workspace.evidence_version == "2"
+    if not modern:
+        warnings.append(
+            "Legacy evidence schema: estimate semantics and separate claim review "
+            "were not validated."
+        )
     manifest = workspace.load()
     verification = workspace.store.read_json("verification.json", default=None)
     current = {key: entry["digest"] for key, entry in manifest["datasets"].items()}
@@ -303,6 +309,21 @@ def export(workspace: Workspace) -> dict[str, Any]:
             "reference": numbers[extraction["record_id"]],
             "access": docs[location["document_id"]]["kind"],
             "appraisal": appraisals[eid],
+            **{
+                f"effect_{key}": effect.get(key)
+                for key in (
+                    "basis",
+                    "measure",
+                    "value",
+                    "ci_low",
+                    "ci_high",
+                    "interval_type",
+                    "interval_level",
+                    "units",
+                )
+            },
+            "appraisal_completion": appraisals[eid].get("completion", "legacy_unreviewed"),
+            "appraisal_judgment": appraisals[eid].get("overall_judgment", "legacy_unreviewed"),
         }
         evidence_rows.append(row)
         md += [
@@ -311,7 +332,8 @@ def export(workspace: Workspace) -> dict[str, Any]:
             text(extraction["result"]),
             "",
             f"Measure: {text(effect['measure'])}; value: {text(effect['value'])}; "
-            f"CI: {text(effect['ci_low'])} to {text(effect['ci_high'])}; "
+            f"Interval ({text(effect.get('interval_type', 'unspecified'))}): "
+            f"{text(effect['ci_low'])} to {text(effect['ci_high'])}; "
             f"units: {text(effect['units'])}; "
             f"sample size: {text(extraction.get('sample_size'))}.",
             "",
@@ -322,6 +344,14 @@ def export(workspace: Workspace) -> dict[str, Any]:
             "",
             f"Appraisal: {text(appraisals[eid]['method'])} "
             f"{text(appraisals[eid]['method_version'])}; "
+            + (
+                text(appraisals[eid]["completion"])
+                + "; "
+                + text(appraisals[eid]["overall_judgment"])
+                + ". "
+                if modern
+                else ""
+            )
             + text(appraisals[eid]["overall"])
             + ". "
             + text(appraisals[eid]["rationale"]),
@@ -350,6 +380,37 @@ def export(workspace: Workspace) -> dict[str, Any]:
             "Identity check: " + text(meta["status"]) + ".",
             "",
         ]
+    if modern:
+        methods_at = md.index("## Search methods")
+        findings_at = md.index("## Findings")
+        summary_at = md.index("## Summary of findings")
+        extracted_at = md.index("## Extracted evidence")
+        limitations_at = md.index("## Limitations and remaining work")
+        references_at = md.index("## References")
+        key_limits = [
+            "## Report status and limitations",
+            "",
+            "Qualified report."
+            if warnings
+            else "Evidence workflow complete; human review remains pending.",
+            "",
+            (
+                "Citation identity and source quotation checks are separate from the "
+                "recorded host claim review."
+            ),
+            "",
+            *["- " + text(w) for w in dict.fromkeys(warnings)],
+            "",
+        ]
+        md = (
+            md[:methods_at]
+            + md[summary_at:extracted_at]
+            + key_limits
+            + md[findings_at:summary_at]
+            + md[methods_at:findings_at]
+            + md[extracted_at:limitations_at]
+            + md[references_at:]
+        )
     markdown = "\n".join(md).rstrip() + "\n"
     body = MarkdownIt("commonmark", {"html": False}).enable("table").render(markdown)
     body = re.sub(r"<h3>Reference (\d+)</h3>", r'<h3 id="reference-\1">Reference \1</h3>', body)
@@ -398,6 +459,25 @@ def export(workspace: Workspace) -> dict[str, Any]:
                 "result",
                 "sample_size",
                 "effect",
+                *(
+                    [
+                        "effect_basis",
+                        "effect_measure",
+                        "effect_value",
+                        "effect_ci_low",
+                        "effect_ci_high",
+                        "effect_interval_type",
+                        "effect_interval_level",
+                        "effect_units",
+                        "comparator_type",
+                        "outcome_type",
+                        "appraisal_completion",
+                        "appraisal_judgment",
+                        "harms",
+                    ]
+                    if modern
+                    else []
+                ),
                 "favors",
                 "access",
                 "source_location",
@@ -408,13 +488,65 @@ def export(workspace: Workspace) -> dict[str, Any]:
         "studies.csv": _csv(list(studies.values()), ["study_id", "record_ids", "kind", "basis"]),
         "references.ris": "\n".join(ris),
     }
+    if modern:
+        outputs["findings.csv"] = _csv(
+            [{**f, "certainty_rating": f["certainty"]["rating"]} for f in synthesis["findings"]],
+            [
+                "finding_id",
+                "protocol_outcomes",
+                *SCOPE_FIELDS,
+                "claim_basis",
+                "conclusion",
+                "certainty_rating",
+                "certainty",
+                "published_certainty",
+                "overlap",
+                "evidence",
+            ],
+        )
+        outputs["appraisals.csv"] = _csv(
+            [
+                {
+                    "extraction_id": a["extraction_id"],
+                    "method": a["method"],
+                    "completion": a["completion"],
+                    "overall_judgment": a["overall_judgment"],
+                    "domain": name,
+                    **domain,
+                }
+                for a in appraisals.values()
+                for name, domain in a["domains"].items()
+            ],
+            [
+                "extraction_id",
+                "method",
+                "completion",
+                "overall_judgment",
+                "domain",
+                "status",
+                "judgment",
+                "rationale",
+                "source_locations",
+                "missing_reason",
+                "assessment_basis",
+                "inspected_locations",
+            ],
+        )
+        outputs["coverage.csv"] = _csv(
+            [{**r, "title": records[r["record_id"]]["title"]} for r in workspace.rows("coverage")],
+            ["record_id", "title", "selection", "reason", "protocol_outcomes"],
+        )
     for filename, content in outputs.items():
         _atomic_write(workspace.path / filename, content)
     workspace.store.write_json("selection-counts.json", flow)
     workspace.store.write_json(
         "report.json",
         {
-            "schema_version": "1",
+            "schema_version": workspace.evidence_version,
+            "quality": "qualified" if warnings else "ready",
+            "limitations": list(dict.fromkeys(warnings)),
+            "coverage": workspace.rows("coverage") if modern else [],
+            "claim_reviews": workspace.rows("reviews") if modern else [],
             "protocol": protocol,
             "synthesis": synthesis,
             "evidence": evidence_rows,

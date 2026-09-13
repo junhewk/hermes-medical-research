@@ -25,7 +25,9 @@ DEPENDENCIES = {
     "studies": ("records", "screening"),
     "extractions": ("records", "documents", "screening", "studies"),
     "appraisals": ("extractions",),
+    "coverage": ("records", "screening"),
     "synthesis": ("extractions", "appraisals", "studies"),
+    "reviews": ("synthesis", "extractions", "appraisals", "studies", "documents"),
 }
 ID_FIELDS = {
     "records": "record_id",
@@ -34,6 +36,8 @@ ID_FIELDS = {
     "studies": "study_id",
     "extractions": "extraction_id",
     "appraisals": "extraction_id",
+    "coverage": "record_id",
+    "reviews": "finding_id",
 }
 
 
@@ -92,6 +96,7 @@ class Workspace:
         records: int | str | None,
         fulltexts: int | str | None,
         language: str,
+        evidence_version: str = "2",
     ) -> dict[str, Any]:
         if (self.path / "research.json").exists() or (self.path / "manifest.json").exists():
             raise ValidationError("output already contains a run; use research status to resume")
@@ -113,6 +118,8 @@ class Workspace:
         outcomes = payload.get("outcomes", [])
         if not isinstance(outcomes, list) or (not outcomes and question.framework != "PCC"):
             raise ValidationError("clinical research needs an explicit outcomes list")
+        if not outcomes and question.framework == "PCC" and evidence_version == "2":
+            outcomes = ["Evidence map"]
         for item in outcomes:
             require_text(item, "outcome")
         rationale = require_text(payload.get("search_rationale"), "search_rationale")
@@ -151,6 +158,7 @@ class Workspace:
         data = {
             "schema_version": "1",
             "tool_version": __version__,
+            "evidence_version": evidence_version,
             "created_at": now(),
             "protocol": protocol,
             "protocol_digest": digest(protocol),
@@ -162,6 +170,21 @@ class Workspace:
         self.store.write_json("question.json", question.to_dict())
         self.save(data)
         return self.status()
+
+    @property
+    def evidence_version(self) -> str:
+        return self.load().get("evidence_version", "1")
+
+    @property
+    def required_stages(self) -> tuple[str, ...]:
+        return tuple(
+            s
+            for s in DEPENDENCIES
+            if self.evidence_version == "2" or s not in {"coverage", "reviews"}
+        )
+
+    def stage_version(self, stage: str) -> str:
+        return "1" if stage in {"records", "documents"} else self.evidence_version
 
     def read(self, stage: str, *, fresh: bool = True) -> dict[str, Any]:
         manifest = self.load()
@@ -194,8 +217,8 @@ class Workspace:
     def put(self, stage: str, payload: dict[str, Any], *, validate: bool = True) -> None:
         if stage not in DEPENDENCIES or not isinstance(payload, dict):
             raise ValidationError("unsupported research stage or payload")
-        if payload.get("schema_version") != "1":
-            raise ValidationError("research records require schema_version '1'")
+        if payload.get("schema_version") != self.stage_version(stage):
+            raise ValidationError(f"{stage} requires schema_version {self.stage_version(stage)!r}")
         if stage != "synthesis":
             rows = payload.get("records")
             if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
@@ -394,7 +417,7 @@ class Workspace:
     def status(self) -> dict[str, Any]:
         manifest = self.load()
         stages = {}
-        for stage in DEPENDENCIES:
+        for stage in self.required_stages:
             present = stage in manifest["datasets"]
             stages[stage] = (
                 "stale" if self.stale(stage, manifest) else "recorded" if present else "missing"
@@ -404,9 +427,31 @@ class Workspace:
         screened = (
             {r["record_id"] for r in screening} if stages["screening"] == "recorded" else set()
         )
+        current = {k: v["digest"] for k, v in manifest["datasets"].items()}
+        verification = self.store.read_json("verification.json", default=None)
+        completion = self.store.read_json("completion.json", default=None)
+        verified = bool(
+            verification and verification.get("datasets") == current and verification.get("ready")
+        )
+        exported = bool(
+            completion and completion.get("datasets") == current and completion.get("completed")
+        )
+        if exported:
+            from .workflow import _file_digest
+
+            exported = all(
+                Path(a["path"]).resolve().is_relative_to(self.path)
+                and Path(a["path"]).is_file()
+                and _file_digest(Path(a["path"])) == a["sha256"]
+                for a in completion["artifacts"].values()
+            )
         return {
             "run_dir": str(self.path),
+            "verification": "current" if verified else "pending_or_stale",
+            "export": "current" if exported else "pending_or_stale",
+            "claim_review": stages.get("reviews", "legacy_unreviewed"),
             "mode": manifest["protocol"]["mode"],
+            "evidence_version": self.evidence_version,
             "protocol_digest": manifest["protocol_digest"],
             "stages": stages,
             "records": len(records),

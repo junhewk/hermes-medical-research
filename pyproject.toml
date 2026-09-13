@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "medical-deep-research-plugin"
-version = "0.3.1"
+version = "0.4.0"
 description = "Headless evidence-based medical research for Codex, Claude Code, and Hermes"
 readme = "README.md"
 requires-python = ">=3.11"
