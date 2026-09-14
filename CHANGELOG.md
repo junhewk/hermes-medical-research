@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Known issues in 0.4.0 from full-report qualification (see VALIDATION.md): the native review
+  packet presents author-tagged outcome overlap mappings as proven, so reviewers can accept a
+  review-level trial list as outcome-pool membership (all three Hermes reports failed on this or
+  related premises); limitations, coverage reasons and appraisal rationales are exported
+  without review; and the rule that record titles are not citable led reviewers to remove true
+  study-design labels. Codex and Claude synthetic reports had no false premise; the live-source
+  Codex report passed.
+
 ## 0.4.0 — 2026-09-14
 
 - Add source packets, exact source lookup, atomic related-stage updates, aggregate checks and resumable finalization.

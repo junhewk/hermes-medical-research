@@ -1,9 +1,11 @@
 # Release candidate validation: 0.4.0
 
-Status on 2026-09-14: **released as 0.4.0 at the user's decision** after the deterministic
-checks and the three native-review integration probes below passed. Full-report behavioral
-qualification (fresh complete reports on each host and a live-source run) has not been
-performed on this revision and remains open. Draft PR:
+Status on 2026-09-15: **0.4.0 is published; full-report behavioral qualification did not pass.**
+The release went out at the user's decision after the deterministic checks and the native-review
+integration probes passed. The subsequent full-report runs below found false factual premises in
+all three Hermes reports, each accepted by a passing native review. The Codex and Claude synthetic
+reports had no false premise but discarded true information, and the live-source Codex report
+passed an independent audit. Draft PR:
 https://github.com/junhewk/medical-deep-research-plugin/pull/1
 The original hypertension report remains unchanged.
 
@@ -94,6 +96,62 @@ copies of a synthetic failed report; nothing was repaired or finalized:
 These probes establish handoff, verdict validation, accounting and author visibility. They are
 not full-report qualification: fresh complete Codex/Claude reports, three Hermes reports under
 the shared 150 budget, and a bounded live-source run remain release gates.
+
+## Full-report behavioral qualification of 0.4.0 (2026-09-14 to 2026-09-15)
+
+Released source `v0.4.0` (`92c7b30`), frozen at `/tmp/mdr-v040-r4` locally and
+`jkworkstation:/tmp/mdr-v040-source-r4`. Synthetic runs use `scripts/behavioral_fixture.py`,
+offline finalization and a shared 150-unit total. The live run used Europe PMC, OpenAlex and
+ClinicalTrials.gov with 20 records per source and 8 full-text attempts. Hermes ran in isolated
+profiles with qwen3.8-flash-next; production Hermes was not used. Each exported report was
+fact-checked by an independent agent against the fixture text (or, for the live run, against
+the stored source segments), including limitations, coverage reasons and appraisal rationales.
+
+| Run | Completed | Native reviews (revise findings) | Accounting | Factual audit |
+| --- | --- | --- | --- | --- |
+| Codex synthetic | Yes, 15 min | 2: 3 revise, then all 7 pass | 64 author + 20 reviewer local tool calls of 150 | QUALIFIED: no false premise; over-hedging (below) |
+| Codex live-source | Yes, 17 min | 1: all 5 pass | 79 author + 5 reviewer local tool calls of 150 | PASS: all estimates, interval types, limits and disclosures verified; two omissions |
+| Hermes synthetic 1 | Yes, 164 min | 3: 2 revise, 3 revise, then all 6 pass | 80 author + 33 reviewer host iterations of 150 | FAIL (marginal): T4 called hypertensive and review-included; T3 SBP-pool contributor in coverage; unsupported ROBIS premise |
+| Hermes synthetic 2 | Yes, 132 min | 2: 2 revise, then all 5 pass | 64 author + 24 reviewer host iterations of 150 | FAIL: T3 treated as R1 DBP and SBP pool contributor driving both certainty downgrades; SUCRA assigned to office SBP; syncope called serious |
+| Hermes synthetic 3 | Yes, 112 min | 2: 3 revise, then all 7 pass | 52 author + 21 reviewer host iterations of 150 | FAIL: R1 misquoted as naming T1/T3 in its SBP pool, driving the SBP downgrade; "T2 reported no adverse events"; claimed source caveats that were dropped |
+| Claude synthetic | Yes, 58 min (third attempt) | 4: 5 revise, 1 revise, 2 revise, then all 7 pass | 47 author + 54 reviewer local tool calls of 150 | QUALIFIED: no false premise; one unsupported appraisal premise (T2's unreported estimate called the prespecified analysis); T3 over-hedged |
+
+Integration behavior held on every completed run: zero correction rounds were needed, every
+review settled `completed`, Hermes reviewers ran the check tool 2-3 times per run, Hermes
+reviewer denials were at most one per run, no author was blocked, Codex hooks denied nothing,
+and every run stayed within its shared total. First reviews caught real errors that authors
+then fixed (for example, "only T1 reported arm-level counts" and a misattributed ambulatory
+gap). Two earlier Claude attempts stopped on the account's usage cap, not on the plugin; in the
+second, the host ended the reviewer without a `SubagentStop` event and the receipt correctly
+stayed `running` with its reservation held.
+
+Reviews were not idle: across hosts, first reviews caught and authors fixed errors such as an
+unhedged moderate-certainty pooled conclusion, false independence claims, and "only T1 reported
+arm-level counts" while T4 reported a syncope. The core qualification criterion is still not met. The failure the native reviewer was introduced to
+prevent, treating a review-level trial list as outcome-pool membership, recurred in Hermes runs
+2 and 3 and was passed by the reviewer. Three plugin causes were identified; none is fixed in 0.4.0:
+
+1. **Author-tagged outcome mappings are presented as proof.** The overlap validator accepts
+   `scope: "outcome"` whenever the quote exists in the review and a finding outcome is named;
+   it cannot tell whether the quote states per-outcome pool membership. The review packet then
+   lists these mappings as `proven_outcome_mappings`, and the prompt tells reviewers to check
+   certainty premises against them. In Hermes run 2 the author tagged "Two trials, T1 and T3,
+   were included" as outcome scope for DBP, and the reviewer accepted T3 as a DBP contributor,
+   although T3 reports no DBP. Run 3 tagged the same sentence differently for SBP and DBP and
+   received opposite verdicts.
+2. **Only findings are reviewed.** Limitations, coverage reasons, extraction labels and
+   appraisal rationales are exported without review, and several false premises survived there
+   after the findings were corrected.
+3. **The citation contract encourages discarding true information.** The rule that record
+   titles are not citable led the first Codex and Claude reviewers to demand removal of T3's
+   handgrip and inactive-control labels, which the corpus supports, and both authors complied.
+   Their exported coverage and study tables still carry the labels, so the files disagree.
+
+Remaining release gates for the next revision: fix the three causes above, then repeat three
+fresh Hermes reports, one Codex and one Claude synthetic report, and one bounded live-source
+report, with the same independent factual audit covering limitations, coverage and appraisals.
+Run artifacts: `/tmp/mdr-v040-eval/{codex,claude,live-codex}-r4*` locally and
+`jkworkstation:/tmp/mdr-v040-eval/hermes-r4-{1,2,3}`.
 
 ## Reproducing behavioral qualification
 
