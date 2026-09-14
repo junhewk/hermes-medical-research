@@ -98,6 +98,12 @@ def _read_only(event, directory):
 
 def handle(event, host, registry_dir=None):
     """Process one native lifecycle event, scoped to explicitly bound research sessions."""
+    event = dict(event)
+    name = event.get("tool_name", "")
+    for prefix in ("functions.collaboration.", "collaboration.", "functions."):
+        if name.startswith(prefix):
+            event["tool_name"] = name[len(prefix) :]
+            break
     cwd = Path(registry_dir or event["cwd"]).resolve()
     store = RunStore(cwd)
     kind = event.get("hook_event_name")
@@ -120,6 +126,20 @@ def handle(event, host, registry_dir=None):
                 sid,
                 {"role": "author", "run_dir": str(run), "calls": [], "total": total, "host": host},
             )
+        if sid in state["sessions"] or parent_id in state["sessions"]:
+            state.setdefault("events", []).append(
+                {
+                    k: event.get(k)
+                    for k in (
+                        "hook_event_name",
+                        "tool_name",
+                        "session_id",
+                        "agent_id",
+                        "tool_use_id",
+                    )
+                }
+            )
+            store.write_json(REGISTRY, state)
         if kind == "SubagentStart" and parent_id in state["pending"]:
             pending = state["pending"][parent_id]
             if not sid or sid == parent_id or sid in state["sessions"]:
