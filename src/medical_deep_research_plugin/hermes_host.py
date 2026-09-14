@@ -127,6 +127,9 @@ def review(args, **kwargs):
         0, task["prompt"], None, ["file"], None, task["allocated_turns"], 1, parent
     )
     child.prefill_messages = []
+    from hermes_cli.config import load_config
+
+    child.max_tokens = review_output_limit(parent, (load_config() or {}).get("model", {}))
     _REVIEWERS[child.session_id] = str(Path(task["packet_path"]).parent)
     old_step = getattr(child, "step_callback", None)
 
@@ -147,6 +150,13 @@ def review(args, **kwargs):
         "budget": task["budget"],
         "next": "call medical_research_review action=status wait_seconds=45",
     }
+
+
+def review_output_limit(parent, model_config):
+    limit = getattr(parent, "max_tokens", None)
+    if limit is None and isinstance(model_config, dict):
+        limit = model_config.get("max_tokens")
+    return limit if type(limit) is int and limit > 0 else None
 
 
 def _complete_review(parent, child, binding, task):
@@ -181,6 +191,7 @@ def _complete_review(parent, child, binding, task):
             native_metadata={
                 "subagent_id": getattr(child, "_subagent_id", None),
                 "model": result.get("model"),
+                "max_tokens": child.max_tokens,
                 "api_calls": result.get("api_calls"),
                 "exit_reason": result.get("exit_reason"),
             },

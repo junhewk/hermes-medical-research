@@ -99,11 +99,22 @@ def _read_only(event, directory):
 def handle(event, host, registry_dir=None):
     """Process one native lifecycle event, scoped to explicitly bound research sessions."""
     event = dict(event)
-    name = event.get("tool_name", "")
+    name = event.get("tool_name") or ""
     for prefix in ("functions.collaboration.", "collaboration.", "functions."):
         if name.startswith(prefix):
             event["tool_name"] = name[len(prefix) :]
             break
+    aliases = {
+        "collaboration" + action: action
+        for action in (
+            "spawn_agent",
+            "followup_task",
+            "send_message",
+            "wait_agent",
+            "interrupt_agent",
+        )
+    }
+    event["tool_name"] = aliases.get(event.get("tool_name"), event.get("tool_name"))
     cwd = Path(registry_dir or event["cwd"]).resolve()
     store = RunStore(cwd)
     kind = event.get("hook_event_name")

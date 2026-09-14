@@ -216,7 +216,13 @@ def test_native_hooks_bind_once_and_count_child_calls_in_total(tmp_path, host):
         else {"subagent_type": "medical-evidence-reviewer", "prompt": "review", "model": "unwanted"}
     )
     spawned = native_hooks.handle(
-        event(tmp_path, tool_name="Agent", tool_use_id="spawn-1", tool_input=args), host
+        event(
+            tmp_path,
+            tool_name="collaborationspawn_agent" if host == "codex" else "Agent",
+            tool_use_id="spawn-1",
+            tool_input=args,
+        ),
+        host,
     )
     updated = spawned["hookSpecificOutput"]["updatedInput"]
     assert "model" not in updated
@@ -319,3 +325,15 @@ def test_hermes_review_tool_exposes_bounded_polling():
     properties = captured["medical_research_review"]["parameters"]["properties"]
     assert properties["action"]["enum"] == ["start", "status"]
     assert properties["wait_seconds"]["maximum"] == 45
+
+
+def test_review_output_limit_inherits_existing_host_setting():
+    from medical_deep_research_plugin.hermes_host import review_output_limit
+
+    parent = Parent()
+    parent.max_tokens = None
+    assert review_output_limit(parent, {"max_tokens": 32768}) == 32768
+    parent.max_tokens = 16384
+    assert review_output_limit(parent, {"max_tokens": 32768}) == 16384
+    parent.max_tokens = None
+    assert review_output_limit(parent, {}) is None
