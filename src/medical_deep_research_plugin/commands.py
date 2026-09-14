@@ -113,6 +113,17 @@ def add_commands(commands: Any) -> None:
     )
     checker.add_argument("run_dir", type=Path)
     checker.add_argument("--input", type=Path, help="Preview a proposed batch without committing")
+    review_check = actions.add_parser(
+        "review-check", help="Validate a native reviewer's result files without recording them"
+    )
+    review_check.add_argument("task_dir", type=Path)
+    review_abandon = actions.add_parser(
+        "review-abandon",
+        help="Settle a native review whose reviewer never reported termination (full charge)",
+    )
+    review_abandon.add_argument("run_dir", type=Path)
+    review_abandon.add_argument("task_id")
+    review_abandon.add_argument("--hook-token", help=argparse.SUPPRESS)
     finalizer = actions.add_parser("finalize", help="Check, optionally submit, verify, and export")
     finalizer.add_argument("run_dir", type=Path)
     finalizer.add_argument("--input", type=Path)
@@ -170,6 +181,28 @@ async def dispatch(args: argparse.Namespace) -> int:
             )
         print(json.dumps({"host": state["host"], "budget": budget_status(state)}))
         return 0
+    if action == "review-check":
+        from .native_review import review_check
+
+        value = review_check(args.task_dir)
+        print(json.dumps(value, ensure_ascii=False, indent=2))
+        return 0 if value["valid"] else 2
+    if action == "review-abandon":
+        from .native_review import abandon, summary
+
+        workspace = Workspace(args.run_dir)
+        binding = workspace.store.read_json("native-binding.json", default={})
+        if not args.hook_token or binding.get("token") != args.hook_token:
+            raise ValidationError(
+                "Native hooks did not authorize this abandonment; run it from the bound "
+                "author session after the reviewer has been inactive."
+            )
+        value = abandon(
+            workspace, task_id=args.task_id, author_session_id=binding.get("session_id")
+        )
+        value["native_review"] = summary(workspace)
+        print(json.dumps(value, ensure_ascii=False, indent=2))
+        return 0
     if action == "init":
         workspace = Workspace(args.output)
         workspace.path.mkdir(parents=True, exist_ok=True)
@@ -187,7 +220,10 @@ async def dispatch(args: argparse.Namespace) -> int:
         if action == "check":
             value = check(workspace, json.loads(args.input.read_text()) if args.input else None)
         elif action == "status":
+            from .native_review import summary
+
             value = workspace.status()
+            value["native_review"] = summary(workspace)
             if args.stage:
                 if args.offset < 0 or args.limit < 1:
                     raise ValidationError("offset must be nonnegative and limit must be positive")
@@ -234,9 +270,12 @@ async def dispatch(args: argparse.Namespace) -> int:
                         workspace.put(args.stage, payload)
                         value = workspace.status()
                 elif action == "next":
+                    from .native_review import summary
+
                     value = next_packet(
                         workspace, stage=args.stage, limit=args.limit, output=args.output
                     )
+                    value["native_review"] = summary(workspace)
                 elif action == "finalize":
                     value = await finalize(
                         workspace,

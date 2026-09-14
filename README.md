@@ -72,13 +72,14 @@ Then invoke `/medical-deep-research` followed by the report request, or ask Herm
 session's prompt is next built; the slash command explicitly loads the instructions in the current
 chat. A gateway restart is not needed for this external-directory setup.
 
-Version 0.4 adds a native Hermes adapter. Doctor should report two tools
-(`medical_research_session`, `medical_research_review`) and one `pre_tool_call` hook.
+Version 0.4 adds a native Hermes adapter. Doctor should report three tools
+(`medical_research_session`, `medical_research_review`, `medical_research_review_check`) and one
+`pre_tool_call` hook.
 The native qualified skill is `medical-deep-research-plugin:medical-deep-research`.
 Older portable installations used `agent-plugin-medical-deep-research-plugin-71b62b59:`;
 that namespace is historical, not another Hermes installation. The short name still uses
 `skills.external_dirs`. Reloading skills refreshes instructions, not already imported Python
-plugin code; verify the two native tools in the actual chat before starting research.
+plugin code; verify the three native tools in the actual chat before starting research.
 
 The external-directory setting activates the instructions independently of the plugin registry.
 Remove its entry as well when deactivating these skills. Local skills with the same name take

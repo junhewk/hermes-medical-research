@@ -19,7 +19,8 @@ Review iterations are reserved before delegation and deducted from the author's 
 cap after measured completion. The host's final toolless grace reply is outside that counter.
 The adapter changes only the active report session, not gateway configuration or global caps.
 The reviewer inherits the live parent output-token limit, or the host's existing
-`model.max_tokens` value when the parent did not propagate it. No new limit or model is chosen.
+`model.max_tokens` value when the parent did not propagate it; otherwise the child keeps its
+default. No new limit or model is chosen, which is why per-finding result files are preferred.
 
 **Codex / Claude Code:** run this as one terminal command from the host:
 
@@ -51,23 +52,54 @@ result file. Returning long JSON in a chat message is unreliable because hosts t
 
 - Hermes: call `medical_research_review` with `run_dir`, `action: "start"`, `review_turns: 20`.
   It starts a native child asynchronously. Call the same tool with `action: "status"` and
-  `wait_seconds: 45` until terminal. These bounded waits avoid the host's tool timeout.
+  `wait_seconds: 300` until terminal; each poll returns changing progress (iterations, result
+  files, elapsed time) and stays under the host's 420-second tool deadline. Every poll costs
+  one author iteration, so use the longest wait.
 - Claude Code: call `Agent` with
   `subagent_type: "medical-deep-research-plugin:medical-evidence-reviewer"`, synchronously.
-  The agent inherits the model, has Read/Write access to its assigned files, and a 20-turn cap.
+  The agent inherits the model, may read its task directory, write its result files and run
+  the check command, and has a 20-turn cap.
 - Codex: spawn a native reviewer with the host's fresh-context option explicitly set
   (`fork_context: false`, or `fork_turns: "none"` where exposed). Name/describe the task as
   medical evidence review. The hook supplies its frozen packet and reserves 20 units.
-  Wait for the task. Do not fork the author's history, select another model or delegate further.
+  Wait for the task. Do not fork the author's history, message the reviewer, select another
+  model or delegate further.
 
-The native adapter records the returned file and host task identity. The author may read
-required revisions but cannot approve itself or edit the recorded verdict. A valid `revise`
-verdict is useful progress: correct its evidence/synthesis claims, then delegate another
-fresh review. Never repair a claim only inside the review rationale. Finalization requires
-passing verdicts for every finding against the current complete candidate digest.
+## Reviewer output contract
+
+The packet names the result files, a `citation_contract` and an `example_observation`. The
+reviewer writes one JSON record per finding to `results/<finding_id>.json` (small writes
+survive low output limits) or all records to `result.json`, never both. Every citation is
+`{document_id, locator, quote}`: a `document_id` from `sources.json` (`record_id:kind`, never a
+bare record id), one of that document's segment locators, and verbatim text. Packet fields
+and record titles are not citable; a study's presence is proven by quoting its own document.
+
+Reviewers validate before stopping: `research review-check TASK_DIR` (Codex/Claude, allowed by
+the hook for the bound CLI prefix) or the Hermes tool `medical_research_review_check`. The
+check lists every problem with hints and records nothing. On Codex/Claude a reviewer that stops
+with an invalid result receives the exact problems and may correct them at most twice while its
+allocation lasts; the rounds are metered from the same reservation. One invalid citation
+otherwise invalidates the whole review.
+
+## Reading the outcome
+
+The native adapter records the result files and host task identity. `research check`,
+`status` and `next` return `native_review` with the latest task's state, `failure_reason` and
+`failure_detail`; hooks repeat that state in tool context until the author inspects the run.
+Read it before describing a review outcome; a reviewer's chat summary is not a recorded
+verdict. The author may read required revisions but cannot approve itself or edit the
+recorded verdict. A valid `revise` verdict is useful progress: correct its evidence/synthesis
+claims, then delegate another fresh review. Never repair a claim only inside the review
+rationale. Finalization requires passing verdicts for every finding against the current
+complete candidate digest.
 
 A missing output, invalid quote/schema, truncation, unknown child termination or exhausted
-budget cannot become a passing review. Unknown termination retains its reservation. Do not
-retry a still-running task, reset the budget, or manually manufacture a native receipt.
+budget cannot become a passing review. Unknown termination retains its reservation. A
+reviewer that hits its iteration cap after writing a complete, valid verdict is accepted; the
+artifact is validated, not the loop's exit shape. Do not retry a still-running task, reset the
+budget, or manually manufacture a native receipt. If the host never reports the reviewer's
+termination, the bound author may run `research review-abandon RUN TASK_ID` (Hermes:
+`action: "abandon"` once the child future is done) after the reviewer has been inactive; this
+charges the whole reservation, records the abandonment and never produces a pass.
 All machine checks establish traceability/consistency; a separate model can still make
 factual errors. Behavioral qualification and transparent report limitations remain necessary.

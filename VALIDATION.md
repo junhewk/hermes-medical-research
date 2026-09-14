@@ -1,8 +1,11 @@
 # Release candidate validation: 0.4.0
 
-Status on 2026-09-14: **release withheld**. Draft PR:
+Status on 2026-09-14: **released as 0.4.0 at the user's decision** after the deterministic
+checks and the three native-review integration probes below passed. Full-report behavioral
+qualification (fresh complete reports on each host and a live-source run) has not been
+performed on this revision and remains open. Draft PR:
 https://github.com/junhewk/medical-deep-research-plugin/pull/1
-Production Hermes and the original hypertension report remain unchanged.
+The original hypertension report remains unchanged.
 
 ## Why separate native review is required
 
@@ -46,6 +49,51 @@ and invalid native output, quote checks, budget reservations, overruns, interrup
 accounting, per-session Hermes caps, native hook identities, duplicate events and restricted
 reviewer file access. Current test counts and host results must be updated after the final
 candidate is frozen. Do not promote this draft based on historical green CI alone.
+
+## Native review stabilization (2026-09-14)
+
+Diagnosis from the retained probe artifacts, before any code change:
+
+- Codex r5 (`/tmp/mdr-native-eval/codex-review-r5`): delegation, packet delivery and the
+  reviewer's verdict all worked. One of 129 citations used a bare record id and a JSON-path
+  locator instead of a `document_id`/segment locator; the validator rejected the whole verdict,
+  the receipt recorded `failed` without a reason, and the failure reached the author only as a
+  Codex `systemMessage`, which Codex shows to the user rather than the model. The author
+  therefore reported success on a failed receipt.
+- Hermes r4 (`jkworkstation:/tmp/mdr-native-eval/hermes-review-r4`): finished as an accepted
+  review (7 records, 4 revise, 3 pass; 8 reviewer + 12 author iterations of 60). The child
+  had been denied `search_files` and `patch` by a name-based policy, the author polled at a
+  45-second cap and tripped the host's identical-call guard, and acceptance depended on the
+  loop's exit reason rather than the validated artifact. Hermes r2 had failed earlier because
+  the child inherited no output limit and truncated a single ~20K-token write.
+
+Changes: complete problem reporting with hints (`research review-check`, Hermes
+`medical_research_review_check`), persisted `failure_reason`/`failure_detail`, a citation
+contract and example in the frozen packet, per-finding result files, reviewer read-back and
+result updates, at most two metered correction rounds on Codex/Claude through the host's
+subagent-stop decision, model-facing review state in tool context, a bounded author stop
+block, path-based Hermes reviewer policy with instructive messages, progress-bearing status
+polls with waits up to 300 seconds, artifact-based Hermes acceptance, and a fail-closed
+abandon path for reviewers the host never settles.
+
+Deterministic evidence on this checkout: 188 tests (168 before this pass), Ruff, bundle validation, wheel/sdist/ZIP
+builds, and `scripts/validate_hermes.py` against the pinned Hermes source (three tools, one
+hook; Plugin Guard verdict `safe`, 40 medium and 1 low notices). Offline replay of
+`review-check` against the retained r5 artifact reports exactly the one invalid citation with
+the two valid document ids as a hint; against the Hermes r4 artifact it reports valid.
+
+Integration probes of the frozen candidate (`/tmp/mdr-native-r6`, this working tree) on
+copies of a synthetic failed report; nothing was repaired or finalized:
+
+| Host | Outcome | Accounting (measured unit) |
+| --- | --- | --- |
+| Codex 0.154.0 | Receipt `completed`, 7 records all `revise`, 45 observations, 68 verified citations, 0 repairs. One denial: the reviewer's first relative-path read (now resolved against the host cwd). The author ran `research check` and reported the recorded state. | 8 author + 7 reviewer local tool calls of 60 |
+| Claude Code | Receipt `completed`, 7 per-finding result files, reviewer ran `review-check` itself, 0 denials, 0 repairs. The author's final message distinguished the recorded verdict from the reviewer's chat summary. | 3 author + 12 reviewer local tool calls of 60 |
+| Hermes 0.21.2 / qwen3.8-flash-next (isolated profile on jkworkstation) | Receipt `completed`, 7 per-finding result files (4 pass, 3 revise), reviewer ran `medical_research_review_check` and stopped with `exit_reason=completed`, 0 repairs. One denial: the host's `tool_describe` discovery helper (now allowed). Status polls at 300 s returned changing progress; no identical-call guard trips. | 8 author + 13 reviewer host iterations of 60 (r4: 12 + 8) |
+
+These probes establish handoff, verdict validation, accounting and author visibility. They are
+not full-report qualification: fresh complete Codex/Claude reports, three Hermes reports under
+the shared 150 budget, and a bounded live-source run remain release gates.
 
 ## Reproducing behavioral qualification
 

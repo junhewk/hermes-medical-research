@@ -93,8 +93,10 @@ extractions/appraisals → synthesis → separate claim review → finalization.
 
 After recording synthesis, delegate the frozen candidate through the native host adapter described
 in [native-review.md](references/native-review.md). The author must not fill review templates.
-The reviewer reads the complete stored corpus, writes its own verdict to its assigned result file,
-and returns a short status. Native lifecycle metadata binds that verdict to a distinct task.
+The reviewer reads the complete stored corpus, writes its own verdict to its assigned result
+files, validates them with the check command, and returns a short status. Native lifecycle
+metadata binds that verdict to a distinct task. Read `native_review` in `research check` output
+before describing the outcome: a failed or running task means no verdict was recorded.
 Correct required revisions in the evidence/synthesis, then obtain a fresh review of the new digest.
 This is separate agent review; it is not independent human adjudication.
 

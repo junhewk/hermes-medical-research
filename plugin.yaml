@@ -6,5 +6,6 @@ requires_hermes: '>=0.21.2'
 provides_tools:
   - medical_research_session
   - medical_research_review
+  - medical_research_review_check
 provides_hooks:
   - pre_tool_call

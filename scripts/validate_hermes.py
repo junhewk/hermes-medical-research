@@ -34,7 +34,11 @@ def probe(enabled: bool) -> None:
     assert {s["name"].split(":")[-1] for s in skills} == SKILLS, listing
     assert len(skills) == len(SKILLS), listing
     loaded = get_plugin_manager()._plugins[PLUGIN]
-    assert set(loaded.tools_registered) == {"medical_research_session", "medical_research_review"}
+    assert set(loaded.tools_registered) == {
+        "medical_research_session",
+        "medical_research_review",
+        "medical_research_review_check",
+    }
     assert loaded.hooks_registered == ["pre_tool_call"]
 
     for skill in skills:

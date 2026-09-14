@@ -356,7 +356,16 @@ def next_packet(
                 if e["extraction_id"] == c["extraction_id"]
             )
         )
-        task = (
+        from .native_review import summary as native_summary
+
+        native = native_summary(view)
+        latest = native.get("latest_task") or {}
+        prefix = (
+            f"Latest native review {latest['task_id']} is {latest['state']}: {native['guidance']} "
+            if latest and latest.get("state") != "completed"
+            else ""
+        )
+        task = prefix + (
             "Delegate to a fresh native medical evidence reviewer. Hermes: use "
             "medical_research_review. Codex: spawn medical-evidence-reviewer with "
             "the tool's fresh-context option; Claude: Agent subagent_type "

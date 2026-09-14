@@ -259,7 +259,17 @@ def check(workspace: Workspace, batch: dict | None = None) -> dict:
         "semantic_support": (
             "Host review; deterministic checks do not establish medical correctness."
         ),
+        "native_review": native_summary(workspace),
     }
+
+
+def native_summary(workspace: Workspace) -> dict:
+    from .native_review import summary
+
+    try:
+        return summary(workspace)
+    except (ValidationError, KeyError, TypeError, OSError, ValueError) as exc:
+        return {"bound": None, "error": str(exc)}
 
 
 async def finalize(
