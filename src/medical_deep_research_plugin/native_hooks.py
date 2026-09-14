@@ -157,7 +157,14 @@ def handle(event, host, registry_dir=None):
                 raise ValidationError("native host did not provide a fresh reviewer identity")
             state["sessions"][sid] = {**pending, "role": "reviewer", "calls": []}
             store.write_json(REGISTRY, state)
-            return {}
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "SubagentStart",
+                    "additionalContext": native_review.reviewer_prompt(
+                        pending["packet_path"], pending["allocated_turns"], host
+                    ),
+                }
+            }
         entry = state["sessions"].get(sid)
         if not entry:
             return {}
@@ -215,24 +222,28 @@ def handle(event, host, registry_dir=None):
                 requested = args.get("subagent_type", "").split(":")[-1]
                 if (host == "claude-code" and requested != REVIEWER) or sid in state["pending"]:
                     return deny("Use one fresh medical-evidence-reviewer task at a time")
-                if host == "codex" and not ({"fork_turns", "fork_context"} & args.keys()):
+                if host == "codex" and not (
+                    args.get("fork_turns") == "none" or args.get("fork_context") is False
+                ):
                     return deny("Set the native spawn tool's fresh-context option explicitly")
+                if args.get("model") or args.get("resume"):
+                    return deny("Use a fresh reviewer that inherits the host model")
                 task = native_review.prepare(workspace, author_session_id=sid, review_turns=20)
                 state["pending"][sid] = {**entry, **task, "parent_id": sid}
                 store.write_json(REGISTRY, state)
-                updated = dict(args)
                 if host == "codex":
-                    updated["message"] = task["prompt"]
-                    if "fork_turns" in updated:
-                        updated["fork_turns"] = "none"
-                    if "fork_context" in updated:
-                        updated["fork_context"] = False
-                    updated.pop("model", None)
-                    updated.pop("reasoning_effort", None)
-                else:
-                    updated.update(prompt=task["prompt"], run_in_background=False)
-                    updated.pop("resume", None)
-                    updated.pop("model", None)
+                    # The collaboration transport is not the ordinary local-tool
+                    # argument decoder. Deliver its packet through SubagentStart.
+                    return {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "additionalContext": "Review reserved; packet follows.",
+                        }
+                    }
+                updated = dict(args)
+                updated.update(prompt=task["prompt"], run_in_background=False)
+                updated.pop("resume", None)
+                updated.pop("model", None)
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",

@@ -144,7 +144,9 @@ Report defaults: **100 raw retrieved records per source across all searches** an
 records attempted for full text**. Reserve some capacity for gap searches/citation chaining.
 Failed full-text attempts count; retries of the same record reuse its slot.
 
-For a local checkout:
+For a local checkout, invoke the skill from a native host session. Bind the report with
+`research host-session` (Codex/Claude) or `medical_research_session` (Hermes) before research.
+The following commands show the CLI stages; a terminal alone cannot supply the native reviewer.
 
 ```bash
 uv sync --locked --extra dev

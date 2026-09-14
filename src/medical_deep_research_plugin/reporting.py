@@ -119,7 +119,12 @@ def export(workspace: Workspace) -> dict[str, Any]:
         "",
         text(protocol["question"]["question"]),
         "",
-        "Agent-assisted evidence synthesis. Appraisals are provisional and require human review.",
+        (
+            "A separate agent reviewed these findings against the stored evidence. "
+            "Appraisals remain provisional and require human review."
+            if modern
+            else "Agent-assisted synthesis. Appraisals are provisional and require human review."
+        ),
         "",
         f"Workflow: **{protocol['mode']}**. Report language: {text(protocol['language'])}.",
         "",

@@ -211,9 +211,9 @@ def test_native_hooks_bind_once_and_count_child_calls_in_total(tmp_path, host):
     native_hooks.handle(start, host)
     assert w.store.read_json(native_review.STATE)["authors"] == {"author": 1}
     args = (
-        {"fork_context": True, "message": "review", "model": "unwanted"}
+        {"fork_context": False, "message": "review"}
         if host == "codex"
-        else {"subagent_type": "medical-evidence-reviewer", "prompt": "review", "model": "unwanted"}
+        else {"subagent_type": "medical-evidence-reviewer", "prompt": "review"}
     )
     spawned = native_hooks.handle(
         event(
@@ -224,13 +224,14 @@ def test_native_hooks_bind_once_and_count_child_calls_in_total(tmp_path, host):
         ),
         host,
     )
-    updated = spawned["hookSpecificOutput"]["updatedInput"]
-    assert "model" not in updated
     if host == "codex":
-        assert updated["fork_context"] is False
-    native_hooks.handle(
+        assert "updatedInput" not in spawned["hookSpecificOutput"]
+    else:
+        assert "model" not in spawned["hookSpecificOutput"]["updatedInput"]
+    started = native_hooks.handle(
         event(tmp_path, "SubagentStart", agent_id="child", agent_type="reviewer"), host
     )
+    assert "frozen packet" in started["hookSpecificOutput"]["additionalContext"]
     task = list(w.store.read_json(native_review.STATE)["tasks"].values())[0]
     packet_path = task["packet_path"]
     read = event(

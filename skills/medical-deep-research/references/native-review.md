@@ -18,6 +18,8 @@ execution refunds are disabled for this report, so code-mode loops still consume
 Review iterations are reserved before delegation and deducted from the author's remaining
 cap after measured completion. The host's final toolless grace reply is outside that counter.
 The adapter changes only the active report session, not gateway configuration or global caps.
+The reviewer inherits the live parent output-token limit, or the host's existing
+`model.max_tokens` value when the parent did not propagate it. No new limit or model is chosen.
 
 **Codex / Claude Code:** run this as one terminal command from the host:
 
