@@ -36,7 +36,7 @@ DESCRIPTIONS = {
 MANAGED = "mdr-managed.json"
 ROUTINES_MANAGED = "mdr-routines.json"
 TOOLSETS = ["terminal", "file", "skills"]
-PROFILE_MAX_TURNS = {"mdr-searcher": 8}
+PROFILE_MAX_TURNS = {"mdr-searcher": 8, "mdr-selector": 80}
 
 
 def _home(value: Path | None) -> Path:
@@ -527,20 +527,30 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
             "#!/bin/sh\n" f"exec mdr --store {quoted_store} work probe {role}\n"
         ).encode()
         command = command_for[role]
+        if role == "selector":
+            prompt = (
+                f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
+                "If it returns idle, reply exactly [SILENT]. Otherwise perform the loaded skill "
+                "using only the returned packet, proposal, and exact commands. After an accepted "
+                "submission, claim and process the next Selector task immediately. Continue for "
+                "up to 10 accepted tasks in this invocation, or stop sooner on idle or error. On "
+                "any unrecoverable error, run the returned fail command. Return only the last "
+                "recorded state."
+            )
+        else:
+            prompt = (
+                f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
+                "If it returns idle, reply exactly [SILENT]. Otherwise perform the loaded skill "
+                "using only the returned packet, proposal, and exact commands. On any "
+                "unrecoverable error, run the returned fail command. Return only the recorded "
+                "state."
+            )
         jobs.append(
             {
                 "profile": profile,
                 "name": f"mdr-work-{role}",
                 "schedule": "* * * * *",
-                "prompt": (
-                    f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
-                    "If it returns idle, "
-                    "reply exactly [SILENT]. "
-                    "Otherwise perform the loaded skill using only the returned packet, proposal, "
-                    "and exact commands. On any unrecoverable error, run the returned fail "
-                    "command. "
-                    "Return only the recorded state."
-                ),
+                "prompt": prompt,
                 "monitor_script": monitor,
                 "no_agent": False,
                 "deliver": None,

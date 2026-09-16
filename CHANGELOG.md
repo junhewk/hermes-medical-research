@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 - 2026-09-16
+
+- Made Review-managed Selector submissions route the next Selector task immediately, removing the
+  Coordinator-tick delay between articles while preserving one bounded packet and receipt each.
+- Updated the Selector Routine and skill to process up to ten consecutive tasks per invocation and
+  raised only that profile's turn ceiling for the bounded loop.
+
 ## 0.5.2 - 2026-09-16
 
 - Made bounded PubMed and PMC retrieval available without requiring an NCBI email, while retaining

@@ -17,7 +17,7 @@ ROOT = Path(__file__).parents[1]
 def test_distribution_has_one_executable_and_new_identity():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert project["name"] == "hermes-medical-research"
-    assert project["version"] == __version__ == "0.5.2"
+    assert project["version"] == __version__ == "0.5.3"
     assert project["scripts"] == {"mdr": "hermes_medical_research.cli:main"}
     assert set(parser()._subparsers._group_actions[0].choices) == {
         "run",

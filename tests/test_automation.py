@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from test_research import completed_search
 
 from hermes_medical_research.automation import AutomationEngine
 from hermes_medical_research.hermes import routines
@@ -78,6 +79,44 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
         claim_token=claim["claim_token"],
     )
     assert accepted["state"] == "plan_recorded"
+
+
+@pytest.mark.asyncio
+async def test_selector_acceptance_immediately_routes_the_next_record(tmp_path: Path):
+    automation = AutomationEngine(tmp_path)
+    created = automation.create_review(
+        "continuous-selection",
+        protocol(),
+        schedule="once",
+        timezone="Asia/Seoul",
+    )
+    run_id = automation.review_status(created["name"])["cycles"][0]["run_id"]
+    workspace = automation.catalog.workspace(run_id)
+    search, _ = completed_search(workspace, tmp_path / "search", count=2)
+    workspace.attach(search.path)
+    assert (await automation.tick())["routed"] == 1
+
+    actor = Actor("mdr-selector", "continuous-session", "selector")
+    claim = automation.claim("select", actor)
+    proposal_path = Path(claim["proposal_path"])
+    proposal = json.loads(proposal_path.read_text())
+    proposal["stages"]["screening"]["records"][0].update(
+        decision="exclude",
+        reason="Fails the synthetic eligibility criteria.",
+    )
+    proposal_path.write_text(json.dumps(proposal))
+    receipt = await TaskEngine(workspace).submit(
+        "select",
+        claim["task_id"],
+        proposal_path,
+        actor,
+        claim_token=claim["claim_token"],
+    )
+
+    assert receipt["continuation"]["state"] == "pending"
+    next_claim = automation.claim("select", actor)
+    assert next_claim["role"] == "selector"
+    assert next_claim["task_id"] == receipt["continuation"]["task_id"]
 
 
 @pytest.mark.asyncio
@@ -168,6 +207,8 @@ def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
     for job in result["jobs"]:
         if not job["no_agent"]:
             assert f"--actor {job['profile']}" in job["prompt"]
+    selector = next(job for job in result["jobs"] if job["profile"] == "mdr-selector")
+    assert "up to 10 accepted tasks" in selector["prompt"]
     assert not (tmp_path / "hermes").exists()
 
 

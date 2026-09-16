@@ -1595,6 +1595,11 @@ class TaskEngine:
                     old["state"] = "superseded"
                     old["superseded_at"] = now()
         ledger["events"].append({"event": "task.accepted", "task_id": task_id, "at": now()})
+        if manifest.get("automation") and task["role"] == "selector":
+            spec = self._next_spec(manifest, ledger)
+            if spec is not None and KIND_ROLES[spec["kind"]] == "selector":
+                continuation = self._create_task(manifest, ledger, spec)
+                task["continuation_task_id"] = continuation["task_id"]
         ledger["state"] = self._derive_state(manifest, ledger)
         self.workspace.save(manifest)
         return self._receipt_view(task)
@@ -1839,7 +1844,7 @@ class TaskEngine:
         return self._receipt_view(task)
 
     def _receipt_view(self, task: dict[str, Any]) -> dict[str, Any]:
-        return {
+        result = {
             "run_id": self.run_id,
             "task_id": task["task_id"],
             "role": task["role"],
@@ -1848,6 +1853,12 @@ class TaskEngine:
             "result_digest": task.get("result_digest"),
             "accepted_at": task.get("accepted_at"),
         }
+        if task.get("continuation_task_id"):
+            result["continuation"] = {
+                "task_id": task["continuation_task_id"],
+                "state": "pending",
+            }
+        return result
 
     def _audit_task(self, task: dict[str, Any]) -> dict[str, Any]:
         packet = self._validate_packet(task)

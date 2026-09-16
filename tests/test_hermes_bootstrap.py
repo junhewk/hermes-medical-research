@@ -110,6 +110,8 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
         }
         if name == "mdr-searcher":
             expected["agent"] = {"max_turns": 8}
+        if name == "mdr-selector":
+            expected["agent"] = {"max_turns": 80}
         assert config == expected
         assert not set(config) & {"unrelated"}
         assert json.loads((root / "mdr-managed.json").read_text())["profile"] == name
