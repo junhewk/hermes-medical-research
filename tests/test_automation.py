@@ -10,7 +10,7 @@ import pytest
 from test_research import completed_search
 
 from hermes_medical_research.automation import AutomationEngine
-from hermes_medical_research.hermes import routines
+from hermes_medical_research.hermes import _routine_specs, routines
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, TaskEngine
 
@@ -210,6 +210,21 @@ def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
     selector = next(job for job in result["jobs"] if job["profile"] == "mdr-selector")
     assert "up to 10 accepted tasks" in selector["prompt"]
     assert not (tmp_path / "hermes").exists()
+
+
+def test_routine_scripts_pin_the_mdr_executable(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "bin" / "mdr"
+    executable.parent.mkdir()
+    executable.touch()
+    monkeypatch.setattr(
+        "hermes_medical_research.hermes.shutil.which",
+        lambda name: str(executable) if name == "mdr" else None,
+    )
+
+    _, scripts = _routine_specs(tmp_path / "store", tmp_path / "hermes")
+
+    assert scripts
+    assert all(f"exec {executable} ".encode() in content for content in scripts.values())
 
 
 def test_living_review_adds_real_cadence_routine(tmp_path: Path):

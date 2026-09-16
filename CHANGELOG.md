@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4 - 2026-09-16
+
+- Pinned generated Routine scripts to the resolved `mdr` executable so Hermes cron workers do not
+  depend on the scheduler's reduced `PATH`.
+- Allowed a managed Routine script already matching the new packaged form to be adopted during an
+  upgrade while retaining refusal for any other local edit.
+
 ## 0.5.3 - 2026-09-16
 
 - Made Review-managed Selector submissions route the next Selector task immediately, removing the

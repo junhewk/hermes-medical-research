@@ -21,8 +21,8 @@ The v0.5 cutover is covered by the repository test suite. Its new architecture c
 - anonymous and API-key PubMed access, explicit any/all concept semantics across query compilation
   and ranking, and regression coverage for alternative intervention families;
 - an eight-turn Searcher profile, one-command search execution, immediate bounded Selector
-  continuation, targeted profile bootstrap, managed Routine editing through Hermes's public CLI,
-  and auditable active-Cycle cancellation;
+  continuation, absolute Routine entrypoints, targeted profile bootstrap, managed Routine editing
+  through Hermes's public CLI, and auditable active-Cycle cancellation;
 - frozen living-review strategy validation, cumulative canonical corpus merge, source-digest reuse
   receipts, changed-source invalidation, and predecessor-linked no-change checkpoints;
 - the retained retrieval, evidence, appraisal, synthesis, verification, and export behavior.
@@ -36,7 +36,7 @@ uv run pytest
 uv build
 ```
 
-The final local run on 2026-09-16 collected and passed 181 tests; Ruff, `git diff --check`, wheel
+The final local run on 2026-09-16 collected and passed 182 tests; Ruff, `git diff --check`, wheel
 construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed.
 
 ## Hermes operational gates

@@ -486,12 +486,13 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
     from .automation import AutomationEngine
 
     quoted_store = shlex.quote(str(store))
+    quoted_mdr = shlex.quote(shutil.which("mdr") or "mdr")
     scripts: dict[str, bytes] = {}
     jobs: list[dict[str, Any]] = []
     tick_script = "mdr-work-tick.sh"
     scripts[f"mdr-coordinator/scripts/{tick_script}"] = (
         "#!/bin/sh\n"
-        f"exec mdr --store {quoted_store} --actor mdr-coordinator work cron-tick\n"
+        f"exec {quoted_mdr} --store {quoted_store} --actor mdr-coordinator work cron-tick\n"
     ).encode()
     jobs.append(
         {
@@ -524,7 +525,8 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
         profile = f"mdr-{role}"
         monitor = f"mdr-probe-{role}.sh"
         scripts[f"{profile}/scripts/{monitor}"] = (
-            "#!/bin/sh\n" f"exec mdr --store {quoted_store} work probe {role}\n"
+            "#!/bin/sh\n"
+            f"exec {quoted_mdr} --store {quoted_store} work probe {role}\n"
         ).encode()
         command = command_for[role]
         if role == "selector":
@@ -581,7 +583,8 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
         script = f"mdr-review-{view['name']}.sh"
         scripts[f"mdr-coordinator/scripts/{script}"] = (
             "#!/bin/sh\n"
-            f"exec mdr --store {quoted_store} review run-now {shlex.quote(view['name'])} "
+            f"exec {quoted_mdr} --store {quoted_store} review run-now "
+            f"{shlex.quote(view['name'])} "
             "--scheduled\n"
         ).encode()
         jobs.append(
@@ -752,7 +755,9 @@ def routines(
         for key, checksum in previous["scripts"].items():
             profile, relative = key.split("/", 1)
             path = _profile_root(home, profile) / relative
-            if not path.is_file() or _sha256(path.read_bytes()) != checksum:
+            observed = _sha256(path.read_bytes()) if path.is_file() else None
+            desired = _sha256(scripts[key]) if key in scripts else None
+            if observed not in {checksum, desired}:
                 raise ValidationError(f"managed routine script was edited outside mdr: {path}")
     managed_names = {
         (item["profile"], item["name"]) for item in (previous or {}).get("jobs", [])

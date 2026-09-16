@@ -11,9 +11,9 @@ This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 Install directly from the GitHub repository with a Python tool installer:
 
 ```bash
-uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.3
+uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.4
 # or
-pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.3
+pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.4
 ```
 
 The package exposes one executable:
