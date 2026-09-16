@@ -24,7 +24,11 @@ from hermes_medical_research.search.artifacts import (
 from hermes_medical_research.search.cli import _load_run, _validate_preflight
 from hermes_medical_research.search.config import Credentials
 from hermes_medical_research.search.http import HttpSession
-from hermes_medical_research.search.models import Question, ValidationError
+from hermes_medical_research.search.models import (
+    BIOMEDICAL_INDEX_SOURCES,
+    Question,
+    ValidationError,
+)
 from hermes_medical_research.search.orchestrator import execute_search, preflight
 from hermes_medical_research.search.providers import MeshResolver
 from hermes_medical_research.search.query import compile_strategy
@@ -41,6 +45,7 @@ TASK_PACKET_VERSION = "1"
 TASK_PACKET_LIMIT = 32 * 1024
 SOURCE_PAGE_LIMIT = 16 * 1024
 SOURCE_IDS_PER_PAGE = 100
+CORE_BIOMEDICAL_SOURCES = frozenset(BIOMEDICAL_INDEX_SOURCES)
 RUN_ID_PREFIX = "run-"
 TASK_ID_PREFIX = "task-"
 
@@ -424,7 +429,7 @@ class TaskEngine:
             )
             ledger["state"] = _state_for_role(task["role"])
             self.workspace.save(manifest)
-            return {
+            view = {
                 "run_id": self.run_id,
                 "task_id": task_id,
                 "role": task["role"],
@@ -435,6 +440,11 @@ class TaskEngine:
                 f"{self.run_id} {task_id} --from "
                 f"{self.workspace.path / task['proposal_file']}",
             }
+            if task["kind"] == "search":
+                active_plan = task.get("search_plan") or proposal
+                view["resume"] = bool(task.get("search_path"))
+                view["search_mode"] = active_plan.get("mode")
+            return view
 
     async def submit(
         self,
@@ -615,24 +625,29 @@ class TaskEngine:
             )
             strategy.warnings.extend(warnings)
             child_path = self.workspace.path / "searches" / task_id
+            store = RunStore(child_path)
+            child_manifest = store.initialize(question, strategy, credentials)
+            child_manifest["research_parent"] = os.path.relpath(
+                self.workspace.path, child_path
+            )
+            store.write_manifest(child_manifest)
             with self.workspace.lock:
                 manifest = self.workspace.load()
                 ledger = self._ledger(manifest)
                 task = ledger["tasks"][task_id]
+                self._require_submitter(manifest, task, "searcher", actor, claim_token)
                 if not task.get("search_path"):
-                    self.workspace.reserve(child_path, strategy)
-                    store = RunStore(child_path)
-                    child_manifest = store.initialize(question, strategy, credentials)
-                    child_manifest["research_parent"] = os.path.relpath(
-                        self.workspace.path, child_path
-                    )
-                    store.write_manifest(child_manifest)
+                    # Reservation and task linkage share one fresh manifest commit.  Saving the
+                    # manifest loaded before ``reserve`` used to erase the reservation immediately.
+                    self.workspace.reserve_in(manifest, child_path, strategy)
                     task["search_path"] = str(child_path)
                     task["strategy_digest"] = strategy_digest(strategy)
                     self.workspace.save(manifest)
                 child = task["search_path"]
         store = RunStore(Path(child))
         strategy, child_manifest = _load_run(store)
+        if task.get("strategy_digest") not in {None, strategy_digest(strategy)}:
+            raise ValidationError("stored child search differs from the task's frozen strategy")
         if strategy.mode == "review" and not store.read_json("approval.json", default=None):
             return {
                 "run_id": self.run_id,
@@ -653,6 +668,30 @@ class TaskEngine:
             _validate_preflight(strategy, inspected)
             if strategy.mode == "review" and not inspected["ready"]:
                 raise ValidationError("review-prep preflight failed; revise source configuration")
+            if strategy.mode == "quick":
+                selected_core = CORE_BIOMEDICAL_SOURCES.intersection(strategy.strategies)
+                if not selected_core:
+                    raise ValidationError(
+                        "report search requires PubMed or Europe PMC as a core biomedical index"
+                    )
+                available_core = {
+                    source
+                    for source in selected_core
+                    if (inspected["sources"].get(source) or {}).get("status") == "available"
+                }
+                if not available_core:
+                    raise ValidationError(
+                        "core_source_unavailable: PubMed and Europe PMC are unavailable; "
+                        "configure one core index or revise the protocol"
+                    )
+                if not any(
+                    int((inspected["sources"].get(source) or {}).get("count") or 0) > 0
+                    for source in available_core
+                ):
+                    raise ValidationError(
+                        "zero_core_hits: the high-recall biomedical query returned no matches; "
+                        "fork the Review with revised search components"
+                    )
             if strategy.limit_per_source == "all":
                 counts = {
                     source: int(item["count"])
@@ -689,6 +728,44 @@ class TaskEngine:
             self.workspace.attach(store.path)
             result = {"summary": summary, "strategy_digest": strategy_digest(strategy)}
             return self._accept(task_id, actor, plan_submission_digest, result)
+
+    async def execute_search_plan(
+        self,
+        task_id: str,
+        actor: Actor,
+        *,
+        proposal_path: Path | None = None,
+        confirm_all: str | None = None,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit a first plan, or resume a frozen plan, then run deterministic retrieval."""
+        manifest = self.workspace.load()
+        task = self._ledger(manifest)["tasks"].get(task_id)
+        self._require_submitter(manifest, task, "searcher", actor, claim_token)
+        if not task.get("search_plan"):
+            if proposal_path is None:
+                raise ValidationError("a first search execution requires --from PROPOSAL")
+            await self.submit(
+                "search",
+                task_id,
+                proposal_path,
+                actor,
+                claim_token=claim_token,
+            )
+        elif proposal_path is not None:
+            await self.submit(
+                "search",
+                task_id,
+                proposal_path,
+                actor,
+                claim_token=claim_token,
+            )
+        return await self.run_search(
+            task_id,
+            actor,
+            confirm_all=confirm_all,
+            claim_token=claim_token,
+        )
 
     def approve_search(
         self,
@@ -1457,12 +1534,17 @@ class TaskEngine:
             "variants": variants,
             "mesh": proposal.get("mesh") is not False,
         }
+        if task.get("search_path") and digest(plan) != digest(task.get("search_plan")):
+            raise ValidationError(
+                "search plan is frozen after retrieval begins; resume it or fork the Review"
+            )
         frozen = (manifest.get("automation") or {}).get("frozen_search_plan")
         if frozen is not None and digest(plan) != digest(frozen):
             raise ValidationError(
                 "refresh search plan differs from the Review's accepted strategy; fork the Review"
             )
         task["search_plan"] = plan
+        task["search_plan_digest"] = digest(plan)
         task["submission_digest"] = proposal_digest
         task["plan_recorded_at"] = now()
         self.workspace.save(manifest)
@@ -1531,6 +1613,46 @@ class TaskEngine:
             "available_at": task.get("available_at"),
             "automation_attempts": task.get("automation_attempts", 0),
             "lease": deepcopy(task.get("lease")),
+        }
+
+    def cancel_open_tasks(self, *, reason: str, at: str) -> dict[str, Any]:
+        """Fail closed while preserving every accepted result and task artifact."""
+        message = str(reason).strip()
+        if not message:
+            raise ValidationError("cancellation reason must be nonempty")
+        cancelled: list[str] = []
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            for task in ledger["tasks"].values():
+                if task["state"] not in {"pending", "in_progress"}:
+                    continue
+                task["state"] = "blocked"
+                task["blocked_at"] = at
+                task["blocked_code"] = "operator_cancelled"
+                task["blocked_reason"] = message
+                lease = task.get("lease")
+                if lease and lease.get("state") == "active":
+                    lease.update(state="cancelled", cancelled_at=at)
+                cancelled.append(task["task_id"])
+                ledger["events"].append(
+                    {
+                        "event": "task.blocked",
+                        "task_id": task["task_id"],
+                        "code": "operator_cancelled",
+                        "at": at,
+                    }
+                )
+            if not cancelled:
+                raise ValidationError("Review has no open task to cancel")
+            ledger["state"] = "blocked"
+            self.workspace.save(manifest)
+        return {
+            "run_id": self.run_id,
+            "state": "blocked",
+            "code": "operator_cancelled",
+            "reason": message,
+            "task_ids": cancelled,
         }
 
     def lease_task(

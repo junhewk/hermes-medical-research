@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
-from hermes_medical_research.search.artifacts import RunStore, confirmation_token
+from hermes_medical_research.search.artifacts import (
+    RunStore,
+    confirmation_token,
+    strategy_digest,
+)
 from hermes_medical_research.search.config import Credentials
 from hermes_medical_research.search.http import HttpSession
 from hermes_medical_research.search.models import Question
 from hermes_medical_research.search.orchestrator import execute_search, preflight
 from hermes_medical_research.search.providers import Page
 from hermes_medical_research.search.query import compile_strategy
+from hermes_medical_research.workspace import Workspace
 
 
 def question() -> Question:
@@ -259,6 +265,45 @@ async def test_ranking_is_anchored_to_the_strategy_not_the_wall_clock(
         for line in first.splitlines()
     )
     assert first == second
+
+
+@pytest.mark.asyncio
+async def test_child_resume_repairs_a_missing_parent_reservation(tmp_path: Path) -> None:
+    parent = Workspace(tmp_path / "research")
+    request = question().to_dict()
+    request.update(
+        sources=["europe-pmc"],
+        eligibility={"include": ["Humans"], "exclude": ["Animal-only"]},
+        outcomes=[],
+        search_rationale="Synthetic crash-recovery fixture.",
+    )
+    parent.init(request, mode="report", records=2, fulltexts=1, language="en")
+    stored_question = Question.from_dict(parent.load()["protocol"]["question"])
+    strategy = compile_strategy(
+        stored_question,
+        mode="quick",
+        limit_per_source=2,
+        sources=["europe-pmc"],
+    )
+    child = RunStore(parent.path / "searches" / "interrupted")
+    manifest = child.initialize(stored_question, strategy, Credentials())
+    manifest["research_parent"] = os.path.relpath(parent.path, child.path)
+    child.write_manifest(manifest)
+    assert parent.load()["searches"] == {}
+    checked = {
+        "sources": {
+            "europe-pmc": {
+                "status": "unavailable",
+                "count": None,
+                "error": "synthetic outage",
+            }
+        }
+    }
+    async with HttpSession() as session:
+        await execute_search(strategy, child, session, Credentials(), checked)
+    reservation = parent.load()["searches"][strategy_digest(strategy)]
+    assert reservation["status"] == "reserved"
+    assert reservation["path"] == str(child.path.resolve())
 
 
 @pytest.mark.asyncio

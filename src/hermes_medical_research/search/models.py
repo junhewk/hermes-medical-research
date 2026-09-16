@@ -8,6 +8,7 @@ from typing import Any
 SCHEMA_VERSION = "2"
 LEGACY_SCHEMA_VERSION = "1"
 CORE_SOURCES = ("pubmed", "pmc", "openalex", "semantic-scholar")
+BIOMEDICAL_INDEX_SOURCES = ("pubmed", "europe-pmc")
 SOURCES = (*CORE_SOURCES, "europe-pmc", "clinicaltrials", "scopus")
 FRAMEWORKS = {
     "PICO": (("population", "intervention"), ("comparison", "outcome", "timepoint")),

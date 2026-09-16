@@ -20,6 +20,11 @@ Use the file tool for this intake draft. After confirmation, create a human-name
 IANA timezone for a living Review. The CLI is authoritative: correct validation errors before
 proceeding. Protocol changes require `mdr review fork`; never mutate a Review's request.
 
+Use high-recall search components by default: population plus intervention for PICO, population plus
+exposure for PECO, and population plus concept for PCC. Keep comparison and outcome terms for
+eligibility, synthesis, or optional precision variants unless the user explicitly requests a narrow
+search. Every report must select PubMed or Europe PMC as a core biomedical index.
+
 Hermes Routines and the deterministic queue route specialist work. Do not message specialists or
 manually relay identifiers. Use `mdr review status SLUG` for progress, and the pause, resume, and
 run-now commands for lifecycle requests. Never inspect the corpus, edit specialist proposals, or

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1 - 2026-09-16
+
+- Fixed an atomicity defect that erased a search budget reservation immediately after creating its
+  child search, causing every automated retrieval attempt to fail before database ingestion.
+- Added a bounded `search execute` flow, immutable retry plans, an eight-call Searcher limit, and
+  fail-fast worker instructions so database retrieval does not become an agent diagnosis loop.
+- Added a report-mode biomedical-index gate, zero-hit detection, high-recall Coordinator guidance,
+  targeted profile bootstrap, managed Routine updates, and auditable Review cancellation.
+
 ## 0.5.0 - 2026-09-15
 
 - Renamed the distribution to `hermes-medical-research`, the import package to

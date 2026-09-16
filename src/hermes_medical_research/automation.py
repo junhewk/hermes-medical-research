@@ -333,6 +333,52 @@ class AutomationEngine:
             self._save_review(path, review)
         return self._review_view(review)
 
+    def cancel_review(self, name: str, actor: Actor, *, reason: str) -> dict[str, Any]:
+        """Cancel one active Cycle without deleting its immutable artifacts."""
+        actor.require("coordinator")
+        message = str(reason).strip()
+        if not message:
+            raise ValidationError("cancellation reason must be nonempty")
+        name = _slug(name)
+        with self.lock:
+            path, review = self._load_review(name, with_path=True)
+            with self._review_lock(path):
+                review = self._load_review(name)
+                active = self._active_cycle(review)
+                if active is None:
+                    raise ValidationError("Review has no active Cycle to cancel")
+                cancelled_at = _at(self.clock())
+                engine = TaskEngine(self.catalog.workspace(active["run_id"]))
+                result = engine.cancel_open_tasks(reason=message, at=cancelled_at)
+                if self.claims.is_dir():
+                    for claim_path in self.claims.glob("claim-*.json"):
+                        claim = _read_json(claim_path)
+                        if (
+                            claim.get("run_id") == active["run_id"]
+                            and claim.get("state") == "active"
+                        ):
+                            claim.update(state="cancelled", cancelled_at=cancelled_at)
+                            _write_json(claim_path, claim)
+                review["state"] = "paused"
+                review["catch_up_pending"] = False
+                self._event(
+                    path,
+                    review,
+                    "review.cancelled",
+                    {"cycle_id": active["cycle_id"], "reason": message},
+                )
+                self._finish_cycle(path, review, active, "blocked", result)
+                self._save_review(path, review)
+        return {
+            "name": name,
+            "state": "paused",
+            "cycle": active["number"],
+            "cycle_state": "blocked",
+            "code": "operator_cancelled",
+            "reason": message,
+            "cancelled_tasks": result["task_ids"],
+        }
+
     def trigger(self, name: str, *, scheduled: bool = False) -> dict[str, Any]:
         """Enqueue one Cycle, coalescing fires while another Cycle is active."""
         name = _slug(name)
@@ -511,10 +557,19 @@ class AutomationEngine:
             result["run"] = (
                 f"{base} search run {selected['run_id']} {selected['task_id']}"
             )
-            result["approve"] = (
-                f"{base} search approve {selected['run_id']} {selected['task_id']} "
-                "--strategy-digest DIGEST"
+            proposal = (
+                ""
+                if opened.get("resume")
+                else f" --from {shlex.quote(opened['proposal_path'])}"
             )
+            result["execute"] = (
+                f"{base} search execute {selected['run_id']} {selected['task_id']}{proposal}"
+            )
+            if opened.get("search_mode") == "review":
+                result["approve"] = (
+                    f"{base} search approve {selected['run_id']} {selected['task_id']} "
+                    "--strategy-digest DIGEST"
+                )
         return result
 
     def fail(self, claim_id: str, actor: Actor, *, code: str, message: str) -> dict[str, Any]:

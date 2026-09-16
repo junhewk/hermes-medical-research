@@ -36,6 +36,7 @@ DESCRIPTIONS = {
 MANAGED = "mdr-managed.json"
 ROUTINES_MANAGED = "mdr-routines.json"
 TOOLSETS = ["terminal", "file", "skills"]
+PROFILE_MAX_TURNS = {"mdr-searcher": 8}
 
 
 def _home(value: Path | None) -> Path:
@@ -158,6 +159,11 @@ def _desired_files(name: str, settings: dict[str, Any]) -> dict[str, bytes]:
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),
         **({"cron": cron} if cron else {}),
+        **(
+            {"agent": {"max_turns": PROFILE_MAX_TURNS[name]}}
+            if name in PROFILE_MAX_TURNS
+            else {}
+        ),
         "tools": {"enabled_toolsets": TOOLSETS},
     }
     files = {
@@ -213,6 +219,7 @@ def bootstrap_profiles(
     apply: bool = False,
     hermes_home: Path | None = None,
     source_profile: Path | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Plan or apply the six isolated, CLI-only Hermes profiles."""
     home = _home(hermes_home)
@@ -220,7 +227,10 @@ def bootstrap_profiles(
     settings = _source_settings(source_profile, home)
     plan = []
     desired_by_profile: dict[str, dict[str, bytes]] = {}
-    for name in PROFILE_SKILLS:
+    names = [profile] if profile else list(PROFILE_SKILLS)
+    if any(name not in PROFILE_SKILLS for name in names):
+        raise ValidationError("unknown managed Hermes profile")
+    for name in names:
         root = _profile_root(home, name)
         desired = _desired_files(name, settings)
         desired_by_profile[name] = desired
@@ -653,6 +663,56 @@ def _create_routine(executable: str, home: Path, spec: dict[str, Any]) -> None:
             )
 
 
+def _edit_routine(
+    executable: str, home: Path, spec: dict[str, Any], existing: dict[str, Any]
+) -> None:
+    """Update an owned job through Hermes while leaving model pins and pause state alone."""
+    job_id = existing.get("id")
+    if not job_id:
+        raise ValidationError(f"managed routine has no Hermes job id: {spec['name']}")
+    command = [
+        executable,
+        "-p",
+        spec["profile"],
+        "cron",
+        "edit",
+        str(job_id),
+        "--name",
+        spec["name"],
+        "--schedule",
+        spec["schedule"],
+        "--prompt",
+        spec["prompt"],
+    ]
+    if spec["skills"]:
+        for skill in spec["skills"]:
+            command.extend(["--skill", skill])
+    else:
+        command.append("--clear-skills")
+    if spec.get("no_agent"):
+        command.extend(["--script", spec["script"], "--no-agent"])
+    else:
+        command.extend(["--agent", "--monitor-script", spec["monitor_script"]])
+    if spec.get("deliver") is not None:
+        command.extend(["--deliver", spec["deliver"]])
+    if spec.get("failure_deliver") is not None:
+        command.extend(["--failure-deliver", spec["failure_deliver"]])
+    if spec.get("workdir") is not None:
+        command.extend(["--workdir", spec["workdir"]])
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HERMES_HOME": str(home)},
+    )
+    if completed.returncode:
+        raise ValidationError(
+            f"Hermes could not update routine {spec['name']}: "
+            f"{(completed.stderr or completed.stdout).strip()}"
+        )
+
+
 def routines(
     *,
     apply: bool = False,
@@ -704,37 +764,55 @@ def routines(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
         destination.chmod(0o700)
-    installed: list[dict[str, Any]] = []
+    progress = {
+        key: value for key, value in previous_jobs.items() if key in desired_names
+    }
     manifest = {
         "schema_version": "1",
         "package": "hermes-medical-research",
         "version": __version__,
         "store": str(artifact_store),
         "scripts": {key: _sha256(content) for key, content in scripts.items()},
-        "jobs": installed,
+        "jobs": list(progress.values()),
     }
     (home / ROUTINES_MANAGED).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     for spec in jobs:
+        key = (spec["profile"], spec["name"])
+        desired_digest = _sha256(
+            json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+        )
         existing = [
             job
             for job in _jobs(_profile_root(home, spec["profile"]))
             if job.get("name") == spec["name"]
         ]
-        owned = (spec["profile"], spec["name"]) in managed_names
+        owned = key in managed_names
         if len(existing) > 1 or existing and not owned:
             raise ValidationError(
                 f"refusing to replace unmanaged or ambiguous cron job: "
                 f"{spec['profile']}/{spec['name']}"
             )
         if existing and owned:
-            observed = previous_jobs[(spec["profile"], spec["name"])].get("observed")
+            observed = previous_jobs[key].get("observed")
             if observed is not None and _job_static(existing[0]) != observed:
                 raise ValidationError(
                     f"managed cron job was edited outside mdr: "
                     f"{spec['profile']}/{spec['name']}"
                 )
+            if previous_jobs[key].get("spec_digest") != desired_digest:
+                _edit_routine(executable, home, spec, existing[0])
+                existing = [
+                    job
+                    for job in _jobs(_profile_root(home, spec["profile"]))
+                    if job.get("name") == spec["name"]
+                ]
+                if len(existing) != 1:
+                    raise ValidationError(
+                        f"Hermes updated an ambiguous routine: "
+                        f"{spec['profile']}/{spec['name']}"
+                    )
         if not existing:
             _create_routine(executable, home, spec)
             existing = [
@@ -747,17 +825,13 @@ def routines(
                     f"Hermes reported success but routine was not recorded: "
                     f"{spec['profile']}/{spec['name']}"
                 )
-        installed.append(
-            {
-                "profile": spec["profile"],
-                "name": spec["name"],
-                "spec_digest": _sha256(
-                    json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
-                ),
-                "observed": _job_static(existing[0]),
-            }
-        )
-        manifest["jobs"] = installed
+        progress[key] = {
+            "profile": spec["profile"],
+            "name": spec["name"],
+            "spec_digest": desired_digest,
+            "observed": _job_static(existing[0]),
+        }
+        manifest["jobs"] = [progress[item] for item in sorted(progress)]
         (home / ROUTINES_MANAGED).write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

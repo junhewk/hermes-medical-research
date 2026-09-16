@@ -51,6 +51,11 @@ def parser() -> argparse.ArgumentParser:
     search_run.add_argument("run_id")
     search_run.add_argument("task_id", nargs="?")
     search_run.add_argument("--confirm-all")
+    search_execute = search_commands.add_parser("execute")
+    search_execute.add_argument("run_id")
+    search_execute.add_argument("task_id", nargs="?")
+    search_execute.add_argument("--from", dest="proposal", type=Path)
+    search_execute.add_argument("--confirm-all")
     approve = search_commands.add_parser("approve")
     approve.add_argument("run_id")
     approve.add_argument("task_id", nargs="?")
@@ -99,6 +104,9 @@ def parser() -> argparse.ArgumentParser:
             item.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
     acknowledge = review_commands.add_parser("acknowledge")
     acknowledge.add_argument("event_id")
+    cancel = review_commands.add_parser("cancel")
+    cancel.add_argument("name")
+    cancel.add_argument("--reason", required=True)
 
     work = commands.add_parser("work", help="Drive the durable cron work queue")
     work_commands = work.add_subparsers(dest="action", required=True)
@@ -118,6 +126,17 @@ def parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--apply", action="store_true")
     bootstrap.add_argument("--hermes-home", type=Path)
     bootstrap.add_argument("--source-profile", type=Path)
+    bootstrap.add_argument(
+        "--profile",
+        choices=(
+            "mdr-coordinator",
+            "mdr-searcher",
+            "mdr-selector",
+            "mdr-extractor",
+            "mdr-synthesizer",
+            "mdr-auditor",
+        ),
+    )
     doctor_command = hermes_commands.add_parser("doctor")
     doctor_command.add_argument("--hermes-home", type=Path)
     routine_command = hermes_commands.add_parser("routines")
@@ -243,6 +262,8 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return automation.set_paused(args.name, False)
         if args.action == "run-now":
             return automation.trigger(args.name, scheduled=args.scheduled)
+        if args.action == "cancel":
+            return automation.cancel_review(args.name, _actor(args), reason=args.reason)
         return automation.acknowledge(args.event_id)
 
     if args.command == "work":
@@ -300,6 +321,14 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 actor,
                 claim_token=args.claim_token,
             )
+        if args.action == "execute":
+            return await engine.execute_search_plan(
+                task_id,
+                actor,
+                proposal_path=args.proposal,
+                confirm_all=args.confirm_all,
+                claim_token=args.claim_token,
+            )
         if args.action == "run":
             return await engine.run_search(
                 task_id,
@@ -335,6 +364,7 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             apply=args.apply,
             hermes_home=args.hermes_home,
             source_profile=args.source_profile,
+            profile=args.profile,
         )
     if args.action == "doctor":
         return doctor(hermes_home=args.hermes_home)

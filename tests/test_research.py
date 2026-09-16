@@ -53,6 +53,20 @@ def workspace_at(path: Path, *, records=100, fulltexts=30, mode="report"):
     return workspace
 
 
+def test_report_protocol_requires_a_biomedical_index(tmp_path):
+    request = protocol()
+    request["sources"] = ["openalex"]
+    with pytest.raises(ValidationError, match="PubMed or Europe PMC"):
+        Workspace(tmp_path / "research").init(
+            request,
+            mode="report",
+            records=10,
+            fulltexts=1,
+            language="en",
+            evidence_version="2",
+        )
+
+
 def completed_search(workspace, path, *, count=2, title="Synthetic trial", mode="quick"):
     question = Question.from_dict(workspace.load()["protocol"]["question"])
     strategy = compile_strategy(question, mode=mode, limit_per_source=count, sources=["europe-pmc"])

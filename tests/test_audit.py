@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,12 +12,14 @@ from test_evidence_workflow import modern_workspace
 from test_research import completed_search, protocol
 
 from hermes_medical_research.cli import main
+from hermes_medical_research.search.artifacts import preflight_digest, strategy_digest
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, RunCatalog, TaskEngine
 from hermes_medical_research.workspace import Workspace
 
 COORDINATOR = Actor("mdr-coordinator", "coordinator-session", "coordinator")
 SELECTOR = Actor("mdr-selector", "selector-session", "selector")
+SEARCHER = Actor("mdr-searcher", "searcher-session", "searcher")
 
 
 def selector_workspace(tmp_path: Path) -> tuple[TaskEngine, dict]:
@@ -26,6 +29,44 @@ def selector_workspace(tmp_path: Path) -> tuple[TaskEngine, dict]:
     search, _ = completed_search(workspace, tmp_path / "search", count=1)
     workspace.attach(search.path)
     return TaskEngine(workspace), created
+
+
+def _search_fixture(tmp_path: Path, *, optional_source: bool = False):
+    request = protocol()
+    if optional_source:
+        request["sources"] = ["europe-pmc", "openalex"]
+    catalog = RunCatalog(tmp_path / "store")
+    created = catalog.create(request, records=10, fulltexts=1)
+    engine = TaskEngine(catalog.workspace(created["run_id"]))
+    route = engine.route_next(COORDINATOR)
+    opened = engine.role_next("search", route["task_id"], SEARCHER)
+    proposal_path = Path(opened["proposal_path"])
+    proposal = json.loads(proposal_path.read_text())
+    proposal["mesh"] = False
+    proposal_path.write_text(json.dumps(proposal))
+    return engine, route["task_id"], proposal_path
+
+
+def _search_preflight(strategy, *, core_count: int) -> dict:
+    sources = {
+        source: (
+            {"status": "available", "count": core_count, "error": None}
+            if source == "europe-pmc"
+            else {"status": "unavailable", "count": None, "error": "optional fixture outage"}
+        )
+        for source in strategy.strategies
+    }
+    result = {
+        "schema_version": "2",
+        "created_at": datetime.now(UTC).isoformat(),
+        "mode": strategy.mode,
+        "limit_per_source": strategy.limit_per_source,
+        "strategy_digest": strategy_digest(strategy),
+        "sources": sources,
+        "ready": all(item["status"] == "available" for item in sources.values()),
+    }
+    result["preflight_digest"] = preflight_digest(result)
+    return result
 
 
 @pytest.mark.asyncio
@@ -214,6 +255,97 @@ def test_actor_roles_are_enforced(tmp_path):
             "select",
             route["task_id"],
             Actor("mdr-synthesizer", "wrong-session", "synthesizer"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_reservation_and_task_link_are_atomic(monkeypatch, tmp_path):
+    engine, task_id, proposal_path = _search_fixture(tmp_path, optional_source=True)
+
+    async def fake_preflight(strategy, _session, _credentials):
+        return _search_preflight(strategy, core_count=7)
+
+    async def fake_execute(strategy, store, _session, _credentials, inspected):
+        key = strategy_digest(strategy)
+        reservation = engine.workspace.load()["searches"].get(key)
+        assert reservation is not None
+        assert reservation["status"] == "reserved"
+        assert reservation["path"] == str(store.path.resolve())
+        manifest = store.read_json("manifest.json")
+        for source, state in manifest["sources"].items():
+            detail = inspected["sources"][source]
+            state.update(
+                status="complete" if detail["status"] == "available" else "omitted",
+                retrieved=0,
+                retained=0,
+                filtered_out=0,
+                reported_total=detail["count"],
+                error=detail["error"],
+            )
+        manifest["status"] = "complete"
+        store.write_manifest(manifest)
+        summary = {
+            "schema_version": "2",
+            "records_by_source": {source: 0 for source in strategy.strategies},
+            "source_failures": {
+                source: detail["error"]
+                for source, detail in inspected["sources"].items()
+                if detail["status"] != "available"
+            },
+        }
+        store.write_json("summary.json", summary)
+        return summary
+
+    monkeypatch.setattr("hermes_medical_research.tasks.preflight", fake_preflight)
+    monkeypatch.setattr("hermes_medical_research.tasks.execute_search", fake_execute)
+    accepted = await engine.execute_search_plan(
+        task_id,
+        SEARCHER,
+        proposal_path=proposal_path,
+    )
+    assert accepted["state"] == "accepted"
+    manifest = engine.workspace.load()
+    reservation = next(iter(manifest["searches"].values()))
+    assert reservation["status"] == "attached"
+    snapshot = engine.workspace.store.read_json(reservation["snapshot"])
+    assert snapshot["manifest"]["sources"]["openalex"] == {
+        "cursor": None,
+        "error": "optional fixture outage",
+        "filtered_out": 0,
+        "reported_total": None,
+        "retained": 0,
+        "retrieved": 0,
+        "status": "omitted",
+        "truncated": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_zero_core_hits_freezes_materialized_search_plan(monkeypatch, tmp_path):
+    engine, task_id, proposal_path = _search_fixture(tmp_path)
+
+    async def fake_preflight(strategy, _session, _credentials):
+        return _search_preflight(strategy, core_count=0)
+
+    monkeypatch.setattr("hermes_medical_research.tasks.preflight", fake_preflight)
+    with pytest.raises(ValidationError, match="zero_core_hits"):
+        await engine.execute_search_plan(
+            task_id,
+            SEARCHER,
+            proposal_path=proposal_path,
+        )
+    task = engine.workspace.load()["task_engine"]["tasks"][task_id]
+    assert task["search_path"]
+    assert len(engine.workspace.load()["searches"]) == 1
+
+    changed = json.loads(proposal_path.read_text())
+    changed["limit_per_source"] -= 1
+    proposal_path.write_text(json.dumps(changed))
+    with pytest.raises(ValidationError, match="search plan is frozen"):
+        await engine.execute_search_plan(
+            task_id,
+            SEARCHER,
+            proposal_path=proposal_path,
         )
 
 

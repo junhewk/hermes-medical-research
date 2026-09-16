@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -49,6 +50,9 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
     assert claim["attempt"] == 1
     assert "--claim-token" in claim["submit"]
     assert "search run" in claim["run"]
+    assert "search execute" in claim["execute"]
+    assert f"--from {claim['proposal_path']}" in claim["execute"]
+    assert "approve" not in claim
     engine = TaskEngine(automation.catalog.workspace(claim["run_id"]))
     with pytest.raises(ValidationError, match="claim token"):
         await engine.submit(
@@ -74,6 +78,47 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
         claim_token=claim["claim_token"],
     )
     assert accepted["state"] == "plan_recorded"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_cancels_an_active_cycle_with_audit_trail(tmp_path: Path):
+    automation = AutomationEngine(tmp_path)
+    automation.create_review(
+        "cancelled-review",
+        protocol(),
+        schedule="once",
+        timezone="Asia/Seoul",
+    )
+    await automation.tick()
+    searcher = Actor("mdr-searcher", "cancel-session", "searcher")
+    claim = automation.claim("search", searcher)
+
+    result = automation.cancel_review(
+        "cancelled-review",
+        Actor("mdr-coordinator", "operator-session", "coordinator"),
+        reason="Replace the run affected by the lost search reservation defect.",
+    )
+    assert result["state"] == "paused"
+    assert result["cycle_state"] == "blocked"
+    assert result["code"] == "operator_cancelled"
+    status = automation.review_status("cancelled-review")
+    assert status["latest_cycle_state"] == "blocked"
+    assert status["active_cycle"] is None
+    engine = TaskEngine(automation.catalog.workspace(claim["run_id"]))
+    task = engine.workspace.load()["task_engine"]["tasks"][claim["task_id"]]
+    assert task["state"] == "blocked"
+    assert task["blocked_code"] == "operator_cancelled"
+    stored_claim = automation.claims.joinpath(f"{claim['claim_id']}.json")
+    assert json.loads(stored_claim.read_text())["state"] == "cancelled"
+    assert automation.notification_probe()["state"] == "ready"
+    with pytest.raises(ValidationError, match="active claim"):
+        await engine.submit(
+            "search",
+            claim["task_id"],
+            Path(claim["proposal_path"]),
+            searcher,
+            claim_token=claim["claim_token"],
+        )
 
 
 @pytest.mark.asyncio
@@ -120,6 +165,9 @@ def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
         "mdr-work-synthesizer",
         "mdr-work-auditor",
     }
+    for job in result["jobs"]:
+        if not job["no_agent"]:
+            assert f"--actor {job['profile']}" in job["prompt"]
     assert not (tmp_path / "hermes").exists()
 
 

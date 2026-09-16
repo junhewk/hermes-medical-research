@@ -73,12 +73,14 @@ async def execute_search(
         parent = Workspace(store.path / manifest["research_parent"])
         key = strategy_digest(strategy)
         with parent.lock:
+            # An incomplete child may be resumed after a crash between child creation and the
+            # parent's manifest commit.  Re-reserving is idempotent and revalidates the budget.
+            if manifest["status"] != "complete":
+                parent.reserve(store.path, strategy)
             entry = parent.load()["searches"].get(key)
             if not entry:
                 raise ValueError("research search has no matching budget reservation")
-            if manifest["status"] != "complete":
-                parent.reserve(store.path, strategy)
-            else:
+            if manifest["status"] == "complete":
                 parent.check_budget(entry["allocation"], excluding=key)
     manifest["status"] = "running"
     store.write_manifest(manifest)

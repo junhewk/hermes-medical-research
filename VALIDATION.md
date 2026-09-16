@@ -16,6 +16,10 @@ The v0.5 cutover is covered by the repository test suite. Its new architecture c
 - human-named Review/Cycle creation, stable zero-idle-cost probes, session-bound claim tokens,
   bounded 5/30-minute retry and third-attempt blocking, and notification Outbox state;
 - dry-run cron fleet planning with six base jobs and a real-cadence job for each living Review;
+- atomic search reservation/task linkage, crash-safe reservation repair, immutable materialized
+  plans, the report-mode biomedical-index and zero-hit gates, and explicit optional-source outages;
+- an eight-turn Searcher profile, one-command search execution, targeted profile bootstrap, managed
+  Routine editing through Hermes's public CLI, and auditable active-Cycle cancellation;
 - frozen living-review strategy validation, cumulative canonical corpus merge, source-digest reuse
   receipts, changed-source invalidation, and predecessor-linked no-change checkpoints;
 - the retained retrieval, evidence, appraisal, synthesis, verification, and export behavior.
@@ -29,7 +33,7 @@ uv run pytest
 uv build
 ```
 
-The final local run on 2026-09-16 collected and passed 167 tests; Ruff, `git diff --check`, wheel
+The final local run on 2026-09-16 collected and passed 175 tests; Ruff, `git diff --check`, wheel
 construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed.
 
 ## Hermes operational gates

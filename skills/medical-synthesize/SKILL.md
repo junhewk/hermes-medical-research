@@ -8,9 +8,9 @@ metadata:
 
 # Medical synthesize and audit
 
-Run the claim command matching your profile: `mdr synthesize claim` or `mdr audit claim`. If it
-returns `state: idle`, return `[SILENT]`. Otherwise use only the returned packet, proposal, and exact
-source commands.
+Run the claim command matching your profile: `mdr --actor mdr-synthesizer synthesize claim` or
+`mdr --actor mdr-auditor audit claim`. If it returns `state: idle`, return `[SILENT]`. Otherwise use
+only the returned packet, proposal, and exact source commands.
 
 The Synthesizer completes exactly one assigned outcome. The Auditor independently checks every
 assigned frozen target and never corrects author work. Edit only the proposal and run the exact

@@ -11,9 +11,9 @@ This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 Install directly from the GitHub repository with a Python tool installer:
 
 ```bash
-uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.0
+uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.1
 # or
-pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.0
+pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.1
 ```
 
 The package exposes one executable:
@@ -55,6 +55,12 @@ Apply it explicitly:
 
 ```bash
 mdr hermes bootstrap --apply
+```
+
+To update only the bounded Searcher profile while leaving other managed profiles untouched:
+
+```bash
+mdr hermes bootstrap --profile mdr-searcher --apply
 ```
 
 Bootstrap creates clean `mdr-coordinator`, `mdr-searcher`, `mdr-selector`, `mdr-extractor`,
@@ -100,6 +106,8 @@ mdr review list
 mdr review status living-exercise
 mdr review pause living-exercise
 mdr review resume living-exercise
+mdr --actor mdr-coordinator review cancel living-exercise \
+  --reason "Replace a blocked or defective Cycle"
 mdr review run-now living-exercise
 ```
 
@@ -131,11 +139,15 @@ mdr audit claim
 
 Each claim returns a bounded packet/proposal, a 60-minute session-bound token, and exact source,
 submit, and failure commands. Failures retry after 5 and 30 minutes; the third blocks the Cycle. The
-older explicit-ID commands remain operator diagnostics for non-managed Runs:
+Searcher claim also returns one `search execute` command that records the initial plan and performs
+retrieval in one bounded operation. The Searcher profile has an eight-turn ceiling. A retry resumes
+the materialized child search with the same frozen plan; changing it requires a new Review fork.
+
+The older explicit-ID commands remain operator diagnostics for non-managed Runs:
 
 ```bash
 mdr search next RUN_ID TASK_ID
-mdr search submit RUN_ID TASK_ID --from PROPOSAL.json
+mdr search execute RUN_ID TASK_ID --from PROPOSAL.json
 mdr search run RUN_ID TASK_ID
 
 mdr select next RUN_ID TASK_ID
@@ -169,6 +181,14 @@ mdr --actor mdr-coordinator finalize RUN_ID
 For review-preparation mode, supply explicit retrieval and full-text limits (or `all`). Search
 strategies and all-results retrieval retain digest/token approval gates.
 
+Report protocols must include PubMed or Europe PMC. At least one of those biomedical indexes must be
+available and return a nonzero preflight count before retrieval proceeds. OpenAlex, Semantic Scholar,
+registries, and other configured sources remain useful supplements; an unavailable supplement is
+recorded in provenance without invalidating an otherwise viable report search. For high recall,
+search plans use the required framework concepts (PICO population plus intervention, PECO population
+plus exposure, or PCC population plus concept) and reserve comparison and outcome terms for
+eligibility, synthesis, or a documented precision variant.
+
 ## Safety properties
 
 - Run and Task IDs resolve only inside the configured artifact store.
@@ -176,6 +196,8 @@ strategies and all-results retrieval retain digest/token approval gates.
 - Proposal base digests reject stale work; accepted retries are idempotent only when byte-equivalent
   JSON content has the same canonical digest.
 - Search snapshots, evidence revisions, audit results, and exports are content-addressed.
+- Parent search reservations and Task child links are committed together; interrupted child runs
+  recreate a missing idempotent reservation before retrieval resumes.
 - Audit receipts bind every reviewed finding/report target to an independent Auditor profile and
   frozen Candidate digest.
 - `revise` routes a correction to the responsible specialist and supersedes stale audit Tasks.

@@ -16,7 +16,12 @@ from filelock import FileLock
 from hermes_medical_research import __version__
 from hermes_medical_research.search.artifacts import RunStore, canonical_json, strategy_digest
 from hermes_medical_research.search.config import Credentials
-from hermes_medical_research.search.models import CORE_SOURCES, Question, ValidationError
+from hermes_medical_research.search.models import (
+    BIOMEDICAL_INDEX_SOURCES,
+    CORE_SOURCES,
+    Question,
+    ValidationError,
+)
 from hermes_medical_research.search.ranking import deduplicate
 
 DEPENDENCIES = {
@@ -153,6 +158,8 @@ class Workspace:
         question.sources = [s for s in sources if s not in question.exclude_sources]
         if not question.sources:
             raise ValidationError("research must select at least one source")
+        if mode == "report" and not set(question.sources).intersection(BIOMEDICAL_INDEX_SOURCES):
+            raise ValidationError("report mode requires PubMed or Europe PMC")
         language = require_text(language, "language")
         protocol = {
             "question": question.to_dict(),
@@ -309,24 +316,34 @@ class Workspace:
     def source_index(self) -> dict[str, dict[str, Any]]:
         return {row["document_id"]: row for row in self.source_documents()}
 
-    def allocations(self, *, excluding: str | None = None) -> Counter:
+    def allocations(
+        self, *, excluding: str | None = None, manifest: dict[str, Any] | None = None
+    ) -> Counter:
         result: Counter = Counter()
-        for key, entry in self.load()["searches"].items():
+        current = manifest if manifest is not None else self.load()
+        for key, entry in current["searches"].items():
             if key == excluding:
                 continue
             for source, count in entry["allocation"].items():
                 result[source] += count
         return result
 
-    def check_budget(self, allocations: dict[str, int], *, excluding: str | None = None) -> None:
-        protocol = self.load()["protocol"]
+    def check_budget(
+        self,
+        allocations: dict[str, int],
+        *,
+        excluding: str | None = None,
+        manifest: dict[str, Any] | None = None,
+    ) -> None:
+        current = manifest if manifest is not None else self.load()
+        protocol = current["protocol"]
         allowed = protocol["question"]["sources"]
         if set(allocations) - set(allowed):
             raise ValidationError(
                 "source is outside the protocol; initialize a revised research run"
             )
         limit = protocol["records_per_source"]
-        used = self.allocations(excluding=excluding)
+        used = self.allocations(excluding=excluding, manifest=current)
         if limit != "all":
             for source, count in allocations.items():
                 if used[source] + count > limit:
@@ -334,8 +351,10 @@ class Workspace:
                         f"{source} exceeds research budget: {used[source]} + {count} > {limit}"
                     )
 
-    def reserve(self, search_path: Path, strategy: Any) -> None:
-        manifest = self.load()
+    def reserve_in(
+        self, manifest: dict[str, Any], search_path: Path, strategy: Any
+    ) -> str:
+        """Mutate one already-locked manifest with an idempotent search reservation."""
         if strategy.question.question != manifest["protocol"]["question"]["question"]:
             raise ValidationError("child search must preserve the protocol's original question")
         if manifest["protocol"]["mode"] == "review-prep" and strategy.mode != "review":
@@ -348,7 +367,7 @@ class Workspace:
         if limit == "all" and manifest["protocol"]["records_per_source"] != "all":
             raise ValidationError("an all-results search requires an all-results research budget")
         allocation = {source: int(limit) if limit != "all" else 0 for source in strategy.strategies}
-        self.check_budget(allocation, excluding=key)
+        self.check_budget(allocation, excluding=key, manifest=manifest)
         manifest["searches"][key] = {
             **previous,
             "allocation": allocation,
@@ -356,6 +375,11 @@ class Workspace:
             "path": str(search_path.resolve()),
             "strategy_digest": key,
         }
+        return key
+
+    def reserve(self, search_path: Path, strategy: Any) -> None:
+        manifest = self.load()
+        self.reserve_in(manifest, search_path, strategy)
         self.save(manifest)
 
     def attach(self, search_path: Path) -> dict[str, Any]:
