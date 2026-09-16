@@ -32,6 +32,11 @@ conversational tutors, virtual patients, adaptive feedback, and decision-support
 separate intervention groups under `operator: any`; requiring every family would make the search
 invalid.
 
+Add a candidate MeSH heading only when the heading by itself remains eligible for that group. A
+broad heading such as `Patient Simulation`, `Computer-Assisted Instruction`, or `Decision Support
+Systems, Clinical` must not be an `OR` alternative for an AI-qualified intervention, because it
+admits papers with no AI intervention. Keep the AI-qualified free-text phrases instead.
+
 Hermes Routines and the deterministic queue route specialist work. Do not message specialists or
 manually relay identifiers. Use `mdr review status SLUG` for progress, and the pause, resume, and
 run-now commands for lifecycle requests. Never inspect the corpus, edit specialist proposals, or

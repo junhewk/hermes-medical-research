@@ -7,6 +7,8 @@
 - Added explicit `operator: any` concept blocks so alternative intervention families compile with
   `OR` and are scored by their strongest matching family; compound concepts remain `operator: all`.
 - Taught the Coordinator to distinguish alternative modalities from jointly required concepts.
+- Prevented Coordinator-generated AI searches from widening compound interventions with broad,
+  independently ineligible MeSH headings.
 
 ## 0.5.1 - 2026-09-16
 
