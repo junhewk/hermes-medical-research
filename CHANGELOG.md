@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 - 2026-09-16
+
+- Grouped up to four screening or coverage records into each bounded Selector task, preserving an
+  explicit decision and reason for every record while removing repeated claim overhead.
+- Retained immediate task continuation so one Hermes invocation can process up to forty records
+  before yielding to the next scheduled invocation.
+
 ## 0.5.4 - 2026-09-16
 
 - Pinned generated Routine scripts to the resolved `mdr` executable so Hermes cron workers do not

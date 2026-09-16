@@ -1,6 +1,6 @@
 ---
 name: medical-select
-description: Screen or select one supplied medical record through a bounded mdr task.
+description: Screen or select a small supplied batch of medical records through a bounded mdr task.
 metadata:
   hermes:
     requires_toolsets: [terminal, file]
@@ -16,7 +16,7 @@ proposal, and run the exact returned `submit` command. On an unrecoverable error
 state. Never inspect the artifact store directly. After an accepted submission, immediately run
 `mdr --actor mdr-selector select claim` again and process the next returned task. Continue until the
 claim is idle or 10 tasks have been accepted in this invocation. Each article still receives its
-own bounded packet, decision, reason, and immutable receipt.
+own decision and reason within a bounded packet and immutable task receipt.
 
 Pitfalls: screening-stage `decision` must be one of `include`, `exclude`, or `uncertain`, while
 coverage-stage `selection` must be one of `selected`, `deferred`, or `unavailable`. If validation

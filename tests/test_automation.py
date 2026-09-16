@@ -82,7 +82,7 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_selector_acceptance_immediately_routes_the_next_record(tmp_path: Path):
+async def test_selector_acceptance_immediately_routes_the_next_record_batch(tmp_path: Path):
     automation = AutomationEngine(tmp_path)
     created = automation.create_review(
         "continuous-selection",
@@ -92,7 +92,7 @@ async def test_selector_acceptance_immediately_routes_the_next_record(tmp_path: 
     )
     run_id = automation.review_status(created["name"])["cycles"][0]["run_id"]
     workspace = automation.catalog.workspace(run_id)
-    search, _ = completed_search(workspace, tmp_path / "search", count=2)
+    search, _ = completed_search(workspace, tmp_path / "search", count=5)
     workspace.attach(search.path)
     assert (await automation.tick())["routed"] == 1
 
@@ -100,10 +100,13 @@ async def test_selector_acceptance_immediately_routes_the_next_record(tmp_path: 
     claim = automation.claim("select", actor)
     proposal_path = Path(claim["proposal_path"])
     proposal = json.loads(proposal_path.read_text())
-    proposal["stages"]["screening"]["records"][0].update(
-        decision="exclude",
-        reason="Fails the synthetic eligibility criteria.",
-    )
+    assigned = proposal["stages"]["screening"]["records"]
+    assert len(assigned) == 4
+    for row in assigned:
+        row.update(
+            decision="exclude",
+            reason="Fails the synthetic eligibility criteria.",
+        )
     proposal_path.write_text(json.dumps(proposal))
     receipt = await TaskEngine(workspace).submit(
         "select",
@@ -117,6 +120,8 @@ async def test_selector_acceptance_immediately_routes_the_next_record(tmp_path: 
     next_claim = automation.claim("select", actor)
     assert next_claim["role"] == "selector"
     assert next_claim["task_id"] == receipt["continuation"]["task_id"]
+    next_packet = json.loads(Path(next_claim["packet_path"]).read_text())
+    assert len(next_packet["target_ids"]) == 1
 
 
 @pytest.mark.asyncio

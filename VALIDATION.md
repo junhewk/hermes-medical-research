@@ -5,7 +5,8 @@
 The v0.5 cutover is covered by the repository test suite. Its new architecture cases verify:
 
 - creation and resolution of opaque Run and Task IDs inside an isolated artifact root;
-- one-record Selector routing, bounded source access, exact target coverage, and CLI-recorded state;
+- bounded multi-record Selector routing, bounded source access, exact target coverage, and
+  CLI-recorded state;
 - idempotent replay from a fresh Selector session;
 - rejection of extra records, wrong roles, changed packets/results, and stale submissions;
 - independent Auditor identity, exhaustive finding/report targets, quote/locator validation, and
