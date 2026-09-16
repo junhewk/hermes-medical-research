@@ -43,7 +43,6 @@ from .workspace import Workspace, digest, now
 TASK_ENGINE_VERSION = "1"
 TASK_PACKET_VERSION = "1"
 TASK_PACKET_LIMIT = 32 * 1024
-SELECTOR_RECORD_BATCH = 4
 SOURCE_PAGE_LIMIT = 16 * 1024
 SOURCE_IDS_PER_PAGE = 100
 CORE_BIOMEDICAL_SOURCES = frozenset(BIOMEDICAL_INDEX_SOURCES)
@@ -839,7 +838,7 @@ class TaskEngine:
         if self.workspace.stale("screening", manifest):
             unscreened = list(records)
         if unscreened:
-            return self._screening_spec(unscreened[:SELECTOR_RECORD_BATCH])
+            return self._screening_spec(unscreened[0])
         included = [
             record_id for record_id, row in screening.items() if row["decision"] == "include"
         ]
@@ -852,7 +851,7 @@ class TaskEngine:
         if self.workspace.stale("coverage", manifest):
             uncovered = included
         if uncovered:
-            return self._coverage_spec(uncovered[:SELECTOR_RECORD_BATCH])
+            return self._coverage_spec(uncovered[0])
         selected = [
             record_id for record_id, row in coverage.items() if row["selection"] == "selected"
         ]
@@ -975,8 +974,7 @@ class TaskEngine:
             "allowed_source_ids": [],
         }
 
-    def _screening_spec(self, record_ids: str | list[str]) -> dict[str, Any]:
-        assigned = [record_ids] if isinstance(record_ids, str) else record_ids
+    def _screening_spec(self, record_id: str) -> dict[str, Any]:
         proposal = {
             "schema_version": "2",
             "base_digests": current_digests(self.workspace),
@@ -990,28 +988,24 @@ class TaskEngine:
                             "basis": "title-abstract",
                             "reason": "",
                         }
-                        for record_id in assigned
                     ],
                 }
             },
         }
-        sources = [_source(self.workspace, record_id) for record_id in assigned]
+        source = _source(self.workspace, record_id)
         return {
             "kind": "screening",
-            "target_ids": assigned,
-            "instructions": "Screen every assigned record against every eligibility criterion.",
+            "target_ids": [record_id],
+            "instructions": "Screen this record against every eligibility criterion.",
             "proposal": proposal,
             "packet_data": {
                 "eligibility": self.workspace.load()["protocol"]["eligibility"],
-                "sources": sources,
+                "source": source,
             },
-            "allowed_source_ids": [
-                row["document_id"] for source in sources for row in source["documents"]
-            ],
+            "allowed_source_ids": [row["document_id"] for row in source["documents"]],
         }
 
-    def _coverage_spec(self, record_ids: str | list[str]) -> dict[str, Any]:
-        assigned = [record_ids] if isinstance(record_ids, str) else record_ids
+    def _coverage_spec(self, record_id: str) -> dict[str, Any]:
         proposal = {
             "schema_version": "2",
             "base_digests": current_digests(self.workspace),
@@ -1025,27 +1019,23 @@ class TaskEngine:
                             "reason": "",
                             "protocol_outcomes": [],
                         }
-                        for record_id in assigned
                     ],
                 }
             },
         }
-        sources = [_source(self.workspace, record_id) for record_id in assigned]
+        source = _source(self.workspace, record_id)
         return {
             "kind": "coverage",
-            "target_ids": assigned,
+            "target_ids": [record_id],
             "instructions": (
-                "Choose and justify detailed assessment coverage for every assigned record "
-                "without changing eligibility."
+                "Choose and justify detailed assessment coverage without changing eligibility."
             ),
             "proposal": proposal,
             "packet_data": {
                 "outcomes": self.workspace.load()["protocol"]["outcomes"],
-                "sources": sources,
+                "source": source,
             },
-            "allowed_source_ids": [
-                row["document_id"] for source in sources for row in source["documents"]
-            ],
+            "allowed_source_ids": [row["document_id"] for row in source["documents"]],
         }
 
     def _fulltext_spec(self, record_id: str) -> dict[str, Any]:
@@ -1395,7 +1385,7 @@ class TaskEngine:
                 or not all(isinstance(row, dict) for row in rows)
                 or {row.get("record_id") for row in rows} != target
             ):
-                raise ValidationError("proposal must contain exactly the assigned records")
+                raise ValidationError("proposal must contain exactly the assigned record")
         elif task["kind"] == "studies":
             rows = (stages.get("studies") or {}).get("records")
             if (

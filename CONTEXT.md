@@ -33,7 +33,7 @@ own task scope, validate its own citations, or declare the run complete.
    store carries all substantive data.
 2. The CLI owns schemas, exact coverage, citations, digests, legal transitions, and completion.
 3. Task inputs and accepted results are immutable and content-addressed. Stale proposals fail closed.
-4. Work is deliberately small: a bounded Selector batch, one outcome, or one audit group per Task.
+4. Work is deliberately small: one record, one outcome, or one audit group per Task.
 5. Hermes integration uses public profile, skill, terminal, file, and Bot Mode surfaces only.
 6. Bootstrap is non-mutating by default and never overwrites an unmanaged or locally edited profile.
 7. v0.4 runs may be copied into the shared store, but old host-native review remains provenance only;
