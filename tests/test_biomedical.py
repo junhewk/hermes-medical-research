@@ -3,21 +3,21 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from hermes_medical_search.artifacts import RunStore, strategy_digest
-from hermes_medical_search.biomedical import (
+from hermes_medical_research.search.artifacts import RunStore, strategy_digest
+from hermes_medical_research.search.biomedical import (
     ClinicalTrialsProvider,
     EuropePMCProvider,
     europe_record,
     trial_record,
 )
-from hermes_medical_search.config import Credentials
-from hermes_medical_search.http import HttpSession
-from hermes_medical_search.models import Question, ValidationError
-from hermes_medical_search.orchestrator import execute_search
-from hermes_medical_search.providers import Page
-from hermes_medical_search.query import compile_strategy
-from hermes_medical_search.ranking import deduplicate
-from medical_deep_research_plugin.workspace import Workspace
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.http import HttpSession
+from hermes_medical_research.search.models import Question, ValidationError
+from hermes_medical_research.search.orchestrator import execute_search
+from hermes_medical_research.search.providers import Page
+from hermes_medical_research.search.query import compile_strategy
+from hermes_medical_research.search.ranking import deduplicate
+from hermes_medical_research.workspace import Workspace
 
 
 def question(framework="PICO", **components):
@@ -234,7 +234,9 @@ async def test_bound_search_budget_counts_filtered_records(tmp_path, monkeypatch
             )
 
     active = Provider()
-    monkeypatch.setattr("hermes_medical_search.orchestrator.provider_for", lambda *_: active)
+    monkeypatch.setattr(
+        "hermes_medical_research.search.orchestrator.provider_for", lambda *_: active
+    )
     async with HttpSession(transport=httpx.MockTransport(lambda _: httpx.Response(500))) as session:
         await execute_search(
             strategy,

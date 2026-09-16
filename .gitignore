@@ -7,6 +7,8 @@ __pycache__/
 dist/
 runs/
 .env
+.board/
+.hermes-test-*/
 
 # Local implementation and validation handoff; intentionally not published.
 /LOCAL_STATE.md

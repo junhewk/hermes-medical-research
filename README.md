@@ -1,296 +1,233 @@
-# Medical Deep Research Plugin
+# Hermes Medical Research
 
-Evidence-based medical research for **Codex CLI, Claude Code, and Hermes Agent**, entirely from
-a terminal. Two shared skills use a Python CLI to search literature, preserve source evidence,
-record the host agent's assessments, and export a cited report.
+Hermes Medical Research is a deterministic evidence workflow operated by isolated Hermes bots. The
+bots perform bounded semantic tasks; the `mdr` CLI owns the corpus, schemas, citations, digests,
+state transitions, audit independence, and final completeness checks.
 
-- **medical-deep-research**: protocol → retrieval → screening → study links → full text →
-  extraction → appraisal → outcome-level synthesis → verification → report.
-- **medical-literature-search**: reproducible literature retrieval without report generation.
+This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 
-The host agent performs the reasoning. Version 0.4 adds source packets, atomic batch submissions,
-a separate native reviewer, a shared author/reviewer budget, and one-command finalization. The CLI validates references and quotes, manages budgets
-and resumable artifacts, and renders the result. No MCP server or separate model API key is needed.
-This replaces `hermes-medical-search`; the desktop
-[medical-deep-research](https://github.com/junhewk/medical-deep-research) application remains separate.
+## Install
 
-## Install from a terminal
-
-Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git,
-network access to the selected literature APIs, and a host client with plugin support.
-Skills invoke the matching Git release through `uvx`.
-
-**Codex CLI**
+Install directly from the GitHub repository with a Python tool installer:
 
 ```bash
-codex plugin marketplace add junhewk/medical-deep-research-plugin --ref v0.4.0
-codex plugin add medical-deep-research-plugin@junhewk-medical-research
-codex plugin list
+uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.0
+# or
+pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.0
 ```
 
-**Claude Code**
+The package exposes one executable:
 
 ```bash
-claude plugin marketplace add junhewk/medical-deep-research-plugin
-claude plugin install medical-deep-research-plugin@junhewk-medical-research
-claude plugin list
+mdr --version
 ```
 
-Start a new Claude session and invoke
-`/medical-deep-research-plugin:medical-deep-research` followed by the research question.
+## Architecture
 
-**Hermes Agent**
+| Layer | Responsibility |
+| --- | --- |
+| Hermes skill | Tells one role what bounded task to perform and which `mdr` commands to call |
+| CLI/core | Enforces schemas, exact scope, citations, digests, receipts, legal transitions, and completion |
+| Bot profile | Supplies role separation, model/provider choice, memory, configuration, and session identity |
+| Artifact store | Carries immutable results between roles; bots exchange only `run_id` and `task_id` |
+
+Four checked-in skills serve six profiles:
+
+- `medical-search` → Searcher
+- `medical-select` → Selector
+- `medical-extract` → Extractor
+- `medical-synthesize` → Synthesizer and independent Auditor
+- Coordinator uses its narrow profile instructions only; it does not install or perform specialist
+  skills.
+
+The default artifact root is `$XDG_DATA_HOME/hermes-medical-research`, falling back to
+`~/.local/share/hermes-medical-research`. Set `MDR_HOME` to an absolute path for an isolated store.
+
+## Bootstrap Hermes profiles
+
+Preview the six-profile installation without changing anything:
 
 ```bash
-hermes plugins install junhewk/medical-deep-research-plugin --no-enable
-hermes plugins enable medical-deep-research-plugin --no-allow-tool-override
-hermes plugins list --user --json
+mdr hermes bootstrap
 ```
 
-For the usual short name and automatic skill selection, append the installed skills directory to
-`skills.external_dirs` in the active profile's `config.yaml` (normally `~/.hermes/config.yaml`).
-Preserve any existing directory entries:
-
-```yaml
-skills:
-  external_dirs:
-    - plugins/medical-deep-research-plugin/skills
-```
-
-The relative path resolves inside the active Hermes profile. This is Hermes's supported way to
-include shared skills in its startup index, `skills_list`, `skill_view`, and slash commands. It reads
-the installed package directly, so plugin updates also update these instructions.
-
-In an existing chat, send:
-
-```text
-/reload-skills
-```
-
-Then invoke `/medical-deep-research` followed by the report request, or ask Hermes to load
-`skill_view(name="medical-deep-research")`. The startup index includes the short name when the
-session's prompt is next built; the slash command explicitly loads the instructions in the current
-chat. A gateway restart is not needed for this external-directory setup.
-
-Version 0.4 adds a native Hermes adapter. Doctor should report three tools
-(`medical_research_session`, `medical_research_review`, `medical_research_review_check`) and one
-`pre_tool_call` hook.
-The native qualified skill is `medical-deep-research-plugin:medical-deep-research`.
-Older portable installations used `agent-plugin-medical-deep-research-plugin-71b62b59:`;
-that namespace is historical, not another Hermes installation. The short name still uses
-`skills.external_dirs`. Reloading skills refreshes instructions, not already imported Python
-plugin code; verify the three native tools in the actual chat before starting research.
-
-The external-directory setting activates the instructions independently of the plugin registry.
-Remove its entry as well when deactivating these skills. Local skills with the same name take
-precedence; an existing standalone `medical-literature-search` remains the bare-name version until
-you intentionally update or remove that standalone copy.
-
-If the short name is missing, check `skills.external_dirs` in the chat's active profile, the path's
-existence, and skill-specific disabled settings. `plugins list` and Plugin Doctor check different
-parts of setup. Doctor reporting **0 tools, 0 hooks is expected**: this package contributes skills.
-Hermes reads `skills/*/SKILL.md`; adding a `skills` field to the portable manifest does not index them.
-
-Version 0.4.0 fixes an installation-scan false positive caused by a local-file rejection test in
-0.3.0. The test now uses a harmless temporary fixture and still rejects local file URLs. The actual
-Hermes installation scan passes without a scanner override. For an existing, unpinned Git
-installation, run `hermes plugins update medical-deep-research-plugin` to retrieve the fix.
-
-The package includes portable, Codex, and Claude manifests and a Git marketplace catalog. Host docs:
-[Codex](https://developers.openai.com/plugins/build/plugins),
-[Claude Code](https://code.claude.com/docs/en/plugins-reference),
-[Hermes](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/).
-
-## Start a report
-
-Load the skill explicitly before giving the research task:
-
-- **Codex CLI:** select or mention `$medical-deep-research` from the installed plugin.
-- **Claude Code:** invoke `/medical-deep-research-plugin:medical-deep-research`.
-- **Hermes:** after the directory setup above, invoke `/medical-deep-research` or ask it to load
-  `skill_view(name="medical-deep-research")`. A prompt mentioning a missing skill does not install
-  or configure its package.
-
-Then give the task and settings, for example:
-
-> Use the loaded medical-deep-research skill. Create a medical evidence report on exercise for
-> adults with hypertension. Compare blood-pressure effects and harms, explain disagreements,
-> and export Markdown, HTML, and the evidence tables.
-> Use report mode, a PICO protocol, English output, no publication-date restriction, the default
-> available sources, up to 100 raw records per source, and up to 30 full-text attempts. Show the
-> effective settings and source availability before retrieval. Use a separate native reviewer,
-> inherit the host model/authentication, and share a total budget of 150 across author and reviewers.
-> Save the run to
-> `runs/exercise-hypertension`.
-
-These are **per-report settings**, saved in the run's immutable protocol. There is no separate
-plugin settings screen or persistent plugin-wide report configuration. Specify scope, sources,
-and filters in the protocol JSON; set mode, language, budgets, and destination through
-`research init` options. Credentials come from the host environment. The skill translates the
-request into those inputs and reports unavailable sources. To change a saved protocol or budget,
-initialize a new run.
-
-The report also requires a working native review adapter. See
-[native review and budget settings](skills/medical-deep-research/references/native-review.md).
-A saved self-review cannot satisfy this requirement, and a changed candidate requires another
-review. No additional model API key is used.
-
-Supported frameworks: **PICO** (interventions), **PECO** (exposures/harms), **DIAGNOSTIC**,
-**PROGNOSIS**, and **PCC** (scoping). Search components are explicit: sensitive PICO retrieval
-normally uses population and intervention, with comparison/outcome assessed during screening.
-Synonyms are OR groups; separate concepts are AND groups. Validated MeSH supplements text.
-Schema-3 searches have no hidden date restriction.
-
-Report defaults: **100 raw retrieved records per source across all searches** and **30 unique
-records attempted for full text**. Reserve some capacity for gap searches/citation chaining.
-Failed full-text attempts count; retries of the same record reuse its slot.
-
-For a local checkout, invoke the skill from a native host session. Bind the report with
-`research host-session` (Codex/Claude) or `medical_research_session` (Hermes) before research.
-The following commands show the CLI stages; a terminal alone cannot supply the native reviewer.
+Apply it explicitly:
 
 ```bash
-uv sync --locked --extra dev
-uv run medical-deep-research-plugin research init examples/research-protocol.json --output runs/example
-uv run medical-deep-research-plugin doctor --json
-uv run medical-deep-research-plugin plan runs/example/question.json --mode quick --sources europe-pmc --limit-per-source 75 --research-run runs/example --json
+mdr hermes bootstrap --apply
 ```
 
-Replace `SEARCH` below with the `run_dir` returned by `plan`:
+Bootstrap creates clean `mdr-coordinator`, `mdr-searcher`, `mdr-selector`, `mdr-extractor`,
+`mdr-synthesizer`, and `mdr-auditor` profiles through Hermes's public profile command. It copies only
+the current model/provider/timezone selection and enables the terminal, file, and skills toolsets. It
+refuses to overwrite unmanaged profiles or managed files edited after installation.
+
+Bot Mode discovers profiles automatically from each connected Hermes gateway. If profiles were
+added while Hermes Desktop was connected, use **Reconnect gateway** to refresh its roster. Preview
+the cron fleet, then apply it explicitly after enabling gateway profile multiplexing:
 
 ```bash
-uv run medical-deep-research-plugin search SEARCH
-uv run medical-deep-research-plugin research attach-search runs/example SEARCH
-uv run medical-deep-research-plugin research status runs/example --stage records --limit 50
+mdr hermes routines
+mdr hermes routines --apply
 ```
 
-Follow the [evidence contracts](skills/medical-deep-research/references/evidence-records.md) to author
-stage JSON after reading the sources. The CLI does not invent missing assessments.
+This creates six base Routines: a script-only Coordinator tick and one script-gated worker per
+specialist. Each living Review also gets one visible, script-only Routine at its actual cadence.
+Stable idle minutes use zero model calls. Verify profiles, `mdr`, multiplexing, cron schedulers,
+managed scripts/jobs, and cron health with:
 
 ```bash
-uv run medical-deep-research-plugin research record runs/example --stage screening --input screening.json
-uv run medical-deep-research-plugin research fulltext runs/example
-uv run medical-deep-research-plugin research methods
-# Record studies, extractions, appraisals, and synthesis using the same record command.
-uv run medical-deep-research-plugin research verify runs/example
-uv run medical-deep-research-plugin research export runs/example
+mdr hermes doctor
 ```
 
-Inspect segments with `research status RUN --stage documents`. Acquisition uses Europe PMC XML,
-Unpaywall OA PDFs, and PMC OA packages. XML retains tables; PDF retains page locations. Scans report
-that OCR is needed. Supply an accessible PDF with `research fulltext RUN --ids RECORD_ID --pdf paper.pdf`.
+## Workflow
 
-## Sources and credentials
+For normal use, open `mdr-coordinator` in the Bot roster and describe the research request in ordinary
+language. The Coordinator confirms the protocol and creates a human-named Review. Cron workers claim
+bounded Tasks directly; no Bot or human relays IDs.
 
-| Source | Purpose | Configuration |
-|---|---|---|
-| PubMed, PMC | Literature, MeSH validation | `NCBI_EMAIL`; optional `NCBI_API_KEY` |
-| Europe PMC | Literature, OA XML, references/citations | No key |
-| OpenAlex | Broader scholarly discovery | Optional `OPENALEX_API_KEY` for higher quota |
-| Semantic Scholar | Scholarly discovery | Optional `SEMANTIC_SCHOLAR_API_KEY` or `S2_API_KEY` |
-| ClinicalTrials.gov | Registrations and posted results | No key |
-| Scopus | Optional licensed discovery | `SCOPUS_API_KEY`; optional `SCOPUS_INSTTOKEN` |
-| Crossref | DOI identity/bibliographic metadata | No key; used by verification |
-| Unpaywall | OA PDF locations | Uses `NCBI_EMAIL` |
-
-Research defaults to PubMed, PMC, Europe PMC, OpenAlex, and Semantic Scholar; clinical frameworks
-also add ClinicalTrials.gov, and configured Scopus is included. Explicit `sources` overrides this.
-Keep credentials in the environment. Doctor reports configuration/reachability; configured values
-are redacted from persisted provider errors.
-
-ClinicalTrials.gov has no publication-date equivalent. Split dated/language/type-filtered literature
-from an undated registry strategy with the same original question. Registrations and papers stay
-separate records, then link to a study. Crossref is a metadata lookup, not another searched database.
-There is no direct CENTRAL, Embase, or Web of Science connector; a Cochrane review found in PubMed
-is not a direct Cochrane Library search.
-
-Citation chaining creates a normal child plan sharing the source budget:
+One-off and living Reviews use the same interface:
 
 ```bash
-uv run medical-deep-research-plugin research snowball RUN --record-id RECORD_ID --direction references --limit 25
+mdr review create --name exercise-review \
+  --request examples/research-protocol.json --schedule once
+
+mdr review create --name living-exercise \
+  --request examples/research-protocol.json \
+  --schedule "0 3 * * 1" --timezone Asia/Seoul
+
+mdr review list
+mdr review status living-exercise
+mdr review pause living-exercise
+mdr review resume living-exercise
+mdr review run-now living-exercise
 ```
 
-Execute and attach its returned search directory. Use `--direction citations` for forward chaining.
+An immutable protocol change uses `mdr review fork`; a standalone Run can be brought under human
+status management with `mdr review adopt`. A living Review starts its first Cycle immediately.
+Schedule fires during an active Cycle coalesce into one catch-up Cycle.
 
-## Appraisal and review preparation
-
-Each extraction records scope, measure, interval, sample size, source location, and access level.
-The host explains agreement, conflict, applicability, and weight for every contribution. Study groups
-distinguish independent studies from repeated reports. This release performs narrative synthesis,
-not statistical pooling.
-
-[Appraisal guidance](skills/medical-deep-research/references/appraisal.md) covers RoB 2 and its variants,
-ROBINS-I, ROBINS-E, QUADAS-3, QUIPS, and PROBAST+AI with explicit versions. The CLI checks domain records
-and source locations; it does not implement the complete instruments or decision algorithms.
-Outcome-level GRADE-informed judgments explain all five domains and the starting point. Scoping maps
-can use descriptive certainty. Missing information stays unassessed; all agent assessments remain
-provisional pending human review. Retrieval scores only prioritize reading and never establish certainty.
-
-For systematic/scoping **review preparation**:
+For scripted or diagnostic use, create a Run from a versioned PICO/PCC request:
 
 ```bash
-uv run medical-deep-research-plugin research init protocol.json --output runs/review --mode review-prep --records-per-source 500 --fulltexts 100
+mdr run create --request examples/research-protocol.json
 ```
 
-Child plans use `--mode review`. The exact strategy digest requires approval before preflight/search.
-`all` requires explicit review budgets and confirmation tied to preflight counts. Follow the
-[review preparation protocol](skills/medical-deep-research/references/review-preparation.md).
-This produces an auditable dossier; independent screening and other formal review requirements
-remain human work.
+The Coordinator can inspect a standalone Run diagnostically:
 
-## Artifacts and resuming
+```bash
+mdr --actor mdr-coordinator run next RUN_ID
+```
 
-Start or resume recorded evidence work with `research next RUN`; read its packet and edit the
-provided input file. Submit it with `research record RUN --batch --input FILE`.
-`research check RUN [--input FILE]` reports errors without committing changes;
-`research finalize RUN [--input FILE]` checks, verifies and exports. See the
-[v2 record contract](skills/medical-deep-research/references/evidence-records.md).
+Cron workers normally use global claim commands:
 
-Exports: `report.md`, self-contained `report.html`, `report.json`, `evidence.csv`, `screening.csv`,
-`studies.csv`, `findings.csv`, `appraisals.csv`, `coverage.csv`, `selection-counts.json`, and
-`references.ris`. `completion.json` records output paths/checksums and `resume.json` identifies the
-latest work packet. Reports include search history, selection
-counts, aligned findings, provisional certainty, source locations, limitations, and references.
-HTML needs no server or scripts and can be copied off a headless machine.
+```bash
+mdr search claim
+mdr select claim
+mdr extract claim
+mdr synthesize claim
+mdr audit claim
+```
 
-`research.json` is the manifest; `revisions/` contains content-addressed stages, `searches/` preserves
-snapshots, and `fulltext/` preserves originals. Research mutations are locked. Stage submissions replace
-the whole payload. Upstream changes mark dependent assessments stale and block export until reviewed
-and resubmitted. Interrupted searches and full-text attempts resume within the original budgets.
+Each claim returns a bounded packet/proposal, a 60-minute session-bound token, and exact source,
+submit, and failure commands. Failures retry after 5 and 30 minutes; the third blocks the Cycle. The
+older explicit-ID commands remain operator diagnostics for non-managed Runs:
 
-Verification checks quote locations and online identity/available retraction metadata. The host
-separately checks semantic support. Mismatched identities block export; inaccessible services or
-explicitly skipped checks stay visible limitations. `--offline` deliberately skips online checks.
+```bash
+mdr search next RUN_ID TASK_ID
+mdr search submit RUN_ID TASK_ID --from PROPOSAL.json
+mdr search run RUN_ID TASK_ID
 
-## Development
+mdr select next RUN_ID TASK_ID
+mdr select submit RUN_ID TASK_ID --from PROPOSAL.json
+
+mdr extract next RUN_ID TASK_ID
+mdr extract submit RUN_ID TASK_ID --from PROPOSAL.json
+
+mdr synthesize next RUN_ID TASK_ID
+mdr synthesize submit RUN_ID TASK_ID --from PROPOSAL.json
+
+mdr audit next RUN_ID TASK_ID
+mdr audit submit RUN_ID TASK_ID --from PROPOSAL.json
+```
+
+Hermes profiles normally provide actor/session identity. `--actor` exists for deterministic testing
+and recovery. An active Task can read only allowed sources, in pages no larger than 16 KiB:
+
+```bash
+mdr source list RUN_ID TASK_ID --page 1
+mdr source show RUN_ID TASK_ID SOURCE_ID --page 1
+```
+
+After all audit groups pass:
+
+```bash
+mdr run status RUN_ID
+mdr --actor mdr-coordinator finalize RUN_ID
+```
+
+For review-preparation mode, supply explicit retrieval and full-text limits (or `all`). Search
+strategies and all-results retrieval retain digest/token approval gates.
+
+## Safety properties
+
+- Run and Task IDs resolve only inside the configured artifact store.
+- Packets are capped at 32 KiB and submissions must cover exactly their assigned targets.
+- Proposal base digests reject stale work; accepted retries are idempotent only when byte-equivalent
+  JSON content has the same canonical digest.
+- Search snapshots, evidence revisions, audit results, and exports are content-addressed.
+- Audit receipts bind every reviewed finding/report target to an independent Auditor profile and
+  frozen Candidate digest.
+- `revise` routes a correction to the responsible specialist and supersedes stale audit Tasks.
+- Citation document IDs, locators, and verbatim quotes are checked against the stored corpus.
+- Deterministic checks establish traceability and consistency, not clinical truth; semantic review is
+  still the responsibility of the isolated specialist profiles.
+
+Living Reviews freeze and replay their accepted search plan. Corpus identity prefers DOI, then PMID,
+PMCID, and source/source-ID. Digest-identical work receives an immutable reuse receipt; changed
+metadata or retraction state is rescreened. An unchanged refresh records a checkpoint referring to
+the prior report and skips downstream inference. A changed Candidate always receives a fresh audit.
+
+## v0.4 migration
+
+Copy a v0.4 evidence-schema workspace into the shared store:
+
+```bash
+mdr run migrate /absolute/path/to/v0.4-run
+```
+
+The source is never modified. Existing native-review, completion, verification, and review artifacts
+are archived under `provenance/v0.4`; a fresh v0.5 independent audit is mandatory.
+
+## Qualification and development
+
+The first operational gate is deliberately small: two fresh Selector bot chats each inspect and
+record one synthetic article decision.
+
+```bash
+uv run python scripts/qualify_hermes.py \
+  --hermes-home /path/to/isolated-hermes-home
+```
+
+Only after that passes should the three-run full qualification be attempted:
+
+```bash
+uv run python scripts/qualify_hermes.py \
+  --hermes-home /path/to/isolated-hermes-home \
+  --full-runs 3 \
+  --output qualification.json
+```
+
+Local deterministic checks:
 
 ```bash
 uv sync --locked --extra dev
 uv run ruff check .
 uv run pytest
-uv run python scripts/validate_bundle.py
 uv build
-uv run python scripts/package_plugin.py
 ```
 
-Hermes integration check (Git, a committed plugin checkout, and a separate Hermes source checkout):
-
-```bash
-uv run --with rich --with python-dotenv --with ruamel-yaml python scripts/validate_hermes.py --hermes-source /path/to/hermes-agent
-```
-
-This clones committed source locally, scans the complete tree including tests, checks disabled
-state, enables the package without tool-override privileges, and uses fresh processes to list/read
-both qualified skills and their references. It also adds the documented external-directory setting
-and verifies short-name listing/loading, the startup index, reference access, and slash invocation
-in the same process. It changes only temporary Hermes profiles. CI pins the Hermes source revision;
-it does not run a model or generate a clinical report.
-
-Optional public API check: `uv run python scripts/live_smoke.py`. CI tests use offline fixtures.
-The reproducible release ZIP excludes credentials, runs, environments, and session files.
-The wheel installs both CLI names. Existing `hermes-medical-search` commands and schema-1/2 inputs
-remain supported. Legacy quick searches retain their visible three-year default; schema-3 research
-searches do not. Existing schema-2 search artifacts retain their digest format.
-
-MIT applies to project code and original instructions. Referenced instruments and downloaded papers
-retain their own licenses; full appraisal instruments are not redistributed here.
+See [project context](CONTEXT.md), the
+[CLI architecture decision](docs/adr/0001-hermes-skills-over-deterministic-cli.md), the
+[cron architecture decision](docs/adr/0002-cron-backed-review-automation.md), and
+[validation status](VALIDATION.md).

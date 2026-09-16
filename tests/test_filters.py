@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_medical_search.models import Question, language_code, language_name
-from hermes_medical_search.orchestrator import _passes_filters
-from hermes_medical_search.query import compile_strategy
+from hermes_medical_research.search.models import Question, language_code, language_name
+from hermes_medical_research.search.orchestrator import _passes_filters
+from hermes_medical_research.search.query import compile_strategy
 
 
 def strategy_with(**filters):

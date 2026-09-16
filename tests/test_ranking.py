@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from hermes_medical_search.models import Question
-from hermes_medical_search.ranking import (
+from hermes_medical_research.search.models import Question
+from hermes_medical_research.search.ranking import (
     citation_score,
     deduplicate,
     evidence_score,

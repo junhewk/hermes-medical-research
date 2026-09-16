@@ -5,21 +5,24 @@ from __future__ import annotations
 import csv
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 from test_research import assessed_workspace
 
-from hermes_medical_search.models import ValidationError
-from medical_deep_research_plugin.evidence import REVIEW_CHECKS, review_digest
-from medical_deep_research_plugin.packets import documents, next_packet
-from medical_deep_research_plugin.validation import validate_stage
-from medical_deep_research_plugin.workflow import (
+from hermes_medical_research.evidence import REVIEW_CHECKS, review_digest
+from hermes_medical_research.packets import documents
+from hermes_medical_research.search.models import ValidationError
+from hermes_medical_research.tasks import Actor, TaskEngine, _empty_ledger
+from hermes_medical_research.validation import validate_stage
+from hermes_medical_research.workflow import (
     check,
     current_digests,
     finalize,
     stage_errors,
     submit_batch,
 )
+from hermes_medical_research.workspace import digest
 
 
 def modern_workspace(tmp_path):
@@ -27,6 +30,15 @@ def modern_workspace(tmp_path):
     original = {s: workspace.read(s) for s in workspace.required_stages}
     manifest = workspace.load()
     manifest["evidence_version"] = "2"
+    manifest["run_id"] = "run-" + "a" * 32
+    manifest["task_engine"] = _empty_ledger()
+    manifest["task_engine"]["authors"] = {
+        "screening": ["mdr-selector"],
+        "coverage": ["mdr-selector"],
+        "studies": ["mdr-extractor"],
+        "assessment": ["mdr-extractor"],
+        "synthesis": ["mdr-synthesizer"],
+    }
     workspace.save(manifest)
     for stage in ("screening", "studies", "extractions", "appraisals", "synthesis"):
         original[stage]["schema_version"] = "2"
@@ -81,59 +93,57 @@ def modern_workspace(tmp_path):
 
 
 def record_reviews(workspace):
-    payload = {
-        "schema_version": "2",
-        "records": [
-            {
-                "finding_id": f["finding_id"],
-                "review_digest": review_digest(workspace, f),
-                "status": "pass",
-                "checks": {
-                    k: {
-                        "status": "pass",
-                        "rationale": (
-                            "Reviewed synthetic claim against its source; methods limitations "
-                            "remain explicit."
-                        ),
-                    }
-                    for k in REVIEW_CHECKS
-                },
-            }
-            for f in workspace.read("synthesis")["findings"]
-        ],
-    }
-    from medical_deep_research_plugin import native_review
+    from hermes_medical_research import audit
 
-    state = workspace.store.read_json(native_review.STATE, default={})
-    native_review.bind(
-        workspace,
-        host="hermes",
-        author_session_id="fixture-author",
-        total_turns=150,
-        used_turns=10,
-        unit="fixture turns",
-    )
-    task = native_review.prepare(workspace, author_session_id="fixture-author", review_turns=5)
-    for row in payload["records"]:
-        row["observations"] = [
-            {
-                "check": c,
-                "field": "conclusion",
-                "assertion": "Synthetic claim",
-                "verdict": "supported",
-                "rationale": "Fixture source checked",
-                "sources": [],
+    engine = TaskEngine(workspace)
+    coordinator = Actor("mdr-coordinator", "fixture-coordinator", "coordinator")
+    auditor = Actor("mdr-auditor", "fixture-auditor", "auditor")
+    while True:
+        route = engine.route_next(coordinator)
+        if route["task_id"] is None:
+            assert route["state"] == "ready"
+            return
+        assert route["role"] == "auditor"
+        opened = engine.role_next("audit", route["task_id"], auditor)
+        payload = json.loads(Path(opened["proposal_path"]).read_text())
+        container = payload.get("record") or payload["report_review"]
+        container["status"] = "pass"
+        if "checks" in container:
+            container["checks"] = {
+                check: {
+                    "status": "pass",
+                    "rationale": "Checked against the frozen synthetic evidence.",
+                }
+                for check in REVIEW_CHECKS
             }
-            for c in REVIEW_CHECKS
-        ]
-    native_review.finish(
-        workspace,
-        task_id=task["task_id"],
-        reviewer_session_id=f"fixture-reviewer-{len(state.get('tasks', {}))}",
-        used_turns=2,
-        result=payload,
-        completed=True,
-    )
+        for observation in container["observations"]:
+            observation.update(
+                verdict="supported",
+                rationale="Fixture source and candidate target checked.",
+            )
+        manifest = workspace.load()
+        task = manifest["task_engine"]["tasks"][route["task_id"]]
+        packet = workspace.store.read_json(task["packet_file"])
+        targets = {
+            target["target_id"]: target
+            for target in packet["audit_group"]["targets"]
+        }
+        fallback_source = workspace.rows("extractions")[0]["source_location"]
+        for observation in container["observations"]:
+            if targets[observation["target_id"]].get("requires_sources"):
+                observation["sources"] = [fallback_source]
+        target = packet["audit_group"]["targets"][0]
+        if target.get("requires_sources") and target["kind"] in {
+            "extractions",
+            "appraisals",
+        }:
+            extraction = workspace.index("extractions")[target["entity_id"]]
+            container["observations"][0]["sources"] = [extraction["source_location"]]
+        result = audit.validate_task_result(workspace, engine._audit_task(task), payload)
+        for row in [*result["records"], *result["report_reviews"]]:
+            row["audit_task_id"] = route["task_id"]
+        with workspace.lock:
+            engine._accept(route["task_id"], auditor, digest(payload), result)
 
 
 def mapped_review_workspace(tmp_path):
@@ -439,26 +449,51 @@ def test_source_lookup_keeps_context_and_exact_text(tmp_path):
     assert result["segments"][0]["locator"] == "abstract"
 
 
-def test_next_packet_is_editable_and_does_not_overwrite_work(tmp_path):
+def test_titles_are_citable_without_rewriting_evidence_stages(tmp_path):
     w = modern_workspace(tmp_path)
-    packet = next_packet(w, stage="synthesis")
-    from pathlib import Path
+    from hermes_medical_research.validation import validate_location
 
-    path = Path(packet["input_path"])
-    template = json.loads(path.read_text())
-    assert template["base_digests"] == current_digests(w)
-    assert template["stages"]["synthesis"]["findings"][0]["protocol_outcomes"] == [
-        "Synthetic outcome"
+    before_manifest = w.load()
+    before_documents = w.read("documents")
+    projected = w.source_documents()
+    assert w.source_documents() == projected
+    assert len([row for row in projected if row["kind"] == "metadata"]) == len(
+        w.rows("records")
+    )
+    record = w.rows("records")[0]
+    location = {
+        "document_id": f"{record['record_id']}:metadata",
+        "locator": "title",
+        "quote": record["title"],
+    }
+    assert validate_location(w, location, record["record_id"])["kind"] == "metadata"
+    extraction = w.read("extractions")
+    extraction["records"][0]["source_location"] = location
+    with pytest.raises(ValidationError, match="metadata alone cannot support a result"):
+        w.put("extractions", extraction)
+    assert w.read("documents") == before_documents
+    assert w.load()["datasets"] == before_manifest["datasets"]
+
+
+def test_task_proposal_is_digest_bound_and_not_overwritten(tmp_path):
+    w = modern_workspace(tmp_path)
+    manifest = w.load()
+    accepted = [
+        task
+        for task in manifest["task_engine"]["tasks"].values()
+        if task["kind"] == "audit" and task["state"] == "accepted"
     ]
-    path.write_text("human work")
-    next_packet(w, stage="synthesis")
-    assert path.read_text() == "human work"
+    assert accepted
+    proposal = w.store.read_json(accepted[0]["proposal_file"])
+    assert digest(proposal) == accepted[0]["proposal_digest"]
+    result = w.store.read_json(accepted[0]["result_file"])
+    assert digest(result) == accepted[0]["result_digest"]
 
 
 @pytest.mark.asyncio
 async def test_interrupted_export_can_resume(tmp_path, monkeypatch):
     w = modern_workspace(tmp_path)
-    import medical_deep_research_plugin.reporting as reporting
+    import hermes_medical_research.reporting as reporting
 
     original = reporting.export
     monkeypatch.setattr(

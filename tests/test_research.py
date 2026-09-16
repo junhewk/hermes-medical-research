@@ -11,17 +11,17 @@ from pathlib import Path
 import httpx
 import pytest
 
-from hermes_medical_search.artifacts import RunStore
-from hermes_medical_search.config import Credentials
-from hermes_medical_search.http import HttpSession
-from hermes_medical_search.models import Question, ValidationError
-from hermes_medical_search.query import compile_strategy
-from medical_deep_research_plugin.commands import plan_snowball
-from medical_deep_research_plugin.fulltext import fetch_fulltexts, parse_jats, public_url
-from medical_deep_research_plugin.reporting import export
-from medical_deep_research_plugin.validation import GRADE_DOMAINS, METHODS, validate_complete
-from medical_deep_research_plugin.verification import verify
-from medical_deep_research_plugin.workspace import Workspace
+from hermes_medical_research.citations import plan_snowball
+from hermes_medical_research.fulltext import fetch_fulltexts, parse_jats, public_url
+from hermes_medical_research.reporting import export
+from hermes_medical_research.search.artifacts import RunStore
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.http import HttpSession
+from hermes_medical_research.search.models import Question, ValidationError
+from hermes_medical_research.search.query import compile_strategy
+from hermes_medical_research.validation import GRADE_DOMAINS, METHODS, validate_complete
+from hermes_medical_research.verification import verify
+from hermes_medical_research.workspace import Workspace
 
 
 def protocol():
@@ -412,7 +412,7 @@ async def test_fulltext_pending_resume_and_retry_do_not_double_count(tmp_path, m
     async def unavailable(*_args):
         raise ValidationError("Synthetic inaccessible full text")
 
-    monkeypatch.setattr("medical_deep_research_plugin.fulltext.acquire", unavailable)
+    monkeypatch.setattr("hermes_medical_research.fulltext.acquire", unavailable)
     async with HttpSession(transport=httpx.MockTransport(lambda _: httpx.Response(500))) as session:
         result = await fetch_fulltexts(workspace, None, session=session)
         assert result["fulltexts"][rid]["status"] == "unavailable"

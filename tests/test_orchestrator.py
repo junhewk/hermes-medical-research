@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from hermes_medical_search.artifacts import RunStore, confirmation_token
-from hermes_medical_search.config import Credentials
-from hermes_medical_search.http import HttpSession
-from hermes_medical_search.models import Question
-from hermes_medical_search.orchestrator import execute_search, preflight
-from hermes_medical_search.providers import Page
-from hermes_medical_search.query import compile_strategy
+from hermes_medical_research.search.artifacts import RunStore, confirmation_token
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.http import HttpSession
+from hermes_medical_research.search.models import Question
+from hermes_medical_research.search.orchestrator import execute_search, preflight
+from hermes_medical_research.search.providers import Page
+from hermes_medical_research.search.query import compile_strategy
 
 
 def question() -> Question:
@@ -85,7 +85,7 @@ async def test_quick_mode_records_omitted_source(monkeypatch, tmp_path: Path) ->
     def factory(source, _session, _credentials):
         return FakeProvider(source, fail=source == "openalex")
 
-    monkeypatch.setattr("hermes_medical_search.orchestrator.provider_for", factory)
+    monkeypatch.setattr("hermes_medical_research.search.orchestrator.provider_for", factory)
     credentials = Credentials()
     async with HttpSession(intervals={"ncbi": 0}) as session:
         checked = await preflight(strategy, session, credentials)
@@ -105,7 +105,7 @@ async def test_resume_uses_checkpoint(monkeypatch, tmp_path: Path) -> None:
         question(), mode="review", limit_per_source=2, sources=["pubmed"]
     )
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda source, _session, _credentials: FakeProvider(source),
     )
     credentials = Credentials()
@@ -133,7 +133,7 @@ async def test_bounded_search_records_provider_truncation(monkeypatch, tmp_path:
         question(), mode="quick", limit_per_source=1, sources=["pubmed"]
     )
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda source, _session, _credentials: FakeProvider(source),
     )
     store = RunStore(tmp_path / "bounded")
@@ -203,7 +203,7 @@ async def test_pubmed_language_records_survive_a_language_filter(
         filtered_question(), mode="quick", limit_per_source=2, sources=["pubmed"]
     )
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda source, _session, _credentials: LanguageProvider(source, "eng"),
     )
     store = RunStore(tmp_path / "run")
@@ -220,7 +220,7 @@ async def test_filtered_out_records_are_counted(monkeypatch, tmp_path: Path) -> 
         filtered_question(), mode="quick", limit_per_source=2, sources=["pubmed"]
     )
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda source, _session, _credentials: LanguageProvider(source, "ger"),
     )
     store = RunStore(tmp_path / "run")
@@ -242,7 +242,7 @@ async def test_ranking_is_anchored_to_the_strategy_not_the_wall_clock(
     )
     strategy.created_at = "2024-03-05T12:00:00+00:00"
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda source, _session, _credentials: FakeProvider(source),
     )
     store = RunStore(tmp_path / "run")
@@ -270,7 +270,7 @@ async def test_resume_discards_records_written_past_the_checkpoint(
         question(), mode="review", limit_per_source=2, sources=["pubmed"]
     )
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda source, _session, _credentials: FakeProvider(source),
     )
     store = RunStore(tmp_path / "run")

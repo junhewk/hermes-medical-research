@@ -3,17 +3,17 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from hermes_medical_search.config import Credentials
-from hermes_medical_search.http import HttpSession, SourceError
-from hermes_medical_search.models import Question
-from hermes_medical_search.providers import (
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.http import HttpSession, SourceError
+from hermes_medical_research.search.models import Question
+from hermes_medical_research.search.providers import (
     MeshResolver,
     NCBIProvider,
     OpenAlexProvider,
     ScopusProvider,
     SemanticScholarProvider,
 )
-from hermes_medical_search.query import compile_strategy
+from hermes_medical_research.search.query import compile_strategy
 
 
 def strategy_for(source: str):

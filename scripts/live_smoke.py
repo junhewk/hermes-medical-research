@@ -6,12 +6,12 @@ import asyncio
 import json
 from urllib.parse import quote
 
-from hermes_medical_search.biomedical import ClinicalTrialsProvider, EuropePMCProvider
-from hermes_medical_search.config import Credentials
-from hermes_medical_search.http import HttpSession
-from hermes_medical_search.models import Question
-from hermes_medical_search.query import compile_strategy
-from medical_deep_research_plugin.fulltext import acquire
+from hermes_medical_research.fulltext import acquire
+from hermes_medical_research.search.biomedical import ClinicalTrialsProvider, EuropePMCProvider
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.http import HttpSession
+from hermes_medical_research.search.models import Question
+from hermes_medical_research.search.query import compile_strategy
 
 
 async def main() -> int:

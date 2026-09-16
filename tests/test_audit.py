@@ -1,0 +1,243 @@
+"""Task routing and immutable audit receipts replace host-native delegation tests."""
+
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+from test_evidence_workflow import modern_workspace
+from test_research import completed_search, protocol
+
+from hermes_medical_research.cli import main
+from hermes_medical_research.search.models import ValidationError
+from hermes_medical_research.tasks import Actor, RunCatalog, TaskEngine
+from hermes_medical_research.workspace import Workspace
+
+COORDINATOR = Actor("mdr-coordinator", "coordinator-session", "coordinator")
+SELECTOR = Actor("mdr-selector", "selector-session", "selector")
+
+
+def selector_workspace(tmp_path: Path) -> tuple[TaskEngine, dict]:
+    catalog = RunCatalog(tmp_path / "store")
+    created = catalog.create(protocol(), records=1, fulltexts=1)
+    workspace = catalog.workspace(created["run_id"])
+    search, _ = completed_search(workspace, tmp_path / "search", count=1)
+    workspace.attach(search.path)
+    return TaskEngine(workspace), created
+
+
+@pytest.mark.asyncio
+async def test_selector_records_one_decision_and_replays_from_fresh_session(tmp_path):
+    engine, created = selector_workspace(tmp_path)
+    route = engine.route_next(COORDINATOR)
+    assert route == {
+        "run_id": created["run_id"],
+        "task_id": route["task_id"],
+        "role": "selector",
+        "profile": "mdr-selector",
+        "state": "pending",
+    }
+    opened = engine.role_next("select", route["task_id"], SELECTOR)
+    packet = json.loads(Path(opened["packet_path"]).read_text())
+    proposal_path = Path(opened["proposal_path"])
+    proposal = json.loads(proposal_path.read_text())
+    assigned = packet["target_ids"][0]
+    row = proposal["stages"]["screening"]["records"][0]
+    row.update(decision="include", reason="Matches every synthetic eligibility criterion.")
+    proposal_path.write_text(json.dumps(proposal))
+
+    accepted = await engine.submit("select", route["task_id"], proposal_path, SELECTOR)
+    assert accepted["state"] == "accepted"
+    assert engine.workspace.index("screening")[assigned]["decision"] == "include"
+
+    fresh = Actor("mdr-selector", "fresh-selector-session", "selector")
+    replay = await engine.submit("select", route["task_id"], proposal_path, fresh)
+    assert replay == accepted
+
+
+@pytest.mark.asyncio
+async def test_selector_cannot_submit_extra_or_stale_records(tmp_path):
+    engine, _ = selector_workspace(tmp_path)
+    route = engine.route_next(COORDINATOR)
+    opened = engine.role_next("select", route["task_id"], SELECTOR)
+    path = Path(opened["proposal_path"])
+    proposal = json.loads(path.read_text())
+    row = proposal["stages"]["screening"]["records"][0]
+    row.update(decision="include", reason="Synthetic match.")
+    proposal["stages"]["screening"]["records"].append(
+        {**deepcopy(row), "record_id": "r-outside"}
+    )
+    path.write_text(json.dumps(proposal))
+    with pytest.raises(ValidationError, match="exactly the assigned record"):
+        await engine.submit("select", route["task_id"], path, SELECTOR)
+
+    proposal["stages"]["screening"]["records"] = [row]
+    path.write_text(json.dumps(proposal))
+    records = engine.workspace.read("records")
+    records["records"][0]["title"] += " revised"
+    engine.workspace.put("records", records, validate=False)
+    with pytest.raises(ValidationError, match="stale submission"):
+        await engine.submit("select", route["task_id"], path, SELECTOR)
+
+
+def test_in_progress_proposal_resumes_under_a_fresh_profile_session(tmp_path):
+    engine, _ = selector_workspace(tmp_path)
+    route = engine.route_next(COORDINATOR)
+    opened = engine.role_next("select", route["task_id"], SELECTOR)
+    path = Path(opened["proposal_path"])
+    proposal = json.loads(path.read_text())
+    proposal["stages"]["screening"]["records"][0]["reason"] = "Work in progress."
+    path.write_text(json.dumps(proposal))
+    resumed = engine.role_next(
+        "select",
+        route["task_id"],
+        Actor("mdr-selector", "replacement-session", "selector"),
+    )
+    assert resumed["proposal_path"] == str(path)
+    assert json.loads(path.read_text()) == proposal
+
+
+@pytest.mark.asyncio
+async def test_excluding_every_record_materializes_empty_evidence_stages(tmp_path):
+    engine, _ = selector_workspace(tmp_path)
+    route = engine.route_next(COORDINATOR)
+    opened = engine.role_next("select", route["task_id"], SELECTOR)
+    path = Path(opened["proposal_path"])
+    proposal = json.loads(path.read_text())
+    proposal["stages"]["screening"]["records"][0].update(
+        decision="exclude", reason="Fails the synthetic eligibility criteria."
+    )
+    path.write_text(json.dumps(proposal))
+    await engine.submit("select", route["task_id"], path, SELECTOR)
+    next_route = engine.route_next(COORDINATOR)
+    assert next_route["role"] == "synthesizer"
+    for stage in ("coverage", "studies", "extractions", "appraisals"):
+        assert engine.workspace.read(stage)["records"] == []
+
+
+def test_study_link_task_can_add_only_its_assigned_report(tmp_path):
+    workspace = modern_workspace(tmp_path)
+    engine = TaskEngine(workspace)
+    records = workspace.rows("records")
+    existing = workspace.rows("studies")[0]
+    assigned = records[1]["record_id"]
+    proposal = engine._studies_spec(assigned, existing["study_id"])["proposal"]
+    row = proposal["stages"]["studies"]["records"][0]
+    row["record_ids"].append(assigned)
+    task = {
+        "kind": "studies",
+        "target_ids": [assigned],
+        "base_digests": proposal["base_digests"],
+    }
+    engine._validate_batch_scope(task, proposal)
+    row["record_ids"].append("r-outside")
+    with pytest.raises(ValidationError, match="only add"):
+        engine._validate_batch_scope(task, proposal)
+
+def test_source_access_is_bounded_to_active_task(tmp_path):
+    engine, _ = selector_workspace(tmp_path)
+    route = engine.route_next(COORDINATOR)
+    engine.role_next("select", route["task_id"], SELECTOR)
+    source_id = engine.source_list(route["task_id"], 1, SELECTOR)["source_ids"][0]
+    page = engine.source_show(route["task_id"], source_id, 1, SELECTOR)
+    assert len(page["content"].encode()) <= 16 * 1024
+    with pytest.raises(ValidationError, match="bounded corpus"):
+        engine.source_show(route["task_id"], "outside:document", 1, SELECTOR)
+    with pytest.raises(ValidationError, match="active task"):
+        engine.source_show(
+            route["task_id"],
+            source_id,
+            1,
+            Actor("mdr-extractor", "other-session", "extractor"),
+        )
+
+
+def test_auditor_is_independent_and_every_receipt_is_immutable(tmp_path):
+    workspace = modern_workspace(tmp_path)
+    manifest = workspace.load()
+    audit_tasks = [
+        task
+        for task in manifest["task_engine"]["tasks"].values()
+        if task["kind"] == "audit" and task["state"] == "accepted"
+    ]
+    assert audit_tasks
+    assert {task["actor_profile"] for task in audit_tasks} == {"mdr-auditor"}
+    assert "mdr-auditor" not in {
+        profile
+        for profiles in manifest["task_engine"]["authors"].values()
+        for profile in profiles
+    }
+    task = next(
+        task
+        for task in audit_tasks
+        if workspace.store.read_json(task["result_file"])["records"]
+    )
+    reviews = workspace.read("reviews")
+    result = workspace.store.read_json(task["result_file"])
+    result["records"] = []
+    workspace.store.write_json(task["result_file"], result)
+    with pytest.raises(ValidationError, match="modified"):
+        workspace.put("reviews", reviews)
+
+
+def test_migration_archives_v04_review_and_requires_fresh_audit(tmp_path):
+    legacy = Workspace(tmp_path / "legacy")
+    legacy.init(
+        protocol(),
+        mode="report",
+        records=1,
+        fulltexts=1,
+        language="en",
+        evidence_version="2",
+    )
+    manifest = legacy.load()
+    manifest["tool_version"] = "0.4.0"
+    legacy.save(manifest)
+    legacy.store.write_json("native-review.json", {"legacy": True})
+
+    catalog = RunCatalog(tmp_path / "store")
+    migrated = catalog.migrate(legacy.path)
+    workspace = catalog.workspace(migrated["run_id"])
+    imported = workspace.load()
+    assert imported["migration"]["fresh_audit_required"]
+    assert not (workspace.path / "native-review.json").exists()
+    assert (workspace.path / "provenance/v0.4/native-review.json").is_file()
+
+
+def test_actor_roles_are_enforced(tmp_path):
+    engine, _ = selector_workspace(tmp_path)
+    route = engine.route_next(COORDINATOR)
+    with pytest.raises(ValidationError, match="selector role required"):
+        engine.role_next(
+            "select",
+            route["task_id"],
+            Actor("mdr-synthesizer", "wrong-session", "synthesizer"),
+        )
+
+
+def test_mdr_cli_creates_and_routes_an_opaque_run(tmp_path, capsys):
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(protocol()))
+    store = tmp_path / "store"
+    assert main(["--store", str(store), "run", "create", "--request", str(request)]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["run_id"].startswith("run-")
+    assert (
+        main(
+            [
+                "--store",
+                str(store),
+                "--actor",
+                "mdr-coordinator",
+                "run",
+                "next",
+                created["run_id"],
+            ]
+        )
+        == 0
+    )
+    routed = json.loads(capsys.readouterr().out)
+    assert routed["run_id"] == created["run_id"]
+    assert routed["profile"] == "mdr-searcher"

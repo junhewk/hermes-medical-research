@@ -1,4 +1,0 @@
-interface:
-  display_name: "Medical Deep Research"
-  short_description: "Create traceable medical evidence reports"
-  default_prompt: "Use $medical-deep-research to search, appraise, align, and synthesize evidence for my medical question."

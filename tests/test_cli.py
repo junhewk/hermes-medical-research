@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from hermes_medical_search.artifacts import (
+from hermes_medical_research.search.artifacts import (
     RunStore,
     confirmation_token,
     preflight_digest,
     strategy_digest,
 )
-from hermes_medical_search.cli import (
+from hermes_medical_research.search.cli import (
     _approve_command,
     _parse_limit,
     _parse_sources,
@@ -22,10 +22,10 @@ from hermes_medical_search.cli import (
     _years_ago,
     build_parser,
 )
-from hermes_medical_search.config import Credentials
-from hermes_medical_search.models import Question, ValidationError
-from hermes_medical_search.providers import Page
-from hermes_medical_search.query import compile_strategy
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.models import Question, ValidationError
+from hermes_medical_research.search.providers import Page
+from hermes_medical_research.search.query import compile_strategy
 
 
 def test_cli_exposes_all_commands() -> None:
@@ -165,7 +165,7 @@ async def test_all_confirmation_is_recorded_and_search_completes(
             )
 
     monkeypatch.setattr(
-        "hermes_medical_search.orchestrator.provider_for",
+        "hermes_medical_research.search.orchestrator.provider_for",
         lambda _source, _session, _credentials: OnePageProvider(),
     )
     token = confirmation_token(strategy, {"openalex": 42})

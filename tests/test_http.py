@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from hermes_medical_search.http import HttpSession, SourceError
+from hermes_medical_research.search.http import HttpSession, SourceError
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_medical_search.models import Question, Strategy, ValidationError
-from hermes_medical_search.query import compile_strategy
+from hermes_medical_research.search.models import Question, Strategy, ValidationError
+from hermes_medical_research.search.query import compile_strategy
 
 
 def pico_question() -> Question:

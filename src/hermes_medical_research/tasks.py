@@ -1,0 +1,1909 @@
+"""The deep Run/Task Module behind the small ``mdr`` command interface."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from filelock import FileLock
+
+from hermes_medical_research import __version__
+from hermes_medical_research.search.artifacts import (
+    ARTIFACT_SCHEMA_VERSION,
+    RunStore,
+    confirmation_token,
+    strategy_digest,
+)
+from hermes_medical_research.search.cli import _load_run, _validate_preflight
+from hermes_medical_research.search.config import Credentials
+from hermes_medical_research.search.http import HttpSession
+from hermes_medical_research.search.models import Question, ValidationError
+from hermes_medical_research.search.orchestrator import execute_search, preflight
+from hermes_medical_research.search.providers import MeshResolver
+from hermes_medical_research.search.query import compile_strategy
+
+from . import audit
+from .fulltext import fetch_fulltexts
+from .packets import _appraisal, _extraction, _finding, _source
+from .validation import METHODS
+from .workflow import current_digests, finalize, submit_batch
+from .workspace import Workspace, digest, now
+
+TASK_ENGINE_VERSION = "1"
+TASK_PACKET_VERSION = "1"
+TASK_PACKET_LIMIT = 32 * 1024
+SOURCE_PAGE_LIMIT = 16 * 1024
+SOURCE_IDS_PER_PAGE = 100
+RUN_ID_PREFIX = "run-"
+TASK_ID_PREFIX = "task-"
+
+ROLE_PROFILES = {
+    "coordinator": "mdr-coordinator",
+    "searcher": "mdr-searcher",
+    "selector": "mdr-selector",
+    "extractor": "mdr-extractor",
+    "synthesizer": "mdr-synthesizer",
+    "auditor": "mdr-auditor",
+}
+COMMAND_ROLES = {
+    "search": "searcher",
+    "select": "selector",
+    "extract": "extractor",
+    "synthesize": "synthesizer",
+    "audit": "auditor",
+}
+KIND_ROLES = {
+    "search": "searcher",
+    "screening": "selector",
+    "coverage": "selector",
+    "fulltext": "extractor",
+    "studies": "extractor",
+    "assessment": "extractor",
+    "synthesis": "synthesizer",
+    "audit": "auditor",
+}
+
+
+def data_home(environ: dict[str, str] | None = None) -> Path:
+    values = environ if environ is not None else os.environ
+    configured = values.get("MDR_HOME")
+    if configured:
+        root = Path(configured).expanduser()
+    else:
+        xdg = values.get("XDG_DATA_HOME")
+        root = (
+            Path(xdg).expanduser() / "hermes-medical-research"
+            if xdg
+            else (Path.home() / ".local" / "share" / "hermes-medical-research")
+        )
+    if not root.is_absolute():
+        raise ValidationError("MDR_HOME and XDG_DATA_HOME must resolve to absolute paths")
+    return root.resolve()
+
+
+def _safe_id(value: str, prefix: str) -> str:
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise ValidationError(f"identifier must start with {prefix}")
+    suffix = value[len(prefix) :]
+    if len(suffix) != 32 or any(char not in "0123456789abcdef" for char in suffix):
+        raise ValidationError(f"invalid {prefix.rstrip('-')} identifier")
+    return value
+
+
+def new_run_id() -> str:
+    return RUN_ID_PREFIX + uuid4().hex
+
+
+def new_task_id() -> str:
+    return TASK_ID_PREFIX + uuid4().hex
+
+
+@dataclass(frozen=True)
+class Actor:
+    profile: str
+    session_id: str
+    role: str
+
+    @classmethod
+    def resolve(cls, explicit: str | None = None, session_id: str | None = None) -> Actor:
+        profile = (
+            explicit
+            or os.environ.get("HERMES_SESSION_PROFILE")
+            or os.environ.get("HERMES_PROFILE")
+            or ""
+        ).strip()
+        if not profile:
+            raise ValidationError(
+                "actor identity is required; run inside Hermes or pass --actor explicitly"
+            )
+        normalized = profile.casefold().replace("_", "-")
+        role = next(
+            (
+                role_name
+                for role_name, role_profile in ROLE_PROFILES.items()
+                if normalized in {role_name, role_profile}
+            ),
+            "",
+        )
+        if not role:
+            raise ValidationError(f"unrecognized medical-research actor profile: {profile}")
+        session = (
+            session_id
+            or os.environ.get("HERMES_SESSION_ID")
+            or f"cli-{os.getpid()}-{uuid4().hex[:12]}"
+        ).strip()
+        if not session:
+            raise ValidationError("actor session identity must be nonempty")
+        return cls(profile=profile, session_id=session, role=role)
+
+    def require(self, role: str) -> None:
+        if self.role != role:
+            raise ValidationError(f"{role} role required; actor is {self.role}")
+
+
+class RunCatalog:
+    """Resolve opaque run IDs without exposing corpus paths to Bot messages."""
+
+    def __init__(self, root: Path | None = None):
+        self.root = (root or data_home()).resolve()
+        self.runs = self.root / "runs"
+
+    @property
+    def lock(self) -> FileLock:
+        return FileLock(str(self.root / ".catalog.lock"), timeout=10)
+
+    def workspace(self, run_id: str) -> Workspace:
+        value = _safe_id(run_id, RUN_ID_PREFIX)
+        path = (self.runs / value).resolve()
+        if path.parent != self.runs.resolve():
+            raise ValidationError("run path escapes the artifact store")
+        workspace = Workspace(path)
+        workspace.load()
+        manifest = workspace.load()
+        if manifest.get("run_id") != value:
+            raise ValidationError("run identifier does not match its immutable store location")
+        return workspace
+
+    def create(
+        self,
+        request: dict[str, Any],
+        *,
+        mode: str = "report",
+        records: int | str | None = None,
+        fulltexts: int | str | None = None,
+        language: str = "en",
+    ) -> dict[str, Any]:
+        self.runs.mkdir(parents=True, exist_ok=True)
+        with self.lock:
+            run_id = new_run_id()
+            workspace = Workspace(self.runs / run_id)
+            workspace.init(
+                request,
+                mode=mode,
+                records=records,
+                fulltexts=fulltexts,
+                language=language,
+                evidence_version="2",
+            )
+            manifest = workspace.load()
+            manifest.update(
+                run_id=run_id,
+                tool_version=__version__,
+                task_engine=_empty_ledger(),
+            )
+            workspace.save(manifest)
+        return {
+            "run_id": run_id,
+            "state": "created",
+            "protocol_digest": workspace.load()["protocol_digest"],
+        }
+
+    def migrate(self, legacy_path: Path) -> dict[str, Any]:
+        expanded = legacy_path.expanduser()
+        if expanded.is_symlink():
+            raise ValidationError("legacy run cannot be a symlink")
+        source = expanded.resolve()
+        if not source.is_dir():
+            raise ValidationError("legacy run must be an existing directory")
+        for path in [source, *source.rglob("*")]:
+            if path.is_symlink():
+                raise ValidationError(f"legacy run contains a symlink: {path.relative_to(source)}")
+        legacy = Workspace(source)
+        manifest = legacy.load()
+        if not str(manifest.get("tool_version", "")).startswith("0.4."):
+            raise ValidationError("migration accepts only v0.4 workspaces")
+        if manifest.get("evidence_version") != "2":
+            raise ValidationError("migration requires the v0.4 evidence schema")
+        for stage in manifest.get("datasets", {}):
+            legacy.read(stage, fresh=False)
+        source_digest = digest(manifest)
+        self.runs.mkdir(parents=True, exist_ok=True)
+        with self.lock:
+            run_id = new_run_id()
+            staging = self.runs / f".{run_id}.staging-{os.getpid()}"
+            destination = self.runs / run_id
+            if staging.exists() or destination.exists():
+                raise ValidationError("migration staging collision")
+            try:
+                shutil.copytree(source, staging)
+                migrated = Workspace(staging)
+                copied = migrated.load()
+                provenance = staging / "provenance" / "v0.4"
+                provenance.mkdir(parents=True, exist_ok=True)
+                archived: dict[str, Any] = {}
+                for name in ("native-review.json", "completion.json", "verification.json"):
+                    path = staging / name
+                    if path.is_file():
+                        value = json.loads(path.read_text(encoding="utf-8"))
+                        archived[name] = {
+                            "digest": digest(value),
+                            "file": f"provenance/v0.4/{name}",
+                        }
+                        os.replace(path, provenance / name)
+                old_review = copied.get("datasets", {}).pop("reviews", None)
+                if old_review:
+                    old_path = staging / old_review["file"]
+                    archived_path = provenance / "reviews.json"
+                    if old_path.is_file():
+                        os.replace(old_path, archived_path)
+                    archived["reviews"] = {
+                        **deepcopy(old_review),
+                        "file": "provenance/v0.4/reviews.json",
+                    }
+                native_directory = staging / "native-review"
+                if native_directory.is_dir():
+                    os.replace(native_directory, provenance / "native-review")
+                    archived["native-review-artifacts"] = {
+                        "file": "provenance/v0.4/native-review"
+                    }
+                copied.update(
+                    run_id=run_id,
+                    tool_version=__version__,
+                    evidence_version="2",
+                    task_engine=_empty_ledger(),
+                    migration={
+                        "schema_version": "1",
+                        "legacy_path": str(source),
+                        "legacy_manifest_digest": source_digest,
+                        "imported_at": now(),
+                        "archived": archived,
+                        "fresh_audit_required": True,
+                    },
+                )
+                migrated.save(copied)
+                for stage in copied.get("datasets", {}):
+                    migrated.read(stage, fresh=False)
+                os.replace(staging, destination)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+        return {
+            "run_id": run_id,
+            "state": "migrated",
+            "legacy_manifest_digest": source_digest,
+            "fresh_audit_required": True,
+        }
+
+
+def _empty_ledger() -> dict[str, Any]:
+    return {
+        "schema_version": TASK_ENGINE_VERSION,
+        "state": "created",
+        "tasks": {},
+        "order": [],
+        "authors": {},
+        "revision": None,
+        "events": [],
+    }
+
+
+class TaskEngine:
+    """Own task routing, packets, submissions, receipts, and legal transitions."""
+
+    def __init__(self, workspace: Workspace):
+        self.workspace = workspace
+
+    @property
+    def run_id(self) -> str:
+        value = self.workspace.load().get("run_id")
+        return _safe_id(value, RUN_ID_PREFIX)
+
+    def _ledger(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        ledger = manifest.get("task_engine")
+        if not isinstance(ledger, dict) or ledger.get("schema_version") != TASK_ENGINE_VERSION:
+            raise ValidationError("run has no supported task ledger; migrate it first")
+        return ledger
+
+    def status(self) -> dict[str, Any]:
+        manifest = self.workspace.load()
+        ledger = self._ledger(manifest)
+        self._validate_accepted_results(ledger)
+        state = self._derive_state(manifest, ledger)
+        tasks = [ledger["tasks"][task_id] for task_id in ledger["order"]]
+        return {
+            "run_id": self.run_id,
+            "state": state,
+            "protocol_digest": manifest["protocol_digest"],
+            "workspace": self.workspace.status(),
+            "tasks": {
+                value: sum(task["state"] == value for task in tasks)
+                for value in ("pending", "in_progress", "accepted", "superseded", "blocked")
+            },
+            "active": [
+                _route_view(self.run_id, task)
+                for task in tasks
+                if task["state"] in {"pending", "in_progress"}
+            ],
+            "revision": ledger.get("revision"),
+        }
+
+    def route_next(self, actor: Actor) -> dict[str, Any]:
+        actor.require("coordinator")
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            self._validate_accepted_results(ledger)
+            self._supersede_stale(manifest, ledger)
+            active = next(
+                (
+                    ledger["tasks"][task_id]
+                    for task_id in ledger["order"]
+                    if ledger["tasks"][task_id]["state"] in {"pending", "in_progress"}
+                ),
+                None,
+            )
+            if active:
+                self.workspace.save(manifest)
+                return _route_view(self.run_id, active)
+            if any(task["state"] == "blocked" for task in ledger["tasks"].values()):
+                ledger["state"] = "blocked"
+                self.workspace.save(manifest)
+                return {"run_id": self.run_id, "task_id": None, "state": "blocked"}
+            if self._materialize_empty_stages(manifest):
+                manifest = self.workspace.load()
+                ledger = self._ledger(manifest)
+            spec = self._next_spec(manifest, ledger)
+            if spec is None:
+                manifest = self.workspace.load()
+                ledger = self._ledger(manifest)
+                state = self._derive_state(manifest, ledger)
+                ledger["state"] = state
+                self.workspace.save(manifest)
+                return {"run_id": self.run_id, "task_id": None, "state": state}
+            task = self._create_task(manifest, ledger, spec)
+            self.workspace.save(manifest)
+            return _route_view(self.run_id, task)
+
+    def role_next(
+        self,
+        command: str,
+        task_id: str,
+        actor: Actor,
+        *,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        expected_role = COMMAND_ROLES[command]
+        actor.require(expected_role)
+        _safe_id(task_id, TASK_ID_PREFIX)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            self._validate_accepted_results(ledger)
+            task = ledger["tasks"].get(task_id)
+            if not task or task.get("role") != expected_role:
+                raise ValidationError("task does not belong to this specialist role")
+            self._require_claim(manifest, task, actor, claim_token)
+            if task["state"] == "accepted":
+                return self._receipt_view(task)
+            if task["state"] not in {"pending", "in_progress"}:
+                raise ValidationError(f"task is {task['state']}; request a current task")
+            if task["base_digests"] != current_digests(self.workspace):
+                task["state"] = "superseded"
+                task["superseded_at"] = now()
+                self.workspace.save(manifest)
+                raise ValidationError("task inputs are stale; ask Coordinator for the next task")
+            pending = task["state"] == "pending"
+            self._validate_task_file(task, "proposal_file", "proposal.json")
+            self._validate_packet(task)
+            proposal = self.workspace.store.read_json(task["proposal_file"])
+            if pending and digest(proposal) != task["proposal_digest"]:
+                raise ValidationError("task proposal template was modified before it was opened")
+            if not pending and task.get("actor_profile") != actor.profile:
+                raise ValidationError("task is active under a different profile")
+            task["state"] = "in_progress"
+            task["actor_profile"] = actor.profile
+            task.setdefault("attempts", []).append(
+                {"profile": actor.profile, "session_id": actor.session_id, "started_at": now()}
+            )
+            ledger["state"] = _state_for_role(task["role"])
+            self.workspace.save(manifest)
+            return {
+                "run_id": self.run_id,
+                "task_id": task_id,
+                "role": task["role"],
+                "kind": task["kind"],
+                "packet_path": str(self.workspace.path / task["packet_file"]),
+                "proposal_path": str(self.workspace.path / task["proposal_file"]),
+                "submit": f"mdr --actor {ROLE_PROFILES[task['role']]} {command} submit "
+                f"{self.run_id} {task_id} --from "
+                f"{self.workspace.path / task['proposal_file']}",
+            }
+
+    async def submit(
+        self,
+        command: str,
+        task_id: str,
+        proposal_path: Path,
+        actor: Actor,
+        *,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        expected_role = COMMAND_ROLES[command]
+        actor.require(expected_role)
+        _safe_id(task_id, TASK_ID_PREFIX)
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+        proposal_digest = digest(proposal)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            self._validate_accepted_results(ledger)
+            task = ledger["tasks"].get(task_id)
+            self._require_submitter(manifest, task, expected_role, actor, claim_token)
+            replay = self._replay(task, proposal_digest)
+            if replay is not None:
+                return replay
+            self._validate_packet(task)
+            if task["base_digests"] != current_digests(self.workspace):
+                task["state"] = "superseded"
+                self.workspace.save(manifest)
+                raise ValidationError("task inputs changed; stale submission rejected")
+            if task["kind"] == "search":
+                return self._submit_search_plan(manifest, ledger, task, proposal, proposal_digest)
+
+        if task["kind"] == "fulltext":
+            result = await self._submit_fulltext(task, proposal)
+            with self.workspace.lock:
+                manifest = self.workspace.load()
+                current_task = self._ledger(manifest)["tasks"][task_id]
+                self._require_submitter(
+                    manifest, current_task, expected_role, actor, claim_token
+                )
+                self._validate_packet(current_task)
+                return self._accept(task_id, actor, proposal_digest, result)
+
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            task = ledger["tasks"][task_id]
+            self._require_submitter(manifest, task, expected_role, actor, claim_token)
+            if task["base_digests"] != current_digests(self.workspace):
+                task["state"] = "superseded"
+                self.workspace.save(manifest)
+                raise ValidationError("task inputs changed; stale submission rejected")
+            if task["kind"] == "synthesis":
+                result = self._submit_synthesis(task, proposal)
+                if not result.get("accepted"):
+                    return result
+            elif task["kind"] == "audit":
+                result = audit.validate_task_result(
+                    self.workspace, self._audit_task(task), proposal
+                )
+                for row in [*result["records"], *result["report_reviews"]]:
+                    row["audit_task_id"] = task_id
+            else:
+                self._validate_batch_scope(task, proposal)
+                result = submit_batch(self.workspace, proposal)
+                if not result["accepted"]:
+                    return result
+            return self._accept(task_id, actor, proposal_digest, result)
+
+    def source_show(
+        self,
+        task_id: str,
+        source_id: str,
+        page: int,
+        actor: Actor,
+        *,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        if page < 1:
+            raise ValidationError("source page must be positive")
+        _safe_id(task_id, TASK_ID_PREFIX)
+        manifest = self.workspace.load()
+        ledger = self._ledger(manifest)
+        task = ledger["tasks"].get(task_id)
+        if not task or task.get("role") != actor.role or task.get("state") != "in_progress":
+            raise ValidationError("source access requires the actor's active task")
+        self._require_claim(manifest, task, actor, claim_token)
+        self._validate_packet(task)
+        if task["base_digests"] != current_digests(self.workspace):
+            raise ValidationError("task inputs changed; stale source access rejected")
+        allowed = set(task.get("allowed_source_ids", []))
+        if digest(sorted(allowed)) != task.get("allowed_sources_digest"):
+            raise ValidationError("task source scope was modified")
+        if source_id not in allowed:
+            raise ValidationError("source is outside this task's bounded corpus view")
+        value = self._source_value(source_id)
+        rendered = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+        chunks = _utf8_pages(rendered, SOURCE_PAGE_LIMIT)
+        if page > len(chunks):
+            raise ValidationError(f"source has {len(chunks)} page(s)")
+        return {
+            "run_id": self.run_id,
+            "task_id": task_id,
+            "source_id": source_id,
+            "page": page,
+            "pages": len(chunks),
+            "source_digest": digest(value),
+            "content": chunks[page - 1],
+        }
+
+    def source_list(
+        self,
+        task_id: str,
+        page: int,
+        actor: Actor,
+        *,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        if page < 1:
+            raise ValidationError("source page must be positive")
+        _safe_id(task_id, TASK_ID_PREFIX)
+        manifest = self.workspace.load()
+        task = self._ledger(manifest)["tasks"].get(task_id)
+        if not task or task.get("role") != actor.role or task.get("state") != "in_progress":
+            raise ValidationError("source access requires the actor's active task")
+        self._require_claim(manifest, task, actor, claim_token)
+        self._validate_packet(task)
+        if task["base_digests"] != current_digests(self.workspace):
+            raise ValidationError("task inputs changed; stale source access rejected")
+        allowed = sorted(task.get("allowed_source_ids", []))
+        if digest(allowed) != task.get("allowed_sources_digest"):
+            raise ValidationError("task source scope was modified")
+        pages = max(1, (len(allowed) + SOURCE_IDS_PER_PAGE - 1) // SOURCE_IDS_PER_PAGE)
+        if page > pages:
+            raise ValidationError(f"source list has {pages} page(s)")
+        start = (page - 1) * SOURCE_IDS_PER_PAGE
+        return {
+            "run_id": self.run_id,
+            "task_id": task_id,
+            "page": page,
+            "pages": pages,
+            "source_ids": allowed[start : start + SOURCE_IDS_PER_PAGE],
+        }
+
+    async def run_search(
+        self,
+        task_id: str,
+        actor: Actor,
+        *,
+        confirm_all: str | None = None,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        actor.require("searcher")
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            task = ledger["tasks"].get(task_id)
+            self._require_submitter(manifest, task, "searcher", actor, claim_token)
+            if not task.get("search_plan"):
+                raise ValidationError("submit the bounded search plan before running retrieval")
+            child = task.get("search_path")
+            plan = deepcopy(task["search_plan"])
+            plan_submission_digest = task["submission_digest"]
+        credentials = Credentials.from_env()
+        if not child:
+            question = Question.from_dict(self.workspace.load()["protocol"]["question"])
+            async with HttpSession() as session:
+                if plan.get("mesh", True):
+                    warnings = await MeshResolver(session, credentials).resolve_question(question)
+                else:
+                    warnings = ["MeSH resolution was explicitly skipped by the accepted task plan."]
+            strategy = compile_strategy(
+                question,
+                mode=plan["mode"],
+                limit_per_source=plan["limit_per_source"],
+                sources=plan["sources"],
+                variants=plan["variants"],
+            )
+            strategy.warnings.extend(warnings)
+            child_path = self.workspace.path / "searches" / task_id
+            with self.workspace.lock:
+                manifest = self.workspace.load()
+                ledger = self._ledger(manifest)
+                task = ledger["tasks"][task_id]
+                if not task.get("search_path"):
+                    self.workspace.reserve(child_path, strategy)
+                    store = RunStore(child_path)
+                    child_manifest = store.initialize(question, strategy, credentials)
+                    child_manifest["research_parent"] = os.path.relpath(
+                        self.workspace.path, child_path
+                    )
+                    store.write_manifest(child_manifest)
+                    task["search_path"] = str(child_path)
+                    task["strategy_digest"] = strategy_digest(strategy)
+                    self.workspace.save(manifest)
+                child = task["search_path"]
+        store = RunStore(Path(child))
+        strategy, child_manifest = _load_run(store)
+        if strategy.mode == "review" and not store.read_json("approval.json", default=None):
+            return {
+                "run_id": self.run_id,
+                "task_id": task_id,
+                "state": "awaiting_strategy_approval",
+                "strategy_digest": strategy_digest(strategy),
+                "strategy": strategy.to_dict(),
+            }
+        async with HttpSession() as session:
+            inspected = store.read_json("preflight.json", default=None)
+            if inspected is None:
+                inspected = await preflight(strategy, session, credentials)
+                store.write_json("preflight.json", inspected)
+                child_manifest["status"] = (
+                    "preflight_ready" if inspected["ready"] else "preflight_failed"
+                )
+                store.write_manifest(child_manifest)
+            _validate_preflight(strategy, inspected)
+            if strategy.mode == "review" and not inspected["ready"]:
+                raise ValidationError("review-prep preflight failed; revise source configuration")
+            if strategy.limit_per_source == "all":
+                counts = {
+                    source: int(item["count"])
+                    for source, item in inspected["sources"].items()
+                    if item["status"] == "available"
+                }
+                expected = confirmation_token(strategy, counts)
+                if confirm_all != expected:
+                    return {
+                        "run_id": self.run_id,
+                        "task_id": task_id,
+                        "state": "awaiting_all_results_confirmation",
+                        "confirmation_token": expected,
+                        "expected_total": sum(counts.values()),
+                    }
+                approval = store.read_json("approval.json")
+                approval["all_results"] = {
+                    "strategy_digest": strategy_digest(strategy),
+                    "preflight_digest": inspected["preflight_digest"],
+                    "expected_total": sum(counts.values()),
+                    "confirmed_at": now(),
+                }
+                store.write_json("approval.json", approval)
+            summary = await execute_search(strategy, store, session, credentials, inspected)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            task = self._ledger(manifest)["tasks"][task_id]
+            self._require_submitter(manifest, task, "searcher", actor, claim_token)
+            self._validate_packet(task)
+            if task["base_digests"] != current_digests(self.workspace):
+                task["state"] = "superseded"
+                self.workspace.save(manifest)
+                raise ValidationError("task inputs changed; stale search result rejected")
+            self.workspace.attach(store.path)
+            result = {"summary": summary, "strategy_digest": strategy_digest(strategy)}
+            return self._accept(task_id, actor, plan_submission_digest, result)
+
+    def approve_search(
+        self,
+        task_id: str,
+        supplied_digest: str,
+        actor: Actor,
+        *,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        actor.require("searcher")
+        manifest = self.workspace.load()
+        task = self._ledger(manifest)["tasks"].get(task_id)
+        self._require_submitter(manifest, task, "searcher", actor, claim_token)
+        child = task.get("search_path")
+        if not child:
+            raise ValidationError("run search once to materialize its review strategy")
+        store = RunStore(Path(child))
+        strategy, child_manifest = _load_run(store)
+        current = strategy_digest(strategy)
+        if strategy.mode != "review" or supplied_digest != current:
+            raise ValidationError("strategy approval digest does not match a review strategy")
+        approval = store.read_json("approval.json", default=None)
+        if approval is None:
+            approval = {
+                "schema_version": ARTIFACT_SCHEMA_VERSION,
+                "strategy": {
+                    "strategy_digest": current,
+                    "approved_at": now(),
+                    "selected_variants": {
+                        source: item.selected_variant
+                        for source, item in strategy.strategies.items()
+                    },
+                },
+                "all_results": None,
+            }
+            store.write_json("approval.json", approval)
+            child_manifest["status"] = "strategy_approved"
+            store.write_manifest(child_manifest)
+        return {"run_id": self.run_id, "task_id": task_id, "approval": approval}
+
+    async def finalize(self, actor: Actor, *, offline: bool = False) -> dict[str, Any]:
+        actor.require("coordinator")
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            if self._derive_state(manifest, self._ledger(manifest)) != "ready":
+                raise ValidationError("run is not ready for finalization")
+        result = await finalize(self.workspace, offline=offline)
+        with self.workspace.lock:
+            if result.get("completed"):
+                manifest = self.workspace.load()
+                ledger = self._ledger(manifest)
+                ledger["state"] = "finalized"
+                self.workspace.save(manifest)
+            return result
+
+    def _next_spec(self, manifest: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any] | None:
+        revision = ledger.get("revision")
+        if revision:
+            return self._correction_spec(revision)
+        datasets = manifest["datasets"]
+        records = self.workspace.index("records") if "records" in datasets else {}
+        if "records" not in datasets:
+            return self._search_spec(manifest)
+        screening = (
+            {row["record_id"]: row for row in self.workspace.rows("screening", fresh=False)}
+            if "screening" in datasets
+            else {}
+        )
+        unscreened = [record_id for record_id in records if record_id not in screening]
+        if self.workspace.stale("screening", manifest):
+            unscreened = list(records)
+        if unscreened:
+            return self._screening_spec(unscreened[0])
+        included = [
+            record_id for record_id, row in screening.items() if row["decision"] == "include"
+        ]
+        coverage = (
+            {row["record_id"]: row for row in self.workspace.rows("coverage", fresh=False)}
+            if "coverage" in datasets
+            else {}
+        )
+        uncovered = [record_id for record_id in included if record_id not in coverage]
+        if self.workspace.stale("coverage", manifest):
+            uncovered = included
+        if uncovered:
+            return self._coverage_spec(uncovered[0])
+        selected = [
+            record_id for record_id, row in coverage.items() if row["selection"] == "selected"
+        ]
+        attempts = manifest["fulltext_attempts"]
+        limit = manifest["protocol"]["fulltexts"]
+        capacity = limit == "all" or len(attempts) < int(limit)
+        already_extracted = {
+            row["record_id"]
+            for row in self.workspace.rows("extractions", fresh=False)
+            if "extractions" in datasets
+        }
+        no_text = [
+            record_id
+            for record_id in selected
+            if record_id not in attempts and record_id not in already_extracted
+        ]
+        if no_text and capacity:
+            return self._fulltext_spec(no_text[0])
+        studies = self.workspace.rows("studies", fresh=False) if "studies" in datasets else []
+        by_record = {record_id: row for row in studies for record_id in row["record_ids"]}
+        unlinked = [record_id for record_id in selected if record_id not in by_record]
+        if self.workspace.stale("studies", manifest):
+            unlinked = selected
+        if unlinked:
+            return self._studies_spec(unlinked[0])
+        extractions = (
+            self.workspace.rows("extractions", fresh=False) if "extractions" in datasets else []
+        )
+        appraisals = (
+            self.workspace.index("appraisals")
+            if "appraisals" in datasets and not self.workspace.stale("appraisals", manifest)
+            else {}
+        )
+        unfinished = [
+            record_id
+            for record_id in selected
+            if not any(row["record_id"] == record_id for row in extractions)
+            or any(
+                row["extraction_id"] not in appraisals
+                or appraisals[row["extraction_id"]].get("completion") == "pending"
+                for row in extractions
+                if row["record_id"] == record_id
+            )
+        ]
+        if any(
+            self.workspace.stale(stage, manifest)
+            for stage in ("extractions", "appraisals")
+            if stage in datasets
+        ):
+            unfinished = selected
+        if unfinished:
+            return self._assessment_spec(unfinished[0], by_record[unfinished[0]])
+        synthesis = (
+            self.workspace.read("synthesis", fresh=False)
+            if "synthesis" in datasets
+            else {"findings": []}
+        )
+        covered = (
+            set()
+            if self.workspace.stale("synthesis", manifest)
+            else {
+                outcome
+                for finding in synthesis.get("findings", [])
+                for outcome in finding.get("protocol_outcomes", [])
+            }
+        )
+        missing_outcomes = [
+            outcome for outcome in manifest["protocol"]["outcomes"] if outcome not in covered
+        ]
+        if missing_outcomes:
+            return self._synthesis_spec(missing_outcomes[0])
+        if "reviews" in datasets and not self.workspace.stale("reviews", manifest):
+            reviews = self.workspace.read("reviews")
+            if all(
+                row.get("status") == "pass"
+                for row in [*reviews["records"], *reviews["report_reviews"]]
+            ):
+                return None
+        return self._audit_spec(manifest, ledger)
+
+    def _search_spec(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        protocol = manifest["protocol"]
+        limit = protocol["records_per_source"]
+        allocated = limit if limit == "all" else max(1, int(limit * 0.7))
+        mode = "review" if protocol["mode"] == "review-prep" else "quick"
+        default_proposal = {
+            "schema_version": TASK_PACKET_VERSION,
+            "base_digests": current_digests(self.workspace),
+            "mode": mode,
+            "limit_per_source": allocated,
+            "sources": protocol["question"]["sources"],
+            "variants": {},
+            "mesh": True,
+        }
+        frozen = (manifest.get("automation") or {}).get("frozen_search_plan")
+        if frozen:
+            proposal = {
+                "schema_version": TASK_PACKET_VERSION,
+                "base_digests": current_digests(self.workspace),
+                **deepcopy(frozen),
+            }
+            instructions = (
+                "Replay the Review's accepted search plan exactly, then run refresh retrieval."
+            )
+        else:
+            proposal = default_proposal
+            instructions = (
+                "Validate the structured question and bounded source plan, then run retrieval."
+            )
+        return {
+            "kind": "search",
+            "target_ids": ["initial-search"],
+            "instructions": instructions,
+            "proposal": proposal,
+            "packet_data": {
+                "question": protocol["question"],
+                "search_rationale": protocol["search_rationale"],
+                "remaining_source_budget": limit,
+            },
+            "allowed_source_ids": [],
+        }
+
+    def _screening_spec(self, record_id: str) -> dict[str, Any]:
+        proposal = {
+            "schema_version": "2",
+            "base_digests": current_digests(self.workspace),
+            "stages": {
+                "screening": {
+                    "schema_version": "2",
+                    "records": [
+                        {
+                            "record_id": record_id,
+                            "decision": "",
+                            "basis": "title-abstract",
+                            "reason": "",
+                        }
+                    ],
+                }
+            },
+        }
+        source = _source(self.workspace, record_id)
+        return {
+            "kind": "screening",
+            "target_ids": [record_id],
+            "instructions": "Screen this record against every eligibility criterion.",
+            "proposal": proposal,
+            "packet_data": {
+                "eligibility": self.workspace.load()["protocol"]["eligibility"],
+                "source": source,
+            },
+            "allowed_source_ids": [row["document_id"] for row in source["documents"]],
+        }
+
+    def _coverage_spec(self, record_id: str) -> dict[str, Any]:
+        proposal = {
+            "schema_version": "2",
+            "base_digests": current_digests(self.workspace),
+            "stages": {
+                "coverage": {
+                    "schema_version": "2",
+                    "records": [
+                        {
+                            "record_id": record_id,
+                            "selection": "",
+                            "reason": "",
+                            "protocol_outcomes": [],
+                        }
+                    ],
+                }
+            },
+        }
+        source = _source(self.workspace, record_id)
+        return {
+            "kind": "coverage",
+            "target_ids": [record_id],
+            "instructions": (
+                "Choose and justify detailed assessment coverage without changing eligibility."
+            ),
+            "proposal": proposal,
+            "packet_data": {
+                "outcomes": self.workspace.load()["protocol"]["outcomes"],
+                "source": source,
+            },
+            "allowed_source_ids": [row["document_id"] for row in source["documents"]],
+        }
+
+    def _fulltext_spec(self, record_id: str) -> dict[str, Any]:
+        source = _source(self.workspace, record_id)
+        return {
+            "kind": "fulltext",
+            "target_ids": [record_id],
+            "instructions": "Acquire the selected full text or record a genuine access failure.",
+            "proposal": {
+                "schema_version": TASK_PACKET_VERSION,
+                "base_digests": current_digests(self.workspace),
+                "record_id": record_id,
+                "action": "acquire",
+                "pdf": None,
+                "retry": False,
+            },
+            "packet_data": {"source": source},
+            "allowed_source_ids": [row["document_id"] for row in source["documents"]],
+        }
+
+    def _studies_spec(
+        self, record_id: str, study_id: str | None = None
+    ) -> dict[str, Any]:
+        source = _source(self.workspace, record_id)
+        existing = self.workspace.rows("studies", fresh=False)
+        current = next(
+            (row for row in existing if row["study_id"] == study_id),
+            None,
+        )
+        proposal = {
+            "schema_version": "2",
+            "base_digests": current_digests(self.workspace),
+            "stages": {
+                "studies": {
+                    "schema_version": "2",
+                    "records": [
+                        deepcopy(current)
+                        if current
+                        else {
+                            "study_id": "study-" + record_id,
+                            "record_ids": [record_id],
+                            "kind": "",
+                            "basis": "",
+                        }
+                    ],
+                }
+            },
+        }
+        existing_record_ids = {
+            linked_id for row in existing for linked_id in row["record_ids"]
+        }
+        return {
+            "kind": "studies",
+            "target_ids": [record_id],
+            "instructions": "Link reports of the same study using explicit identity evidence.",
+            "proposal": proposal,
+            "packet_data": {
+                "source": source,
+                "existing_study_ids": [row["study_id"] for row in existing],
+            },
+            "allowed_source_ids": [
+                *[row["document_id"] for row in source["documents"]],
+                *[f"study:{row['study_id']}" for row in existing],
+                *[f"{linked_id}:metadata" for linked_id in existing_record_ids],
+            ],
+        }
+
+    def _assessment_spec(self, record_id: str, study: dict[str, Any]) -> dict[str, Any]:
+        existing = [
+            deepcopy(row)
+            for row in self.workspace.rows("extractions", fresh=False)
+            if row["record_id"] == record_id
+        ]
+        if not existing:
+            existing = [
+                _extraction(self.workspace, record_id, study["study_id"], "result-" + record_id)
+            ]
+        appraisals = {
+            row["extraction_id"]: row
+            for row in self.workspace.rows("appraisals", fresh=False)
+        }
+        method = (
+            "robis"
+            if study["kind"] == "systematic-review"
+            else "rob2"
+            if study["kind"] == "primary"
+            else "descriptive"
+        )
+        proposed_appraisals = [
+            deepcopy(appraisals[row["extraction_id"]])
+            if row["extraction_id"] in appraisals
+            else _appraisal(row["extraction_id"], method)
+            for row in existing
+        ]
+        source = _source(self.workspace, record_id)
+        source_ids = [row["document_id"] for row in source["documents"]]
+        return {
+            "kind": "assessment",
+            "target_ids": [record_id],
+            "instructions": (
+                "Extract each needed estimand and complete its design-appropriate appraisal."
+            ),
+            "proposal": {
+                "schema_version": "2",
+                "base_digests": current_digests(self.workspace),
+                "stages": {
+                    "extractions": {"schema_version": "2", "records": existing},
+                    "appraisals": {"schema_version": "2", "records": proposed_appraisals},
+                },
+            },
+            "packet_data": {
+                "source": source,
+                "study": study,
+                "methods": {
+                    name: {"version": version, "domains": domains.split()}
+                    for name, (version, domains) in METHODS.items()
+                },
+            },
+            "allowed_source_ids": source_ids,
+        }
+
+    def _synthesis_spec(self, outcome: str) -> dict[str, Any]:
+        protocol = self.workspace.load()["protocol"]
+        index = protocol["outcomes"].index(outcome) + 1
+        related = [
+            row for row in self.workspace.rows("extractions") if row.get("outcome") == outcome
+        ]
+        logical = [f"extraction:{row['extraction_id']}" for row in related]
+        logical.extend(f"appraisal:{row['extraction_id']}" for row in related)
+        documents = [row["source_location"]["document_id"] for row in related]
+        return {
+            "kind": "synthesis",
+            "target_ids": [outcome],
+            "instructions": (
+                "Synthesize one protocol outcome with explicit scope, weighting, "
+                "uncertainty, and gaps."
+            ),
+            "proposal": {
+                "schema_version": TASK_PACKET_VERSION,
+                "base_digests": current_digests(self.workspace),
+                "title": "",
+                "limitations": [],
+                "finding": _finding(outcome, index),
+            },
+            "packet_data": {
+                "outcome": outcome,
+                "extractions": [
+                    {
+                        key: row.get(key)
+                        for key in (
+                            "extraction_id",
+                            "record_id",
+                            "population",
+                            "comparison",
+                            "outcome",
+                            "timepoint",
+                            "effect",
+                            "result",
+                            "source_location",
+                        )
+                    }
+                    for row in related
+                ],
+            },
+            "allowed_source_ids": list(dict.fromkeys([*logical, *documents])),
+        }
+
+    def _audit_spec(
+        self, manifest: dict[str, Any], ledger: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        candidate_digest, groups = audit.audit_groups(self.workspace)
+        accepted = {
+            task.get("group_id"): task
+            for task in ledger["tasks"].values()
+            if task.get("kind") == "audit"
+            and task.get("state") == "accepted"
+            and task.get("candidate_digest") == candidate_digest
+        }
+        for group in groups:
+            if group["group_id"] not in accepted:
+                return {
+                    "kind": "audit",
+                    "target_ids": [row["target_id"] for row in group["targets"]],
+                    "instructions": (
+                        "Independently assess every frozen assertion and cite exact "
+                        "source locations."
+                    ),
+                    "proposal": group["proposal"],
+                    "packet_data": {
+                        "candidate_digest": candidate_digest,
+                        "audit_contract_version": audit.AUDIT_CONTRACT_VERSION,
+                        "audit_group": {
+                            key: value
+                            for key, value in group.items()
+                            if key not in {"proposal", "allowed_document_ids"}
+                        },
+                        "citation_contract": audit.citation_contract(self.workspace),
+                    },
+                    "allowed_source_ids": group["allowed_document_ids"],
+                    "candidate_digest": candidate_digest,
+                    "group_id": group["group_id"],
+                }
+        rows: list[dict[str, Any]] = []
+        report_rows: list[dict[str, Any]] = []
+        revise_tasks: list[dict[str, Any]] = []
+        for group in groups:
+            task = accepted[group["group_id"]]
+            result = self.workspace.store.read_json(task["result_file"])
+            rows.extend(result["records"])
+            report_rows.extend(result["report_reviews"])
+            if any(
+                row.get("status") == "revise"
+                for row in [*result["records"], *result["report_reviews"]]
+            ):
+                revise_tasks.append(task)
+        if revise_tasks:
+            first = revise_tasks[0]
+            ledger["revision"] = {
+                "audit_task_ids": [task["task_id"] for task in revise_tasks],
+                "group_id": first["group_id"],
+                "candidate_digest": candidate_digest,
+                "created_at": now(),
+            }
+            ledger["state"] = "revision_required"
+            self.workspace.save(manifest)
+            return self._correction_spec(ledger["revision"])
+        self.workspace.put(
+            "reviews",
+            {
+                "schema_version": "2",
+                "records": rows,
+                "report_reviews": report_rows,
+                "audit_contract_version": audit.AUDIT_CONTRACT_VERSION,
+            },
+        )
+        return None
+
+    def _correction_spec(self, revision: dict[str, Any]) -> dict[str, Any]:
+        group_id = revision["group_id"]
+        if group_id.startswith("finding:"):
+            finding_id = group_id.split(":", 1)[1]
+            finding = next(
+                row
+                for row in self.workspace.read("synthesis")["findings"]
+                if row["finding_id"] == finding_id
+            )
+            spec = self._synthesis_spec(finding["protocol_outcomes"][0])
+        else:
+            task_id = revision["audit_task_ids"][0]
+            task = self._ledger(self.workspace.load())["tasks"][task_id]
+            group = self._audit_task(task)["audit_group"]
+            target = group["targets"][0]
+            kind = target["kind"]
+            if kind == "screening":
+                spec = self._screening_spec(target["entity_id"])
+            elif kind == "coverage":
+                spec = self._coverage_spec(target["entity_id"])
+            elif kind == "studies":
+                record_id = next(
+                    row["record_ids"][0]
+                    for row in self.workspace.rows("studies")
+                    if row["study_id"] == target["entity_id"]
+                )
+                spec = self._studies_spec(record_id, target["entity_id"])
+            elif kind in {"extractions", "appraisals"}:
+                extraction = self.workspace.index("extractions")[target["entity_id"]]
+                study = self.workspace.index("studies")[extraction["study_id"]]
+                spec = self._assessment_spec(extraction["record_id"], study)
+            else:
+                outcome = self.workspace.load()["protocol"]["outcomes"][0]
+                spec = self._synthesis_spec(outcome)
+        spec["correction_for"] = revision["audit_task_ids"]
+        return spec
+
+    def _create_task(
+        self, manifest: dict[str, Any], ledger: dict[str, Any], spec: dict[str, Any]
+    ) -> dict[str, Any]:
+        task_id = new_task_id()
+        role = KIND_ROLES[spec["kind"]]
+        allowed_sources = sorted(set(spec["allowed_source_ids"]))
+        relative = f"tasks/{task_id}"
+        proposal_file = f"{relative}/proposal.json"
+        packet_file = f"{relative}/packet.json"
+        proposal = deepcopy(spec["proposal"])
+        packet = {
+            "schema_version": TASK_PACKET_VERSION,
+            "run_id": self.run_id,
+            "task_id": task_id,
+            "role": role,
+            "kind": spec["kind"],
+            "target_ids": spec["target_ids"],
+            "instructions": spec["instructions"],
+            "base_digests": current_digests(self.workspace),
+            "proposal_path": str(self.workspace.path / proposal_file),
+            "source_count": len(allowed_sources),
+            "source_list": (
+                f"mdr --actor {ROLE_PROFILES[role]} source list {self.run_id} {task_id}"
+            ),
+            **spec["packet_data"],
+        }
+        raw = json.dumps(packet, ensure_ascii=False, sort_keys=True).encode()
+        if len(raw) > TASK_PACKET_LIMIT:
+            raise ValidationError(
+                f"bounded task packet exceeds {TASK_PACKET_LIMIT} bytes; split its target group"
+            )
+        self.workspace.store.write_json(proposal_file, proposal)
+        self.workspace.store.write_json(packet_file, packet)
+        task = {
+            "task_id": task_id,
+            "role": role,
+            "kind": spec["kind"],
+            "target_ids": spec["target_ids"],
+            "state": "pending",
+            "base_digests": current_digests(self.workspace),
+            "packet_file": packet_file,
+            "packet_digest": digest(packet),
+            "proposal_file": proposal_file,
+            "proposal_digest": digest(proposal),
+            "allowed_source_ids": allowed_sources,
+            "allowed_sources_digest": digest(allowed_sources),
+            "created_at": now(),
+            "attempts": [],
+        }
+        for key in ("candidate_digest", "group_id", "correction_for"):
+            if key in spec:
+                task[key] = spec[key]
+        ledger["tasks"][task_id] = task
+        ledger["order"].append(task_id)
+        ledger["state"] = _state_for_role(role)
+        ledger["events"].append(
+            {"event": "task.created", "task_id": task_id, "role": role, "at": now()}
+        )
+        return task
+
+    def _validate_batch_scope(self, task: dict[str, Any], proposal: Any) -> None:
+        if not isinstance(proposal, dict) or proposal.get("base_digests") != task["base_digests"]:
+            raise ValidationError("proposal base_digests differ from the task")
+        stages = proposal.get("stages")
+        if not isinstance(stages, dict):
+            raise ValidationError("proposal stages must be an object")
+        target = set(task["target_ids"])
+        if task["kind"] in {"screening", "coverage"}:
+            stage = task["kind"]
+            rows = (stages.get(stage) or {}).get("records")
+            if (
+                not isinstance(rows, list)
+                or not all(isinstance(row, dict) for row in rows)
+                or {row.get("record_id") for row in rows} != target
+            ):
+                raise ValidationError("proposal must contain exactly the assigned record")
+        elif task["kind"] == "studies":
+            rows = (stages.get("studies") or {}).get("records")
+            if (
+                not isinstance(rows, list)
+                or len(rows) != 1
+                or not isinstance(rows[0], dict)
+                or not isinstance(rows[0].get("record_ids"), list)
+                or not all(isinstance(value, str) for value in rows[0].get("record_ids", []))
+            ):
+                raise ValidationError("study proposal must contain one assigned study group")
+            row = rows[0]
+            record_ids = set(row.get("record_ids", []))
+            if not target <= record_ids:
+                raise ValidationError("study proposal must include the assigned record")
+            existing = {
+                item["study_id"]: item
+                for item in self.workspace.rows("studies", fresh=False)
+            }
+            previous = existing.get(row.get("study_id"))
+            if previous is None:
+                if record_ids != target:
+                    raise ValidationError("a new study may contain only the assigned record")
+            elif set(previous["record_ids"]) - record_ids or record_ids - set(
+                previous["record_ids"]
+            ) - target:
+                raise ValidationError("study update may only add the assigned record")
+        elif task["kind"] == "assessment":
+            extractions = (stages.get("extractions") or {}).get("records")
+            appraisals = (stages.get("appraisals") or {}).get("records")
+            if (
+                not isinstance(extractions, list)
+                or not isinstance(appraisals, list)
+                or not all(isinstance(row, dict) for row in [*extractions, *appraisals])
+            ):
+                raise ValidationError("assessment requires extraction and appraisal records")
+            if {row.get("record_id") for row in extractions} != target:
+                raise ValidationError("extractions must cover only the assigned record")
+            extraction_ids = {row.get("extraction_id") for row in extractions}
+            if {row.get("extraction_id") for row in appraisals} != extraction_ids:
+                raise ValidationError("every assigned extraction requires one appraisal")
+
+    def _submit_synthesis(self, task: dict[str, Any], proposal: Any) -> dict[str, Any]:
+        if not isinstance(proposal, dict) or proposal.get("schema_version") != TASK_PACKET_VERSION:
+            raise ValidationError("synthesis proposal schema_version must be '1'")
+        if proposal.get("base_digests") != task["base_digests"]:
+            raise ValidationError("synthesis proposal base_digests differ")
+        finding = proposal.get("finding")
+        outcomes = finding.get("protocol_outcomes") if isinstance(finding, dict) else None
+        if (
+            not isinstance(outcomes, list)
+            or not all(isinstance(outcome, str) for outcome in outcomes)
+            or set(outcomes) != set(task["target_ids"])
+        ):
+            raise ValidationError("synthesis finding must cover exactly the assigned outcome")
+        manifest = self.workspace.load()
+        existing = (
+            self.workspace.read("synthesis", fresh=False)
+            if "synthesis" in manifest["datasets"]
+            and not self.workspace.stale("synthesis", manifest)
+            else {"title": "", "limitations": [], "findings": []}
+        )
+        findings = [
+            row
+            for row in existing.get("findings", [])
+            if not set(row.get("protocol_outcomes", [])) & set(task["target_ids"])
+        ]
+        findings.append(finding)
+        title = proposal.get("title") or existing.get("title")
+        limitations = proposal.get("limitations") or existing.get("limitations")
+        batch = {
+            "schema_version": "2",
+            "base_digests": task["base_digests"],
+            "stages": {
+                "synthesis": {
+                    "schema_version": "2",
+                    "title": title,
+                    "limitations": limitations,
+                    "findings": findings,
+                }
+            },
+        }
+        result = submit_batch(self.workspace, batch)
+        if not result["accepted"]:
+            return result
+        return result
+
+    async def _submit_fulltext(self, task: dict[str, Any], proposal: Any) -> dict[str, Any]:
+        if not isinstance(proposal, dict) or proposal.get("schema_version") != TASK_PACKET_VERSION:
+            raise ValidationError("fulltext proposal schema_version must be '1'")
+        if proposal.get("base_digests") != task["base_digests"]:
+            raise ValidationError("fulltext proposal base_digests differ")
+        if (
+            proposal.get("record_id") not in task["target_ids"]
+            or proposal.get("action") != "acquire"
+        ):
+            raise ValidationError("fulltext proposal differs from its assigned target")
+        pdf = proposal.get("pdf")
+        pdf_path = Path(pdf).expanduser().resolve() if isinstance(pdf, str) and pdf else None
+        return await fetch_fulltexts(
+            self.workspace,
+            [proposal["record_id"]],
+            pdf=pdf_path,
+            retry=proposal.get("retry") is True,
+        )
+
+    def _submit_search_plan(
+        self,
+        manifest: dict[str, Any],
+        ledger: dict[str, Any],
+        task: dict[str, Any],
+        proposal: Any,
+        proposal_digest: str,
+    ) -> dict[str, Any]:
+        if not isinstance(proposal, dict) or proposal.get("schema_version") != TASK_PACKET_VERSION:
+            raise ValidationError("search proposal schema_version must be '1'")
+        if proposal.get("base_digests") != task["base_digests"]:
+            raise ValidationError("search proposal base_digests differ")
+        protocol = manifest["protocol"]
+        expected_mode = "review" if protocol["mode"] == "review-prep" else "quick"
+        if proposal.get("mode") != expected_mode:
+            raise ValidationError("search mode differs from the run protocol")
+        sources = proposal.get("sources")
+        allowed = set(protocol["question"]["sources"])
+        if not isinstance(sources, list) or not sources or set(sources) - allowed:
+            raise ValidationError("search sources must be a nonempty protocol subset")
+        limit = proposal.get("limit_per_source")
+        if limit != "all" and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValidationError("limit_per_source must be positive or all")
+        if limit == "all" and protocol["records_per_source"] != "all":
+            raise ValidationError("all-results plan exceeds the run protocol")
+        if (
+            isinstance(limit, int)
+            and protocol["records_per_source"] != "all"
+            and limit > protocol["records_per_source"]
+        ):
+            raise ValidationError("search plan exceeds the per-source budget")
+        variants = proposal.get("variants")
+        if not isinstance(variants, dict) or set(variants) - set(sources):
+            raise ValidationError("search variants must name selected sources")
+        if any(value not in {"sensitivity", "precision"} for value in variants.values()):
+            raise ValidationError("search variants must be sensitivity or precision")
+        plan = {
+            "mode": expected_mode,
+            "limit_per_source": limit,
+            "sources": list(dict.fromkeys(sources)),
+            "variants": variants,
+            "mesh": proposal.get("mesh") is not False,
+        }
+        frozen = (manifest.get("automation") or {}).get("frozen_search_plan")
+        if frozen is not None and digest(plan) != digest(frozen):
+            raise ValidationError(
+                "refresh search plan differs from the Review's accepted strategy; fork the Review"
+            )
+        task["search_plan"] = plan
+        task["submission_digest"] = proposal_digest
+        task["plan_recorded_at"] = now()
+        self.workspace.save(manifest)
+        return {
+            "run_id": self.run_id,
+            "task_id": task["task_id"],
+            "accepted": True,
+            "state": "plan_recorded",
+            "plan_digest": digest(plan),
+            "next": (
+                f"mdr --actor mdr-searcher search run {self.run_id} {task['task_id']}"
+            ),
+        }
+
+    def _accept(
+        self,
+        task_id: str,
+        actor: Actor,
+        proposal_digest: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        manifest = self.workspace.load()
+        ledger = self._ledger(manifest)
+        task = ledger["tasks"][task_id]
+        result_file = f"tasks/{task_id}/result-{digest(result)}.json"
+        self.workspace.store.write_json(result_file, result)
+        task.update(
+            state="accepted",
+            actor_profile=actor.profile,
+            actor_session_id=actor.session_id,
+            submission_digest=proposal_digest,
+            result_file=result_file,
+            result_digest=digest(result),
+            accepted_at=now(),
+        )
+        if task.get("lease"):
+            task["lease"]["state"] = "completed"
+            task["lease"]["completed_at"] = task["accepted_at"]
+        if task["role"] != "auditor":
+            authors = ledger["authors"].setdefault(task["kind"], [])
+            if actor.profile not in authors:
+                authors.append(actor.profile)
+        if task.get("correction_for"):
+            ledger["revision"] = None
+            for old_id in task["correction_for"]:
+                old = ledger["tasks"].get(old_id)
+                if old and old["state"] == "accepted":
+                    old["state"] = "superseded"
+                    old["superseded_at"] = now()
+        ledger["events"].append({"event": "task.accepted", "task_id": task_id, "at": now()})
+        ledger["state"] = self._derive_state(manifest, ledger)
+        self.workspace.save(manifest)
+        return self._receipt_view(task)
+
+    def task_automation(self, task_id: str) -> dict[str, Any]:
+        """Return the bounded scheduling fields for one Task."""
+        _safe_id(task_id, TASK_ID_PREFIX)
+        manifest = self.workspace.load()
+        task = self._ledger(manifest)["tasks"].get(task_id)
+        if not task:
+            raise ValidationError("unknown task")
+        return {
+            "task_id": task_id,
+            "state": task["state"],
+            "created_at": task["created_at"],
+            "available_at": task.get("available_at"),
+            "automation_attempts": task.get("automation_attempts", 0),
+            "lease": deepcopy(task.get("lease")),
+        }
+
+    def lease_task(
+        self,
+        task_id: str,
+        actor: Actor,
+        *,
+        claim_id: str,
+        token: str,
+        expires_at: str,
+        at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically grant one bounded worker lease for a managed Task."""
+        _safe_id(task_id, TASK_ID_PREFIX)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            if not manifest.get("automation"):
+                raise ValidationError("leases are only available for Review-managed Runs")
+            ledger = self._ledger(manifest)
+            task = ledger["tasks"].get(task_id)
+            if not task or task.get("role") != actor.role:
+                raise ValidationError("task does not belong to this specialist role")
+            if task["state"] != "pending" or task.get("lease"):
+                raise ValidationError("task is not available for claim")
+            available = task.get("available_at")
+            current = datetime.fromisoformat(at) if at else datetime.now(UTC)
+            if available and current < datetime.fromisoformat(available):
+                raise ValidationError("task retry is not available yet")
+            attempt = int(task.get("automation_attempts", 0)) + 1
+            if attempt > 3:
+                raise ValidationError("task exhausted its bounded retry attempts")
+            task["automation_attempts"] = attempt
+            task["lease"] = {
+                "claim_id": claim_id,
+                "token_digest": digest(token),
+                "actor_profile": actor.profile,
+                "actor_session_id": actor.session_id,
+                "expires_at": expires_at,
+                "state": "active",
+            }
+            ledger["events"].append(
+                {
+                    "event": "task.leased",
+                    "task_id": task_id,
+                    "claim_id": claim_id,
+                    "attempt": attempt,
+                    "at": now(),
+                }
+            )
+            self.workspace.save(manifest)
+        return {"task_id": task_id, "claim_id": claim_id, "attempt": attempt}
+
+    def fail_lease(
+        self,
+        task_id: str,
+        claim_id: str,
+        *,
+        code: str,
+        message: str,
+        at: str | None = None,
+    ) -> dict[str, Any]:
+        """Release a failed lease, apply bounded backoff, or block the Task."""
+        _safe_id(task_id, TASK_ID_PREFIX)
+        failure_at = datetime.fromisoformat(at) if at else datetime.now(UTC)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            task = ledger["tasks"].get(task_id)
+            lease = task.get("lease") if task else None
+            if not task or not lease or lease.get("claim_id") != claim_id:
+                raise ValidationError("claim no longer owns this task")
+            if lease.get("state") != "active":
+                raise ValidationError("claim lease is not active")
+            attempt = int(task.get("automation_attempts", 0))
+            lease.update(state="failed", failed_at=failure_at.isoformat(), code=code)
+            task.setdefault("automation_failures", []).append(
+                {
+                    "claim_id": claim_id,
+                    "attempt": attempt,
+                    "code": code,
+                    "message": message,
+                    "at": failure_at.isoformat(),
+                }
+            )
+            task.pop("actor_profile", None)
+            task.pop("actor_session_id", None)
+            if attempt >= 3:
+                task["state"] = "blocked"
+                task["blocked_at"] = failure_at.isoformat()
+                blocked = True
+                retry_at = None
+            else:
+                delay = (5, 30)[attempt - 1]
+                retry = failure_at + timedelta(minutes=delay)
+                task["state"] = "pending"
+                task["available_at"] = retry.isoformat()
+                task.pop("lease", None)
+                blocked = False
+                retry_at = retry.isoformat()
+            ledger["events"].append(
+                {
+                    "event": "task.blocked" if blocked else "task.retry_scheduled",
+                    "task_id": task_id,
+                    "claim_id": claim_id,
+                    "attempt": attempt,
+                    "at": failure_at.isoformat(),
+                }
+            )
+            self.workspace.save(manifest)
+        return {
+            "task_id": task_id,
+            "attempt": attempt,
+            "blocked": blocked,
+            "retry_at": retry_at,
+        }
+
+    def block_unclaimed(self, task_id: str, *, at: str) -> dict[str, Any]:
+        """Fail closed after all monitor wake generations went unclaimed."""
+        _safe_id(task_id, TASK_ID_PREFIX)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            task = ledger["tasks"].get(task_id)
+            if not task or task.get("state") != "pending" or task.get("lease"):
+                raise ValidationError("task is not an unclaimed pending task")
+            task["state"] = "blocked"
+            task["blocked_at"] = at
+            task["blocked_code"] = "worker_unavailable"
+            ledger["events"].append(
+                {
+                    "event": "task.blocked",
+                    "task_id": task_id,
+                    "code": "worker_unavailable",
+                    "at": at,
+                }
+            )
+            self.workspace.save(manifest)
+        return {"task_id": task_id, "blocked": True, "code": "worker_unavailable"}
+
+    def _require_submitter(
+        self,
+        manifest: dict[str, Any],
+        task: dict[str, Any] | None,
+        role: str,
+        actor: Actor,
+        claim_token: str | None,
+    ) -> None:
+        if not task or task.get("role") != role:
+            raise ValidationError("task does not belong to this specialist role")
+        self._require_claim(manifest, task, actor, claim_token)
+        if task.get("state") == "accepted":
+            return
+        if task.get("state") != "in_progress":
+            raise ValidationError("call the role's next command before submitting")
+        if task.get("actor_profile") != actor.profile:
+            raise ValidationError("task is active under a different profile")
+
+    def _require_claim(
+        self,
+        manifest: dict[str, Any],
+        task: dict[str, Any],
+        actor: Actor,
+        claim_token: str | None,
+    ) -> None:
+        if not manifest.get("automation"):
+            return
+        lease = task.get("lease")
+        if not lease or lease.get("state") != "active":
+            raise ValidationError("managed task requires an active claim")
+        if not claim_token or digest(claim_token) != lease.get("token_digest"):
+            raise ValidationError("claim token is missing, invalid, or replaced")
+        if lease.get("actor_profile") != actor.profile:
+            raise ValidationError("claim belongs to a different profile")
+        if lease.get("actor_session_id") != actor.session_id:
+            raise ValidationError("claim belongs to a different Hermes session")
+        if datetime.now(UTC) >= datetime.fromisoformat(lease["expires_at"]):
+            raise ValidationError("claim lease expired; late result rejected")
+
+    def _replay(self, task: dict[str, Any], proposal_digest: str) -> dict[str, Any] | None:
+        if task.get("state") != "accepted":
+            return None
+        if task.get("submission_digest") != proposal_digest:
+            raise ValidationError("task is already accepted with a different submission")
+        return self._receipt_view(task)
+
+    def _receipt_view(self, task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "task_id": task["task_id"],
+            "role": task["role"],
+            "kind": task["kind"],
+            "state": task["state"],
+            "result_digest": task.get("result_digest"),
+            "accepted_at": task.get("accepted_at"),
+        }
+
+    def _audit_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        packet = self._validate_packet(task)
+        group = {
+            **packet["audit_group"],
+            "allowed_document_ids": task.get("allowed_source_ids", []),
+        }
+        return {**task, "audit_group": group}
+
+    def _materialize_empty_stages(self, manifest: dict[str, Any]) -> bool:
+        """Record deterministic empty stages when selection leaves no evidence work."""
+        datasets = manifest["datasets"]
+        if "records" not in datasets or "screening" not in datasets:
+            return False
+        if self.workspace.stale("screening", manifest):
+            return False
+        records = set(self.workspace.index("records"))
+        screening = self.workspace.index("screening")
+        if set(screening) != records:
+            return False
+        changed = False
+        included = {
+            record_id
+            for record_id, row in screening.items()
+            if row["decision"] == "include"
+        }
+        if not included and "coverage" not in datasets:
+            self.workspace.put("coverage", {"schema_version": "2", "records": []})
+            changed = True
+            datasets = self.workspace.load()["datasets"]
+        if "coverage" not in datasets:
+            return changed
+        if self.workspace.stale("coverage", self.workspace.load()):
+            return changed
+        coverage = self.workspace.index("coverage")
+        if set(coverage) != included:
+            return changed
+        selected = {
+            record_id
+            for record_id, row in coverage.items()
+            if row["selection"] == "selected"
+        }
+        if selected:
+            return changed
+        for stage in ("studies", "extractions", "appraisals"):
+            if stage not in self.workspace.load()["datasets"]:
+                self.workspace.put(stage, {"schema_version": "2", "records": []})
+                changed = True
+        return changed
+
+    def _validate_packet(self, task: dict[str, Any]) -> dict[str, Any]:
+        self._validate_task_file(task, "packet_file", "packet.json")
+        packet = self.workspace.store.read_json(task["packet_file"])
+        if digest(packet) != task["packet_digest"]:
+            raise ValidationError("task packet was modified")
+        return packet
+
+    def _validate_accepted_results(self, ledger: dict[str, Any]) -> None:
+        for task_id in ledger["order"]:
+            task = ledger["tasks"][task_id]
+            if task["state"] != "accepted":
+                continue
+            self._validate_task_file(
+                task, "result_file", f"result-{task.get('result_digest')}.json"
+            )
+            result = self.workspace.store.read_json(task.get("result_file", ""), default=None)
+            if not isinstance(result, dict) or digest(result) != task.get("result_digest"):
+                raise ValidationError(f"accepted task result was modified: {task_id}")
+
+    def _validate_task_file(
+        self,
+        task: dict[str, Any],
+        field: str,
+        filename: str,
+    ) -> None:
+        value = task.get(field)
+        expected_parent = f"tasks/{task.get('task_id')}"
+        if not isinstance(value, str):
+            raise ValidationError(f"task {field} is invalid")
+        relative = Path(value)
+        if (
+            relative.is_absolute()
+            or relative.parent.as_posix() != expected_parent
+            or relative.name != filename
+        ):
+            raise ValidationError(f"task {field} escapes its immutable task directory")
+
+    def _source_value(self, source_id: str) -> dict[str, Any]:
+        documents = self.workspace.source_index()
+        if source_id in documents:
+            return documents[source_id]
+        prefix, separator, identifier = source_id.partition(":")
+        if not separator:
+            raise ValidationError("unknown source identifier")
+        if prefix == "extraction":
+            return self.workspace.index("extractions")[identifier]
+        if prefix == "appraisal":
+            return self.workspace.index("appraisals")[identifier]
+        if prefix == "study":
+            return self.workspace.index("studies")[identifier]
+        raise ValidationError("unknown source identifier")
+
+    def _supersede_stale(self, manifest: dict[str, Any], ledger: dict[str, Any]) -> None:
+        current = current_digests(self.workspace)
+        for task in ledger["tasks"].values():
+            if task["state"] in {"pending", "in_progress"} and task["base_digests"] != current:
+                task["state"] = "superseded"
+                task["superseded_at"] = now()
+
+    def _derive_state(self, manifest: dict[str, Any], ledger: dict[str, Any]) -> str:
+        if (
+            ledger.get("state") == "finalized"
+            and (self.workspace.path / "completion.json").is_file()
+        ):
+            return "finalized"
+        if ledger.get("revision"):
+            return "revision_required"
+        if any(task["state"] == "blocked" for task in ledger["tasks"].values()):
+            return "blocked"
+        active = next(
+            (
+                task
+                for task in ledger["tasks"].values()
+                if task["state"] in {"pending", "in_progress"}
+            ),
+            None,
+        )
+        if active:
+            return _state_for_role(active["role"])
+        reviews = manifest["datasets"].get("reviews")
+        if reviews and not self.workspace.stale("reviews", manifest):
+            payload = self.workspace.read("reviews")
+            if all(
+                row.get("status") == "pass"
+                for row in [*payload["records"], *payload["report_reviews"]]
+            ):
+                return "ready"
+        if "records" not in manifest["datasets"]:
+            return "created"
+        return "awaiting_route"
+
+
+def _state_for_role(role: str) -> str:
+    return {
+        "searcher": "searching",
+        "selector": "selecting",
+        "extractor": "extracting",
+        "synthesizer": "synthesizing",
+        "auditor": "auditing",
+        "coordinator": "created",
+    }[role]
+
+
+def _route_view(run_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "task_id": task["task_id"],
+        "role": task["role"],
+        "profile": ROLE_PROFILES[task["role"]],
+        "state": task["state"],
+    }
+
+
+def _utf8_pages(value: str, limit: int) -> list[str]:
+    """Split text into independently valid UTF-8 pages bounded by bytes."""
+    if not value:
+        return [""]
+    pages: list[str] = []
+    current: list[str] = []
+    size = 0
+    for character in value:
+        encoded_size = len(character.encode("utf-8"))
+        if current and size + encoded_size > limit:
+            pages.append("".join(current))
+            current = []
+            size = 0
+        current.append(character)
+        size += encoded_size
+    if current:
+        pages.append("".join(current))
+    return pages

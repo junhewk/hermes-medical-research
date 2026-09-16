@@ -22,32 +22,7 @@ jobs:
       - run: uv sync --locked --extra dev
       - run: uv run ruff check .
       - run: uv run pytest
-      - run: uv run python scripts/validate_bundle.py
       - run: uv build
-      - run: uv run python scripts/package_plugin.py
-
-  hermes:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: plugin
-      - uses: actions/checkout@v4
-        with:
-          repository: NousResearch/hermes-agent
-          ref: eec131b7163a8f287a9bddfc8ba11e6bd07ac49e
-          path: hermes
-          persist-credentials: false
-          sparse-checkout: |
-            hermes_cli
-            tools
-            agent
-            gateway
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.12"
-          enable-cache: true
-      - run: uv sync --locked --extra dev
-        working-directory: plugin
-      - run: uv run --with rich --with python-dotenv --with ruamel-yaml python scripts/validate_hermes.py --hermes-source ../hermes
-        working-directory: plugin
+      - run: uv run mdr --version
+      - run: uv run mdr hermes bootstrap
+      - run: uv run mdr hermes routines

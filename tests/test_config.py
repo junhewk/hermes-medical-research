@@ -1,4 +1,4 @@
-from hermes_medical_search.config import Credentials
+from hermes_medical_research.search.config import Credentials
 
 
 def test_credentials_are_redacted() -> None:
