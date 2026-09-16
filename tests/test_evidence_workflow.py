@@ -92,6 +92,20 @@ def modern_workspace(tmp_path):
     return workspace
 
 
+def test_assessment_packet_exposes_outcome_scope_and_scaffold_contract(tmp_path):
+    workspace = modern_workspace(tmp_path)
+    record_id = workspace.rows("records")[0]["record_id"]
+    study = next(
+        row for row in workspace.rows("studies") if record_id in row["record_ids"]
+    )
+
+    spec = TaskEngine(workspace)._assessment_spec(record_id, study)
+
+    assert spec["packet_data"]["protocol_outcomes"] == ["Synthetic outcome"]
+    assert spec["packet_data"]["coverage"] == workspace.index("coverage")[record_id]
+    assert "scaffolds, not a one-row cap" in spec["instructions"]
+
+
 def record_reviews(workspace):
     from hermes_medical_research import audit
 

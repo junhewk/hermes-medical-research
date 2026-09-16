@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.7 - 2026-09-16
+
+- Preserve relevance-ranked search order when attaching a deduplicated corpus so one-article
+  Selector tasks start with the highest-priority records instead of source-alphabetic records.
+- Anchor attachment ranking to the search artifact's frozen ranking date and keep the detailed
+  heuristic scores in `ranked-results.jsonl` as the audit trail.
+- Put selected protocol outcomes and coverage into assessment packets, and state explicitly that
+  their initial extraction row is a scaffold rather than a one-outcome limit.
+
 ## 0.5.6 - 2026-09-16
 
 - Restored the strict one-article Selector task contract after withdrawing the unreleased v0.5.5

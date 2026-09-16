@@ -7,7 +7,7 @@ import json
 import re
 from collections import Counter
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ from hermes_medical_research.search.models import (
     Question,
     ValidationError,
 )
-from hermes_medical_research.search.ranking import deduplicate
+from hermes_medical_research.search.ranking import deduplicate, rank_records
 
 DEPENDENCIES = {
     "records": (),
@@ -443,15 +443,32 @@ class Workspace:
         }
         self.save(manifest)
         raw = []
+        ranking_dates: list[date] = []
         for search in manifest["searches"].values():
             if search["status"] != "attached":
                 continue
             snap = self.store.read_json(search["snapshot"])
             if digest(snap) != search["snapshot_digest"]:
                 raise ValidationError("search snapshot digest mismatch")
+            summary = snap.get("summary") or {}
+            ranking_anchor = summary.get("ranked_as_of")
+            if not ranking_anchor:
+                ranking_anchor = (snap.get("strategy") or {}).get("created_at")
+            try:
+                ranking_dates.append(date.fromisoformat(str(ranking_anchor)[:10]))
+            except ValueError as exc:
+                raise ValidationError("attached search has an invalid ranking date") from exc
             for values in snap["sources"].values():
                 raw.extend(values)
-        records = deduplicate(raw)
+        records = rank_records(
+            deduplicate(raw),
+            Question.from_dict(manifest["protocol"]["question"]),
+            today=max(ranking_dates),
+        )
+        for record in records:
+            # The evidence workspace needs the stable priority order, not a second copy of the
+            # search-only heuristic scores.  ranked-results.jsonl remains the ranking audit trail.
+            record.pop("ranking", None)
         for record in records:
             identity = record["canonical_id"]
             if identity.startswith("record:"):

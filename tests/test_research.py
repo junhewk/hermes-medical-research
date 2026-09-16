@@ -96,6 +96,52 @@ def completed_search(workspace, path, *, count=2, title="Synthetic trial", mode=
     return store, strategy
 
 
+def test_attach_preserves_relevance_ranking_for_screening_order(tmp_path):
+    workspace = workspace_at(tmp_path / "research")
+    question = Question.from_dict(workspace.load()["protocol"]["question"])
+    strategy = compile_strategy(
+        question, mode="quick", limit_per_source=2, sources=["europe-pmc"]
+    )
+    store = RunStore(tmp_path / "search")
+    manifest = store.initialize(question, strategy, Credentials())
+    store.append_source(
+        "europe-pmc",
+        [
+            {
+                "source": "europe-pmc",
+                "source_id": "MED:1",
+                "pmid": "1",
+                "title": "Unrelated laboratory methods report",
+                "abstract": "A technical validation study.",
+                "year": "2025",
+                "publication_types": ["Randomized trial"],
+                "retrieved_at": "2026-09-12T00:00:00Z",
+                "url": "https://example.org/irrelevant",
+            },
+            {
+                "source": "europe-pmc",
+                "source_id": "MED:2",
+                "pmid": "2",
+                "title": "Exercise intervention for adults",
+                "abstract": "Exercise was compared in adults.",
+                "year": "2025",
+                "publication_types": ["Randomized trial"],
+                "retrieved_at": "2026-09-12T00:00:00Z",
+                "url": "https://example.org/relevant",
+            },
+        ],
+    )
+    manifest["status"] = "complete"
+    manifest["sources"]["europe-pmc"].update(
+        status="complete", retrieved=2, retained=2, reported_total=2
+    )
+    store.write_manifest(manifest)
+
+    workspace.attach(store.path)
+
+    assert [row["pmid"] for row in workspace.rows("records")] == ["2", "1"]
+
+
 def stage(workspace, name, records):
     workspace.put(name, {"schema_version": "1", "records": records})
 

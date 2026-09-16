@@ -1132,11 +1132,15 @@ class TaskEngine:
         ]
         source = _source(self.workspace, record_id)
         source_ids = [row["document_id"] for row in source["documents"]]
+        coverage = deepcopy(self.workspace.index("coverage")[record_id])
         return {
             "kind": "assessment",
             "target_ids": [record_id],
             "instructions": (
-                "Extract each needed estimand and complete its design-appropriate appraisal."
+                "Extract every relevant reported estimand for the selected protocol outcomes. "
+                "The initial extraction and appraisal rows are scaffolds, not a one-row cap: add "
+                "one distinct extraction and matching appraisal for each needed estimand, then "
+                "complete every design-appropriate appraisal."
             ),
             "proposal": {
                 "schema_version": "2",
@@ -1149,6 +1153,8 @@ class TaskEngine:
             "packet_data": {
                 "source": source,
                 "study": study,
+                "coverage": coverage,
+                "protocol_outcomes": self.workspace.load()["protocol"]["outcomes"],
                 "methods": {
                     name: {"version": version, "domains": domains.split()}
                     for name, (version, domains) in METHODS.items()
