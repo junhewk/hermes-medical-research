@@ -8,11 +8,16 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
+from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from hermes_medical_research import __version__
 from hermes_medical_research.search.models import ValidationError
@@ -36,7 +41,9 @@ DESCRIPTIONS = {
 MANAGED = "mdr-managed.json"
 ROUTINES_MANAGED = "mdr-routines.json"
 TOOLSETS = ["terminal", "file", "skills"]
-PROFILE_MAX_TURNS = {"mdr-searcher": 8, "mdr-selector": 80}
+PROFILE_MAX_TURNS = {"mdr-searcher": 8, "mdr-selector": 24}
+SELECTOR_SCRIPT_TIMEOUT_SECONDS = 24 * 60 * 60
+SELECTOR_HOST_ATTEMPTS = 3
 
 
 def _home(value: Path | None) -> Path:
@@ -155,6 +162,8 @@ def _desired_files(name: str, settings: dict[str, Any]) -> dict[str, bytes]:
         )
         if isinstance(value, str) and value.strip()
     }
+    if name == "mdr-selector":
+        cron["script_timeout_seconds"] = SELECTOR_SCRIPT_TIMEOUT_SECONDS
     config = {
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),
@@ -487,6 +496,7 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
 
     quoted_store = shlex.quote(str(store))
     quoted_mdr = shlex.quote(shutil.which("mdr") or "mdr")
+    quoted_hermes = shlex.quote(shutil.which("hermes") or "hermes")
     scripts: dict[str, bytes] = {}
     jobs: list[dict[str, Any]] = []
     tick_script = "mdr-work-tick.sh"
@@ -523,30 +533,42 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
     }
     for role, skill in skill_for.items():
         profile = f"mdr-{role}"
+        if role == "selector":
+            script = "mdr-work-selector.sh"
+            scripts[f"{profile}/scripts/{script}"] = (
+                "#!/bin/sh\n"
+                f"exec {quoted_mdr} --store {quoted_store} hermes drain-selector "
+                f"--hermes-home {shlex.quote(str(home))} "
+                f"--hermes-executable {quoted_hermes}\n"
+            ).encode()
+            jobs.append(
+                {
+                    "profile": profile,
+                    "name": "mdr-work-selector",
+                    "schedule": "* * * * *",
+                    "prompt": "",
+                    "script": script,
+                    "no_agent": True,
+                    "deliver": None,
+                    "failure_deliver": "bot-chat:mdr-coordinator",
+                    "skills": [],
+                    "paused": False,
+                }
+            )
+            continue
         monitor = f"mdr-probe-{role}.sh"
         scripts[f"{profile}/scripts/{monitor}"] = (
             "#!/bin/sh\n"
             f"exec {quoted_mdr} --store {quoted_store} work probe {role}\n"
         ).encode()
         command = command_for[role]
-        if role == "selector":
-            prompt = (
-                f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
-                "If it returns idle, reply exactly [SILENT]. Otherwise perform the loaded skill "
-                "using only the returned packet, proposal, and exact commands. After an accepted "
-                "submission, claim and process the next Selector task immediately. Continue for "
-                "up to 10 accepted tasks in this invocation, or stop sooner on idle or error. On "
-                "any unrecoverable error, run the returned fail command. Return only the last "
-                "recorded state."
-            )
-        else:
-            prompt = (
-                f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
-                "If it returns idle, reply exactly [SILENT]. Otherwise perform the loaded skill "
-                "using only the returned packet, proposal, and exact commands. On any "
-                "unrecoverable error, run the returned fail command. Return only the recorded "
-                "state."
-            )
+        prompt = (
+            f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
+            "If it returns idle, reply exactly [SILENT]. Otherwise perform the loaded skill "
+            "using only the returned packet, proposal, and exact commands. On any "
+            "unrecoverable error, run the returned fail command. Return only the recorded "
+            "state."
+        )
         jobs.append(
             {
                 "profile": profile,
@@ -703,7 +725,9 @@ def _edit_routine(
     else:
         command.append("--clear-skills")
     if spec.get("no_agent"):
-        command.extend(["--script", spec["script"], "--no-agent"])
+        command.extend(
+            ["--script", spec["script"], "--no-agent", "--monitor-script", ""]
+        )
     else:
         command.extend(["--agent", "--monitor-script", spec["monitor_script"]])
     if spec.get("deliver") is not None:
@@ -724,6 +748,146 @@ def _edit_routine(
             f"Hermes could not update routine {spec['name']}: "
             f"{(completed.stderr or completed.stdout).strip()}"
         )
+
+
+def _invoke_selector_claim(
+    executable: str,
+    home: Path,
+    claim: dict[str, Any],
+    actor: Any,
+) -> subprocess.CompletedProcess[str]:
+    instruction = {
+        "schema_version": "1",
+        "run_id": claim["run_id"],
+        "task_id": claim["task_id"],
+        "packet_path": claim["packet_path"],
+        "proposal_path": claim["proposal_path"],
+        "source_list": claim["source_list"],
+        "source_show": claim["source_show"],
+        "submit": claim["submit"],
+        "fail": claim["fail"],
+    }
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="mdr-selector-",
+        suffix=".json",
+        delete=False,
+    ) as handle:
+        json.dump(instruction, handle, indent=2)
+        handle.write("\n")
+        instruction_path = Path(handle.name)
+    try:
+        instruction_path.chmod(0o600)
+        prompt = (
+            "Use the medical-select skill. One article task is already claimed. "
+            f"Read the instruction file at {instruction_path}. Do not run a claim command and "
+            "do not process another task. Read only the supplied packet and bounded sources, "
+            "complete the one decision and reason in the proposal, and run the exact submit "
+            "command. If the task cannot be completed, run the exact fail command. Return only "
+            "the run_id, task_id, and recorded state."
+        )
+        return subprocess.run(
+            [
+                executable,
+                "-p",
+                "mdr-selector",
+                "--skills",
+                "medical-select",
+                "-z",
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "HERMES_HOME": str(home),
+                "HERMES_SESSION_ID": actor.session_id,
+                "HERMES_SESSION_PROFILE": "mdr-selector",
+            },
+        )
+    finally:
+        instruction_path.unlink(missing_ok=True)
+
+
+def drain_selector(
+    *,
+    store: Path,
+    hermes_home: Path | None = None,
+    hermes_executable: Path | None = None,
+    invoke: Callable[[str, Path, dict[str, Any], Any], subprocess.CompletedProcess[str]]
+    | None = None,
+) -> dict[str, Any]:
+    """Run one fresh host-native Selector session per article until its queue is empty."""
+    from .automation import AutomationEngine
+    from .tasks import Actor, TaskEngine
+
+    root = store.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    home = _home(hermes_home)
+    executable = (
+        shutil.which(str(hermes_executable.expanduser()))
+        if hermes_executable is not None
+        else shutil.which("hermes")
+    )
+    if executable is None:
+        raise ValidationError("Hermes CLI is not installed or is not on PATH")
+    call = invoke or _invoke_selector_claim
+    lock = FileLock(str(root / ".selector-drain.lock"))
+    try:
+        lock.acquire(timeout=0)
+    except FileLockTimeout:
+        return {"state": "already_running", "processed": 0}
+    processed = 0
+    try:
+        automation = AutomationEngine(root)
+        while True:
+            actor = Actor(
+                "mdr-selector",
+                f"serial-selector-{uuid4().hex}",
+                "selector",
+            )
+            claim = automation.claim("select", actor)
+            if claim.get("state") == "idle":
+                return {"state": "drained", "processed": processed}
+            packet = json.loads(Path(claim["packet_path"]).read_text(encoding="utf-8"))
+            if len(packet.get("target_ids", [])) != 1:
+                automation.fail(
+                    claim["claim_id"],
+                    actor,
+                    code="selector_scope_invalid",
+                    message="Selector task must contain exactly one article.",
+                )
+                raise ValidationError("Selector task must contain exactly one article")
+            engine = TaskEngine(automation.catalog.workspace(claim["run_id"]))
+            last_error = "Selector host invocation did not accept its assigned article."
+            for _ in range(SELECTOR_HOST_ATTEMPTS):
+                completed = call(executable, home, claim, actor)
+                task = engine.task_automation(claim["task_id"])
+                if task["state"] == "accepted":
+                    processed += 1
+                    break
+                if task["state"] != "in_progress":
+                    raise ValidationError(
+                        f"Selector host recorded task {claim['task_id']} as "
+                        f"{task['state']}"
+                    )
+                detail = (completed.stderr or completed.stdout or "").strip()
+                last_error = detail[-500:] or last_error
+            else:
+                automation.fail(
+                    claim["claim_id"],
+                    actor,
+                    code="selector_host_failed",
+                    message=last_error,
+                )
+                raise ValidationError(
+                    f"Selector host failed task {claim['task_id']} after "
+                    f"{SELECTOR_HOST_ATTEMPTS} immediate attempts"
+                )
+    finally:
+        lock.release()
 
 
 def routines(
@@ -759,6 +923,9 @@ def routines(
             desired = _sha256(scripts[key]) if key in scripts else None
             if observed not in {checksum, desired}:
                 raise ValidationError(f"managed routine script was edited outside mdr: {path}")
+        for key in set(previous["scripts"]) - set(scripts):
+            profile, relative = key.split("/", 1)
+            (_profile_root(home, profile) / relative).unlink(missing_ok=True)
     managed_names = {
         (item["profile"], item["name"]) for item in (previous or {}).get("jobs", [])
     }

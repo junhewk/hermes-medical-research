@@ -8,15 +8,16 @@ metadata:
 
 # Medical select
 
-For cron work, run `mdr --actor mdr-selector select claim`. If it returns `state: idle`, return
-`[SILENT]`. Otherwise read only the returned bounded packet and proposal template. Use only the returned `source_list` and
-`source_show` commands for additional detail. Complete every assigned decision, editing only the
-proposal, and run the exact returned `submit` command. On an unrecoverable error, run the returned
-`fail` command with a concise code and message. Return only the `run_id`, `task_id`, and recorded
-state. Never inspect the artifact store directly. After an accepted submission, immediately run
-`mdr --actor mdr-selector select claim` again and process the next returned task. Continue until the
-claim is idle or 10 tasks have been accepted in this invocation. Each article still receives its
-own bounded packet, decision, reason, and immutable receipt.
+The serial runner supplies an instruction-file path for one already claimed article. Read that file,
+then read only its bounded packet and proposal template. Use only its `source_list` and `source_show`
+commands for additional detail. Complete the assigned decision, editing only the proposal, and run
+the exact `submit` command. On an unrecoverable error, run the exact `fail` command. Return only the
+`run_id`, `task_id`, and recorded state. Do not claim or process another task in this session, and
+never inspect the artifact store directly. The host runner starts a fresh Selector session for the
+next article immediately after this one is accepted.
+
+Outside the serial runner, claim one article with `mdr --actor mdr-selector select claim`. If it
+returns `state: idle`, return `[SILENT]`; otherwise follow the same one-article boundary.
 
 Pitfalls: screening-stage `decision` must be one of `include`, `exclude`, or `uncertain`, while
 coverage-stage `selection` must be one of `selected`, `deferred`, or `unavailable`. If validation

@@ -111,7 +111,8 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
         if name == "mdr-searcher":
             expected["agent"] = {"max_turns": 8}
         if name == "mdr-selector":
-            expected["agent"] = {"max_turns": 80}
+            expected["agent"] = {"max_turns": 24}
+            expected["cron"]["script_timeout_seconds"] = 86400
         assert config == expected
         assert not set(config) & {"unrelated"}
         assert json.loads((root / "mdr-managed.json").read_text())["profile"] == name
@@ -224,6 +225,42 @@ def test_managed_routine_edit_preserves_operator_model_and_pause_pins(
     assert command[command.index("--prompt") + 1] == spec["prompt"]
     assert command[command.index("--skill") + 1] == "medical-search"
     assert "--agent" in command
+    assert not {"--model", "--provider", "--paused", "--resnap"}.intersection(command)
+
+
+def test_managed_routine_edit_converts_selector_to_script_only(tmp_path, monkeypatch):
+    calls = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return Completed()
+
+    monkeypatch.setattr("hermes_medical_research.hermes.subprocess.run", fake_run)
+    spec = {
+        "profile": "mdr-selector",
+        "name": "mdr-work-selector",
+        "schedule": "* * * * *",
+        "prompt": "",
+        "script": "mdr-work-selector.sh",
+        "no_agent": True,
+        "skills": [],
+        "deliver": None,
+        "failure_deliver": "bot-chat:mdr-coordinator",
+    }
+
+    _edit_routine("/bin/hermes", tmp_path, spec, {"id": "job-2"})
+
+    command = calls[0][0]
+    assert command[command.index("--script") + 1] == "mdr-work-selector.sh"
+    assert command[command.index("--monitor-script") + 1] == ""
+    assert "--no-agent" in command
+    assert "--agent" not in command
+    assert "--clear-skills" in command
     assert not {"--model", "--provider", "--paused", "--resnap"}.intersection(command)
 
 

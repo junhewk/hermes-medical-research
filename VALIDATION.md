@@ -20,9 +20,10 @@ The v0.5 cutover is covered by the repository test suite. Its new architecture c
   plans, the report-mode biomedical-index and zero-hit gates, and explicit optional-source outages;
 - anonymous and API-key PubMed access, explicit any/all concept semantics across query compilation
   and ranking, and regression coverage for alternative intervention families;
-- an eight-turn Searcher profile, one-command search execution, immediate bounded Selector
-  continuation, absolute Routine entrypoints, targeted profile bootstrap, managed Routine editing
-  through Hermes's public CLI, and auditable active-Cycle cancellation;
+- an eight-turn Searcher profile, one-command search execution, immediate one-article Selector
+  continuation through fresh serial host sessions, absolute Routine entrypoints, targeted profile
+  bootstrap, managed Routine editing through Hermes's public CLI, and auditable active-Cycle
+  cancellation;
 - frozen living-review strategy validation, cumulative canonical corpus merge, source-digest reuse
   receipts, changed-source invalidation, and predecessor-linked no-change checkpoints;
 - the retained retrieval, evidence, appraisal, synthesis, verification, and export behavior.
@@ -36,7 +37,7 @@ uv run pytest
 uv build
 ```
 
-The final local run on 2026-09-16 collected and passed 182 tests; Ruff, `git diff --check`, wheel
+The final local run on 2026-09-16 collected and passed 185 tests; Ruff, `git diff --check`, wheel
 construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed.
 
 ## Hermes operational gates
@@ -45,7 +46,7 @@ Hermes itself is not available in every development environment. Operational qua
 has two explicit gates and preserves its JSON output:
 
 1. In an isolated Hermes home, bootstrap the six profiles, apply the managed cron fleet, and run two
-   fresh Selector Routine executions against one synthetic article each. Each worker must claim its
+   fresh Selector host sessions against one synthetic article each. Each worker must claim its
    Task, inspect only its bounded source, submit one decision, and leave an accepted receipt.
 2. Only if both Selector workers pass, run three clean end-to-end Reviews through the cron queue.
    Every Cycle must complete through Searcher, Selector, Extractor, Synthesizer, and Auditor.

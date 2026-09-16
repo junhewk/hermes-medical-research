@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.6 - 2026-09-16
+
+- Restored the strict one-article Selector task contract after withdrawing the unreleased v0.5.5
+  batching experiment.
+- Replaced the turn-capped Selector agent Routine with a serial host runner. It starts one fresh
+  Hermes Selector session per article and immediately starts the next article after acceptance,
+  continuing until the Selector queue is empty.
+- Runs that serial worker as a managed no-agent Routine with a 24-hour script ceiling and an
+  overlap lock, while each individual Selector session retains a small turn ceiling.
+
 ## 0.5.4 - 2026-09-16
 
 - Pinned generated Routine scripts to the resolved `mdr` executable so Hermes cron workers do not

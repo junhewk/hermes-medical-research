@@ -142,6 +142,9 @@ def parser() -> argparse.ArgumentParser:
     routine_command = hermes_commands.add_parser("routines")
     routine_command.add_argument("--apply", action="store_true")
     routine_command.add_argument("--hermes-home", type=Path)
+    drain_command = hermes_commands.add_parser("drain-selector", help=argparse.SUPPRESS)
+    drain_command.add_argument("--hermes-home", type=Path)
+    drain_command.add_argument("--hermes-executable", type=Path)
     return root
 
 
@@ -357,7 +360,7 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "finalize":
         return await _engine(catalog, args.run_id).finalize(_actor(args), offline=args.offline)
 
-    from .hermes import bootstrap_profiles, doctor, routines
+    from .hermes import bootstrap_profiles, doctor, drain_selector, routines
 
     if args.action == "bootstrap":
         return bootstrap_profiles(
@@ -368,6 +371,12 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.action == "doctor":
         return doctor(hermes_home=args.hermes_home)
+    if args.action == "drain-selector":
+        return drain_selector(
+            store=catalog.root,
+            hermes_home=args.hermes_home,
+            hermes_executable=args.hermes_executable,
+        )
     return routines(
         apply=args.apply,
         hermes_home=args.hermes_home,

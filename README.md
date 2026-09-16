@@ -11,9 +11,9 @@ This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 Install directly from the GitHub repository with a Python tool installer:
 
 ```bash
-uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.4
+uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.6
 # or
-pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.4
+pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.6
 ```
 
 The package exposes one executable:
@@ -77,10 +77,12 @@ mdr hermes routines
 mdr hermes routines --apply
 ```
 
-This creates six base Routines: a script-only Coordinator tick and one script-gated worker per
-specialist. Each living Review also gets one visible, script-only Routine at its actual cadence.
-Stable idle minutes use zero model calls. Verify profiles, `mdr`, multiplexing, cron schedulers,
-managed scripts/jobs, and cron health with:
+This creates six base Routines: a script-only Coordinator tick, a script-only serial Selector
+runner, and one script-gated worker for each other specialist. The Selector runner claims exactly
+one article, opens one fresh Selector session for it, and starts the next one immediately after an
+accepted decision until its queue is empty. Each living Review also gets one visible, script-only
+Routine at its actual cadence. Stable idle minutes use zero model calls. Verify profiles, `mdr`,
+multiplexing, cron schedulers, managed scripts/jobs, and cron health with:
 
 ```bash
 mdr hermes doctor
@@ -142,6 +144,8 @@ submit, and failure commands. Failures retry after 5 and 30 minutes; the third b
 Searcher claim also returns one `search execute` command that records the initial plan and performs
 retrieval in one bounded operation. The Searcher profile has an eight-turn ceiling. A retry resumes
 the materialized child search with the same frozen plan; changing it requires a new Review fork.
+Selector work keeps the same one-article packet and receipt contract. Its serial runner uses a fresh
+host session per article and has no success-path pause or article-count cutoff.
 
 The older explicit-ID commands remain operator diagnostics for non-managed Runs:
 

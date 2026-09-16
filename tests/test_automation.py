@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +12,7 @@ import pytest
 from test_research import completed_search
 
 from hermes_medical_research.automation import AutomationEngine
-from hermes_medical_research.hermes import _routine_specs, routines
+from hermes_medical_research.hermes import _routine_specs, drain_selector, routines
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, TaskEngine
 
@@ -208,8 +210,106 @@ def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
         if not job["no_agent"]:
             assert f"--actor {job['profile']}" in job["prompt"]
     selector = next(job for job in result["jobs"] if job["profile"] == "mdr-selector")
-    assert "up to 10 accepted tasks" in selector["prompt"]
+    assert selector["no_agent"]
+    assert selector["script"] == "mdr-work-selector.sh"
+    assert selector["prompt"] == ""
     assert not (tmp_path / "hermes").exists()
+
+
+def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path, monkeypatch):
+    automation = AutomationEngine(tmp_path / "store")
+    created = automation.create_review(
+        "serial-selection",
+        protocol(),
+        schedule="once",
+        timezone="Asia/Seoul",
+    )
+    run_id = automation.review_status(created["name"])["cycles"][0]["run_id"]
+    workspace = automation.catalog.workspace(run_id)
+    search, _ = completed_search(workspace, tmp_path / "search", count=12)
+    workspace.attach(search.path)
+    asyncio.run(automation.tick())
+    sessions: list[str] = []
+
+    def accept_one(_executable, _home, claim, actor):
+        packet = json.loads(Path(claim["packet_path"]).read_text())
+        assert len(packet["target_ids"]) == 1
+        proposal_path = Path(claim["proposal_path"])
+        proposal = json.loads(proposal_path.read_text())
+        proposal["stages"]["screening"]["records"][0].update(
+            decision="exclude",
+            reason="Fails the synthetic eligibility criteria.",
+        )
+        proposal_path.write_text(json.dumps(proposal))
+        asyncio.run(
+            TaskEngine(workspace).submit(
+                "select",
+                claim["task_id"],
+                proposal_path,
+                actor,
+                claim_token=claim["claim_token"],
+            )
+        )
+        sessions.append(actor.session_id)
+        return subprocess.CompletedProcess([], 0, "accepted", "")
+
+    monkeypatch.setattr(
+        "hermes_medical_research.hermes.shutil.which",
+        lambda name: "/opt/hermes" if name == "hermes" else None,
+    )
+    result = drain_selector(
+        store=tmp_path / "store",
+        hermes_home=tmp_path / "hermes",
+        invoke=accept_one,
+    )
+
+    assert result == {"state": "drained", "processed": 12}
+    assert len(sessions) == len(set(sessions)) == 12
+    assert len(workspace.rows("screening")) == 12
+
+
+def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, monkeypatch):
+    automation = AutomationEngine(tmp_path / "store")
+    created = automation.create_review(
+        "failed-selection",
+        protocol(),
+        schedule="once",
+        timezone="Asia/Seoul",
+    )
+    run_id = automation.review_status(created["name"])["cycles"][0]["run_id"]
+    workspace = automation.catalog.workspace(run_id)
+    search, _ = completed_search(workspace, tmp_path / "search", count=1)
+    workspace.attach(search.path)
+    asyncio.run(automation.tick())
+
+    def fail_one(_executable, _home, claim, actor):
+        automation.fail(
+            claim["claim_id"],
+            actor,
+            code="fixture_failure",
+            message="The host recorded its exact fail command.",
+        )
+        return subprocess.CompletedProcess([], 0, "failed", "")
+
+    monkeypatch.setattr(
+        "hermes_medical_research.hermes.shutil.which",
+        lambda name: "/opt/hermes" if name == "hermes" else None,
+    )
+    with pytest.raises(ValidationError, match="recorded task .* as pending"):
+        drain_selector(
+            store=tmp_path / "store",
+            hermes_home=tmp_path / "hermes",
+            invoke=fail_one,
+        )
+
+    task = next(
+        task
+        for task in workspace.load()["task_engine"]["tasks"].values()
+        if task["role"] == "selector"
+    )
+    assert task["state"] == "pending"
+    assert task["automation_attempts"] == 1
+    assert len(task["automation_failures"]) == 1
 
 
 def test_routine_scripts_pin_the_mdr_executable(tmp_path: Path, monkeypatch):
@@ -218,13 +318,21 @@ def test_routine_scripts_pin_the_mdr_executable(tmp_path: Path, monkeypatch):
     executable.touch()
     monkeypatch.setattr(
         "hermes_medical_research.hermes.shutil.which",
-        lambda name: str(executable) if name == "mdr" else None,
+        lambda name: (
+            str(executable)
+            if name == "mdr"
+            else "/opt/hermes/bin/hermes"
+            if name == "hermes"
+            else None
+        ),
     )
 
     _, scripts = _routine_specs(tmp_path / "store", tmp_path / "hermes")
 
     assert scripts
     assert all(f"exec {executable} ".encode() in content for content in scripts.values())
+    selector = scripts["mdr-selector/scripts/mdr-work-selector.sh"]
+    assert b"--hermes-executable /opt/hermes/bin/hermes" in selector
 
 
 def test_living_review_adds_real_cadence_routine(tmp_path: Path):
