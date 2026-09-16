@@ -21,7 +21,7 @@ class Credentials:
         values = env if env is not None else os.environ
         return cls(
             ncbi_email=_clean(values.get("NCBI_EMAIL")),
-            ncbi_api_key=_clean(values.get("NCBI_API_KEY")),
+            ncbi_api_key=_clean(values.get("NCBI_API_KEY") or values.get("PUBMED_API_KEY")),
             openalex_api_key=_clean(values.get("OPENALEX_API_KEY")),
             semantic_scholar_api_key=_clean(
                 values.get("SEMANTIC_SCHOLAR_API_KEY") or values.get("S2_API_KEY")
@@ -38,14 +38,16 @@ class Credentials:
             "europe-pmc": {"configured": True, "required": []},
             "clinicaltrials": {"configured": True, "required": []},
             "pubmed": {
-                "configured": bool(self.ncbi_email),
-                "required": ["NCBI_EMAIL"],
-                "optional_configured": bool(self.ncbi_api_key),
+                "configured": True,
+                "required": [],
+                "optional_configured": bool(self.ncbi_email or self.ncbi_api_key),
+                "optional": ["NCBI_EMAIL", "NCBI_API_KEY"],
             },
             "pmc": {
-                "configured": bool(self.ncbi_email),
-                "required": ["NCBI_EMAIL"],
-                "optional_configured": bool(self.ncbi_api_key),
+                "configured": True,
+                "required": [],
+                "optional_configured": bool(self.ncbi_email or self.ncbi_api_key),
+                "optional": ["NCBI_EMAIL", "NCBI_API_KEY"],
             },
             "openalex": {
                 "configured": True,

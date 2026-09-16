@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2 - 2026-09-16
+
+- Made bounded PubMed and PMC retrieval available without requiring an NCBI email, while retaining
+  optional email/API-key support and accepting `PUBMED_API_KEY` as an alias for `NCBI_API_KEY`.
+- Added explicit `operator: any` concept blocks so alternative intervention families compile with
+  `OR` and are scored by their strongest matching family; compound concepts remain `operator: all`.
+- Taught the Coordinator to distinguish alternative modalities from jointly required concepts.
+
 ## 0.5.1 - 2026-09-16
 
 - Fixed an atomicity defect that erased a search budget reservation immediately after creating its

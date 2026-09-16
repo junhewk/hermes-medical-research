@@ -55,7 +55,11 @@ def _s2_group(group: ConceptGroup) -> str:
 
 
 def _component(question: Question, name: str, formatter: GroupFormatter, *, joiner: str) -> str:
-    return joiner.join(formatter(group) for group in question.components[name].groups)
+    block = question.components[name]
+    parts = [formatter(group) for group in block.groups]
+    if block.operator == "any":
+        return _or_group(parts, operator=" | " if joiner == " + " else " OR ")
+    return joiner.join(parts)
 
 
 def _blocks(question: Question) -> tuple[list[str], list[str]]:

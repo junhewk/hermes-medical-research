@@ -62,15 +62,14 @@ class NCBIProvider(Provider):
         self.source = database
 
     def _params(self, **values: Any) -> dict[str, Any]:
-        if not self.credentials.ncbi_email:
-            raise SourceError(f"{self.source} requires NCBI_EMAIL")
         params = {
             "db": self.database,
             "retmode": "json",
             "tool": "hermes-medical-research",
-            "email": self.credentials.ncbi_email,
             **values,
         }
+        if self.credentials.ncbi_email:
+            params["email"] = self.credentials.ncbi_email
         if self.credentials.ncbi_api_key:
             params["api_key"] = self.credentials.ncbi_api_key
         return params
@@ -402,9 +401,6 @@ class MeshResolver:
 
     async def resolve_question(self, question: Question) -> list[str]:
         warnings: list[str] = []
-        if not self.credentials.ncbi_email:
-            warnings.append("MeSH resolution skipped because NCBI_EMAIL is not configured.")
-            return warnings
         for name, block in question.components.items():
             for group in block.groups:
                 candidates = list(dict.fromkeys([*group.candidate_mesh, group.text]))[:6]
@@ -442,8 +438,9 @@ class MeshResolver:
             "retmode": "json",
             "retmax": 3,
             "tool": "hermes-medical-research",
-            "email": self.credentials.ncbi_email,
         }
+        if self.credentials.ncbi_email:
+            params["email"] = self.credentials.ncbi_email
         if self.credentials.ncbi_api_key:
             params["api_key"] = self.credentials.ncbi_api_key
         data = await self.session.json("ncbi", f"{NCBI_BASE}/esearch.fcgi", params=params)

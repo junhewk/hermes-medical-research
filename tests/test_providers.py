@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from hermes_medical_research.search.config import Credentials
-from hermes_medical_research.search.http import HttpSession, SourceError
+from hermes_medical_research.search.http import HttpSession
 from hermes_medical_research.search.models import Question
 from hermes_medical_research.search.providers import (
     MeshResolver,
@@ -94,11 +94,32 @@ async def test_ncbi_count_fetch_and_mesh_resolution() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ncbi_requires_contact_email() -> None:
-    async with HttpSession(transport=httpx.MockTransport(lambda _: httpx.Response(500))) as session:
+async def test_ncbi_allows_bounded_anonymous_requests() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["tool"] == "hermes-medical-research"
+        assert "email" not in request.url.params
+        assert "api_key" not in request.url.params
+        return httpx.Response(200, json={"esearchresult": {"count": "1", "idlist": []}})
+
+    async with HttpSession(
+        intervals={"ncbi": 0}, transport=httpx.MockTransport(handler)
+    ) as session:
         provider = NCBIProvider(session, Credentials(), database="pubmed")
-        with pytest.raises(SourceError, match="NCBI_EMAIL"):
-            await provider.count(strategy_for("pubmed"))
+        assert await provider.count(strategy_for("pubmed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_ncbi_accepts_pubmed_api_key_alias() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["api_key"] == "alias-key"
+        return httpx.Response(200, json={"esearchresult": {"count": "1", "idlist": []}})
+
+    credentials = Credentials.from_env({"PUBMED_API_KEY": "alias-key"})
+    async with HttpSession(
+        intervals={"ncbi": 0}, transport=httpx.MockTransport(handler)
+    ) as session:
+        provider = NCBIProvider(session, credentials, database="pubmed")
+        assert await provider.count(strategy_for("pubmed")) == 1
 
 
 @pytest.mark.asyncio

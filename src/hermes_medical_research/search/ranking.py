@@ -233,9 +233,8 @@ def _relevance_details(
     }
     if question.schema_version == "3":
         selected = [
-            score
-            for key, score in group_scores.items()
-            if key.split(".", 1)[0] in question.search_components
+            _component_score(question.components[name], name, group_scores)
+            for name in question.search_components
         ]
         return min(selected, default=0.0) * 0.7 + query_score * 0.3, group_scores
     population = _component_score(question.components["population"], "population", group_scores)
@@ -378,7 +377,8 @@ def _component_score(
     component: str,
     group_scores: dict[str, float],
 ) -> float:
-    return min(group_scores[f"{component}.{group.label}"] for group in block.groups)
+    scores = [group_scores[f"{component}.{group.label}"] for group in block.groups]
+    return max(scores) if block.operator == "any" else min(scores)
 
 
 def _terms_score(terms: list[str], haystack: str, haystack_tokens: set[str]) -> float:

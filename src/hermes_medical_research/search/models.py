@@ -181,6 +181,7 @@ class ConceptGroup:
 @dataclass(slots=True)
 class ConceptBlock:
     groups: list[ConceptGroup]
+    operator: str = "all"
 
     @classmethod
     def from_dict(cls, data: Any, name: str, *, schema_version: str) -> ConceptBlock:
@@ -191,6 +192,9 @@ class ConceptBlock:
             legacy = dict(data)
             legacy["label"] = name
             return cls(groups=[ConceptGroup.from_dict(legacy, field_name)])
+        operator = str(data.get("operator", "all")).strip().casefold()
+        if operator not in {"all", "any"}:
+            raise ValidationError(f"{field_name}.operator must be 'all' or 'any'")
         raw_groups = data.get("groups")
         if not isinstance(raw_groups, list) or not raw_groups:
             raise ValidationError(f"{field_name}.groups must be a non-empty array")
@@ -201,7 +205,7 @@ class ConceptBlock:
         labels = [group.label.casefold() for group in groups]
         if len(labels) != len(set(labels)):
             raise ValidationError(f"{field_name}.groups labels must be unique")
-        return cls(groups=groups)
+        return cls(groups=groups, operator=operator)
 
     def free_terms(self) -> list[str]:
         return _dedupe([term for group in self.groups for term in group.free_terms()])
@@ -210,7 +214,10 @@ class ConceptBlock:
         return _dedupe([term for group in self.groups for term in group.all_terms()])
 
     def to_dict(self) -> dict[str, Any]:
-        return {"groups": [group.to_dict() for group in self.groups]}
+        result: dict[str, Any] = {"groups": [group.to_dict() for group in self.groups]}
+        if self.operator != "all":
+            result["operator"] = self.operator
+        return result
 
 
 @dataclass(slots=True)

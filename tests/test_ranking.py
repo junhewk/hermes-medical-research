@@ -154,6 +154,38 @@ def test_compound_concept_uses_weakest_required_group() -> None:
     assert ranked[0]["ranking"]["group_relevance"]["concept.training focus"] == 1.0
 
 
+def test_any_component_uses_strongest_alternative_group() -> None:
+    alternatives = Question.from_dict(
+        {
+            "schema_version": "3",
+            "framework": "PICO",
+            "question": "AI interventions for medical students",
+            "components": {
+                "population": {
+                    "groups": [{"label": "learners", "text": "medical students"}]
+                },
+                "intervention": {
+                    "operator": "any",
+                    "groups": [
+                        {"label": "tutors", "text": "conversational AI tutors"},
+                        {"label": "patients", "text": "AI virtual patients"},
+                    ],
+                },
+            },
+            "search_components": ["population", "intervention"],
+        }
+    )
+    tutor = record(
+        title="Conversational AI tutors for medical students",
+        abstract="A randomized educational study.",
+    )
+    unrelated = record(
+        title="Clinical simulation for medical students",
+        abstract="A randomized educational study.",
+    )
+    assert relevance_score(tutor, alternatives) > relevance_score(unrelated, alternatives)
+
+
 def test_ranking_is_reproducible_for_a_fixed_as_of_date() -> None:
     records = [record(), record(doi="10.1000/other", title="Cohort study of CGM in T2DM adults")]
     first = rank_records(records, question(), today=date(2026, 1, 15))

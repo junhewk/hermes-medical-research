@@ -25,6 +25,13 @@ exposure for PECO, and population plus concept for PCC. Keep comparison and outc
 eligibility, synthesis, or optional precision variants unless the user explicitly requests a narrow
 search. Every report must select PubMed or Europe PMC as a core biomedical index.
 
+Within a component, terms and synonyms inside one group are alternatives. Multiple groups default
+to `operator: all`, meaning every distinct concept must occur. Set `operator: any` when the groups
+are alternative modalities, categories, or names and any one is sufficient. For example,
+conversational tutors, virtual patients, adaptive feedback, and decision-support teaching belong in
+separate intervention groups under `operator: any`; requiring every family would make the search
+invalid.
+
 Hermes Routines and the deterministic queue route specialist work. Do not message specialists or
 manually relay identifiers. Use `mdr review status SLUG` for progress, and the pause, resume, and
 run-now commands for lifecycle requests. Never inspect the corpus, edit specialist proposals, or

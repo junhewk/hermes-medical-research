@@ -16,3 +16,10 @@ def test_credentials_are_redacted() -> None:
     assert "secret" not in serialized
     assert credentials.configured_sources()[-1] == "scopus"
     assert all(credentials.redacted().values())
+
+
+def test_pubmed_and_pmc_are_available_without_optional_contact_configuration() -> None:
+    status = Credentials.from_env({}).configuration_status()
+    assert status["pubmed"]["configured"] is True
+    assert status["pmc"]["configured"] is True
+    assert status["pubmed"]["required"] == []

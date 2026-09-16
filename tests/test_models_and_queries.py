@@ -82,6 +82,23 @@ def test_v2_rejects_empty_groups_and_duplicate_labels() -> None:
         Question.from_dict(base)
 
 
+def test_component_operator_rejects_unknown_value() -> None:
+    payload = {
+        "schema_version": "3",
+        "framework": "PICO",
+        "question": "Question",
+        "components": {
+            "population": {"groups": [{"label": "people", "text": "medical students"}]},
+            "intervention": {
+                "operator": "either",
+                "groups": [{"label": "tool", "text": "large language model"}],
+            },
+        },
+    }
+    with pytest.raises(ValidationError, match="operator must be 'all' or 'any'"):
+        Question.from_dict(payload)
+
+
 def test_question_rejects_unknown_source_and_bad_date() -> None:
     payload = pico_question().to_dict()
     payload["sources"] = ["google-scholar"]
@@ -200,6 +217,49 @@ def test_pcc_default_excludes_context_but_preserves_precision_variant() -> None:
     assert '"Artificial Intelligence"' in scopus.query
     assert "communication skills training" in scopus.query
     assert "undergraduate medical education" not in scopus.query
+
+
+def test_any_component_ors_alternative_families_and_round_trips() -> None:
+    question = Question.from_dict(
+        {
+            "schema_version": "3",
+            "framework": "PICO",
+            "question": "AI interventions in medical education",
+            "components": {
+                "population": {
+                    "groups": [{"label": "learners", "text": "medical students"}]
+                },
+                "intervention": {
+                    "operator": "any",
+                    "groups": [
+                        {"label": "tutors", "text": "conversational AI tutors"},
+                        {"label": "patients", "text": "AI virtual patients"},
+                    ],
+                },
+            },
+            "search_components": ["population", "intervention"],
+        }
+    )
+    strategy = compile_strategy(
+        question,
+        mode="quick",
+        limit_per_source=20,
+        sources=["pubmed", "openalex", "semantic-scholar"],
+    )
+    pubmed = strategy.strategies["pubmed"].query
+    assert '("conversational AI tutors"[tiab] OR "AI virtual patients"[tiab])' in pubmed
+    assert '"medical students"[tiab] AND ' in pubmed
+    assert '"conversational AI tutors"[tiab] AND "AI virtual patients"[tiab]' not in pubmed
+    openalex = strategy.strategies["openalex"].query
+    assert '("conversational AI tutors" OR "AI virtual patients")' in openalex
+    bulk = compile_strategy(
+        question,
+        mode="review",
+        limit_per_source="all",
+        sources=["semantic-scholar"],
+    ).strategies["semantic-scholar"].query
+    assert '("conversational AI tutors" | "AI virtual patients")' in bulk
+    assert Question.from_dict(question.to_dict()).to_dict() == question.to_dict()
 
 
 def test_review_supports_per_source_variants_and_selected_request_parameters() -> None:
