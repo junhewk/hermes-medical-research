@@ -1,6 +1,6 @@
 # ADR 0001: Hermes skills over a deterministic CLI
 
-- Status: accepted; Bot-to-Bot routing superseded in part by ADR 0002
+- Status: accepted; Bot-to-Bot routing superseded in part by ADR 0002; rename gate superseded by ADR 0003
 - Date: 2026-09-15
 
 ## Context
@@ -36,5 +36,5 @@ through the connected Hermes gateway. ADR 0002 replaces direct Bot-to-Bot routin
   produces a digest-bound receipt.
 - Audit revisions go back to a non-auditor specialist, preserving role independence.
 - v0.4 migration is copy-on-import and archives prior review/completion artifacts as provenance.
-- A selector terminal pilot is the first operational gate. Three clean full runs are required before
-  the GitHub repository is renamed.
+- A selector terminal pilot is the first operational gate. Three clean full runs were originally
+  required before the GitHub repository was renamed; ADR 0003 records the earlier split and rename.

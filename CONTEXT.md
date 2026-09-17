@@ -19,6 +19,12 @@ own task scope, validate its own citations, or declare the run complete.
   immutable result file.
 - A **Lease** is a 60-minute, session-bound capability to perform one cron-managed Task. Failed
   Leases retry after 5 and 30 minutes and the third failure blocks the Cycle.
+- An **Outcome decision** (a `dispositions` row) records, for one assessed record, whether each
+  protocol outcome was extracted, not reported, or not applicable, with the locations inspected.
+- A **Runner** is a script-only Routine that claims one Task at a time for one role and starts one
+  fresh Hermes session per Task with an instruction file of exact commands.
+- A **Halt** stops a Run when an audit group stays unresolved after two corrections; an operator
+  clears it with `mdr review retry`.
 - The **Outbox** carries only completed, no-change, and blocked Cycle notifications to Coordinator.
 - The **Corpus** is the search and source material owned by the CLI. Bots access it only through a
   bounded Task packet or paginated `mdr source show` calls.
@@ -33,7 +39,8 @@ own task scope, validate its own citations, or declare the run complete.
    store carries all substantive data.
 2. The CLI owns schemas, exact coverage, citations, digests, legal transitions, and completion.
 3. Task inputs and accepted results are immutable and content-addressed. Stale proposals fail closed.
-4. Work is deliberately small: one record, one outcome, or one audit group per Task.
+4. Work is deliberately small: one record, one outcome, or one audit group per Task, and one fresh
+   Hermes session per Task.
 5. Hermes integration uses public profile, skill, terminal, file, and Bot Mode surfaces only.
 6. Bootstrap is non-mutating by default and never overwrites an unmanaged or locally edited profile.
 7. v0.4 runs may be copied into the shared store, but old host-native review remains provenance only;

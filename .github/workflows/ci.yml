@@ -20,9 +20,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --locked --extra dev
+      - name: Whitespace check across the tree
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
       - run: uv run ruff check .
       - run: uv run pytest
       - run: uv build
-      - run: uv run mdr --version
-      - run: uv run mdr hermes bootstrap
-      - run: uv run mdr hermes routines
+      - name: Wheel-only smoke test
+        # Dry-run bootstrap and routine planning must never touch the runner's real data home.
+        run: |
+          export MDR_HOME="$RUNNER_TEMP/mdr-store" HERMES_HOME="$RUNNER_TEMP/hermes-home"
+          uv venv "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/mdr" --version
+          "$RUNNER_TEMP/wheel-venv/bin/mdr" hermes bootstrap
+          "$RUNNER_TEMP/wheel-venv/bin/mdr" hermes routines

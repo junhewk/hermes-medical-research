@@ -372,7 +372,7 @@ wheels = [
 
 [[package]]
 name = "hermes-medical-research"
-version = "0.5.7"
+version = "0.5.8"
 source = { editable = "." }
 dependencies = [
     { name = "defusedxml" },

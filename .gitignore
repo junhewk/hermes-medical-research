@@ -9,6 +9,8 @@ runs/
 .env
 .board/
 .hermes-test-*/
+.agents/
+.codex/
 
 # Local implementation and validation handoff; intentionally not published.
 /LOCAL_STATE.md

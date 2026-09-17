@@ -11,9 +11,9 @@ This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 Install directly from the GitHub repository with a Python tool installer:
 
 ```bash
-uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.7
+uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.8
 # or
-pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.7
+pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.8
 ```
 
 The package exposes one executable:
@@ -77,15 +77,37 @@ mdr hermes routines
 mdr hermes routines --apply
 ```
 
-This creates six base Routines: a script-only Coordinator tick, a script-only serial Selector
-runner, and one script-gated worker for each other specialist. The Selector runner claims exactly
-one article, opens one fresh Selector session for it, and starts the next one immediately after an
-accepted decision until its queue is empty. Each living Review also gets one visible, script-only
-Routine at its actual cadence. Stable idle minutes use zero model calls. Verify profiles, `mdr`,
-multiplexing, cron schedulers, managed scripts/jobs, and cron health with:
+This creates six base Routines, all script-only: a Coordinator tick and one serial runner per
+specialist (`mdr hermes drain --role ROLE`). A runner claims exactly one Task, opens one fresh Hermes
+session for it with an instruction file of exact commands, and claims the next Task immediately after
+acceptance until its queue is empty. A session that cannot finish its Task is failed with backoff and
+the runner moves on. Full-text acquisition has no semantic choice and is submitted without a model
+session. Each living Review also gets one visible, script-only Routine at its actual cadence. Stable
+idle minutes use zero model calls.
+
+Each session has a model-turn ceiling set in its profile:
+
+| Profile | Turn ceiling |
+| --- | --- |
+| `mdr-searcher` | 8 |
+| `mdr-selector` | 16 |
+| `mdr-extractor` | 60 |
+| `mdr-synthesizer` | 40 |
+| `mdr-auditor` | 48 |
+
+Verify profiles, `mdr`, multiplexing, cron schedulers, managed scripts/jobs, cron health, and paused
+Routines with:
 
 ```bash
 mdr hermes doctor
+```
+
+Hermes keeps its own pause state for each Routine. Inspect or change all managed Routines at once:
+
+```bash
+mdr hermes routines --status
+mdr hermes routines --pause-all
+mdr hermes routines --resume-all
 ```
 
 ## Workflow
@@ -108,14 +130,20 @@ mdr review list
 mdr review status living-exercise
 mdr review pause living-exercise
 mdr review resume living-exercise
+mdr --actor mdr-coordinator review retry living-exercise \
+  --reason "Workers were restarted after an outage"
 mdr --actor mdr-coordinator review cancel living-exercise \
   --reason "Replace a blocked or defective Cycle"
 mdr review run-now living-exercise
 ```
 
-An immutable protocol change uses `mdr review fork`; a standalone Run can be brought under human
-status management with `mdr review adopt`. A living Review starts its first Cycle immediately.
-Schedule fires during an active Cycle coalesce into one catch-up Cycle.
+Pausing a Review stops new claims and never marks its waiting Tasks abandoned; resuming restarts that
+clock. A pending Task that no worker claims within 95 active minutes blocks the Cycle. `review retry`
+reopens a blocked latest Cycle in place: blocked Tasks return to the queue with fresh attempts and
+keep any partial proposal edits, and all accepted work is kept. `review run-now` instead starts a new
+Cycle on a new Run. An immutable protocol change uses `mdr review fork`; a standalone Run can be
+brought under human status management with `mdr review adopt`. A living Review starts its first
+Cycle immediately. Schedule fires during an active Cycle coalesce into one catch-up Cycle.
 
 For scripted or diagnostic use, create a Run from a versioned PICO/PCC request:
 
@@ -129,7 +157,7 @@ The Coordinator can inspect a standalone Run diagnostically:
 mdr --actor mdr-coordinator run next RUN_ID
 ```
 
-Cron workers normally use global claim commands:
+Serial runners claim work for their sessions. For diagnostics, a worker profile can claim directly:
 
 ```bash
 mdr search claim
@@ -140,12 +168,12 @@ mdr audit claim
 ```
 
 Each claim returns a bounded packet/proposal, a 60-minute session-bound token, and exact source,
-submit, and failure commands. Failures retry after 5 and 30 minutes; the third blocks the Cycle. The
-Searcher claim also returns one `search execute` command that records the initial plan and performs
-retrieval in one bounded operation. The Searcher profile has an eight-turn ceiling. A retry resumes
-the materialized child search with the same frozen plan; changing it requires a new Review fork.
-Selector work keeps the same one-article packet and receipt contract. Its serial runner uses a fresh
-host session per article and has no success-path pause or article-count cutoff.
+submit, and failure commands that name the resolved `mdr` executable. Failures retry after 5 and 30
+minutes; the third blocks the Cycle. Accepting any Task routes the next Task at once, so the
+Coordinator tick is a safety net rather than a one-Task-per-minute throttle. The Searcher claim also
+returns one `search execute` command that records the initial plan and performs retrieval in one
+bounded operation. A retry resumes the materialized child search with the same frozen plan; changing
+it requires a new Review fork.
 
 The older explicit-ID commands remain operator diagnostics for non-managed Runs:
 
@@ -168,12 +196,29 @@ mdr audit submit RUN_ID TASK_ID --from PROPOSAL.json
 ```
 
 Hermes profiles normally provide actor/session identity. `--actor` exists for deterministic testing
-and recovery. An active Task can read only allowed sources, in pages no larger than 16 KiB:
+and recovery; global options such as `--actor`, `--store`, and `--claim-token` may appear before or
+after the subcommand. An active Task can read only allowed sources. `find` ranks the locators of the
+Task's documents by search words with short snippets, and `read` returns one locator's exact text for
+verbatim quotes. `show` pages a whole source, including logical rows, in 16 KiB pages:
 
 ```bash
+mdr source find RUN_ID TASK_ID Mini-CEX satisfaction survey
+mdr source read RUN_ID TASK_ID DOCUMENT_ID table:1
 mdr source list RUN_ID TASK_ID --page 1
 mdr source show RUN_ID TASK_ID SOURCE_ID --page 1
 ```
+
+## Outcome decisions
+
+Every selected record must decide every protocol outcome. An assessment Task seeds one extraction and
+appraisal scaffold per protocol outcome, bound by `protocol_outcome`, plus one `dispositions` row
+with an `outcome_checklist` of likely source locations. The Extractor fills the rows for outcomes the
+record reports and marks each other outcome `not_reported` or `not_applicable` with a rationale and
+the locations it inspected. Submissions that leave any outcome undecided are rejected, untouched
+scaffolds are removed, synthesis links evidence by `protocol_outcome`, and each disposition row is
+audited against the full text. Exports include `dispositions.csv` and a per-outcome decision table.
+Runs that recorded extractions before 0.5.8 keep validating, with an explicit warning that
+per-outcome completeness was not verified.
 
 After all audit groups pass:
 
@@ -202,9 +247,11 @@ eligibility, synthesis, or a documented precision variant.
 - Search snapshots, evidence revisions, audit results, and exports are content-addressed.
 - Parent search reservations and Task child links are committed together; interrupted child runs
   recreate a missing idempotent reservation before retrieval resumes.
-- Audit receipts bind every reviewed finding/report target to an independent Auditor profile and
-  frozen Candidate digest.
-- `revise` routes a correction to the responsible specialist and supersedes stale audit Tasks.
+- Audit receipts bind every reviewed finding/report target to an independent Auditor profile and to
+  a digest of the target's assertion and every source it may be checked against. Report targets are
+  audited in record-level groups; unchanged groups keep their receipts when other evidence changes.
+- An audit verdict of `revise` returns one audit group at a time to the responsible specialist. A
+  group still unresolved after two corrections halts the Run until an operator runs `review retry`.
 - Citation document IDs, locators, and verbatim quotes are checked against the stored corpus.
 - Deterministic checks establish traceability and consistency, not clinical truth; semantic review is
   still the responsibility of the isolated specialist profiles.
@@ -212,7 +259,7 @@ eligibility, synthesis, or a documented precision variant.
 Living Reviews freeze and replay their accepted search plan. Corpus identity prefers DOI, then PMID,
 PMCID, and source/source-ID. Digest-identical work receives an immutable reuse receipt; changed
 metadata or retraction state is rescreened. An unchanged refresh records a checkpoint referring to
-the prior report and skips downstream inference. A changed Candidate always receives a fresh audit.
+the prior report and skips downstream inference. Changed audit targets always receive a fresh audit.
 
 ## v0.4 migration
 
@@ -223,7 +270,8 @@ mdr run migrate /absolute/path/to/v0.4-run
 ```
 
 The source is never modified. Existing native-review, completion, verification, and review artifacts
-are archived under `provenance/v0.4`; a fresh v0.5 independent audit is mandatory.
+are archived under `provenance/v0.4`; a fresh independent audit under the current audit contract is
+mandatory.
 
 ## Qualification and development
 
@@ -255,5 +303,6 @@ uv build
 
 See [project context](CONTEXT.md), the
 [CLI architecture decision](docs/adr/0001-hermes-skills-over-deterministic-cli.md), the
-[cron architecture decision](docs/adr/0002-cron-backed-review-automation.md), and
+[cron architecture decision](docs/adr/0002-cron-backed-review-automation.md), the
+[serial runner decision](docs/adr/0003-serial-runners-and-outcome-decisions.md), and
 [validation status](VALIDATION.md).

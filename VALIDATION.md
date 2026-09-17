@@ -26,6 +26,17 @@ The v0.5 cutover is covered by the repository test suite. Its new architecture c
   cancellation;
 - frozen living-review strategy validation, cumulative canonical corpus merge, source-digest reuse
   receipts, changed-source invalidation, and predecessor-linked no-change checkpoints;
+- relevance-ranked screening order after corpus attachment (0.5.7);
+- per-outcome decisions (0.5.8): scaffolds bound to each protocol outcome, rejection of undecided
+  outcomes and of extractions bound to unreported outcomes, scaffold pruning, all-unreported
+  records, routing that reopens a record without decisions, synthesis linkage by
+  `protocol_outcome`, disposition audit targets and corrections, legacy-run warnings, bounded
+  `source find`/`source read` access, and an end-to-end audited export with three findings;
+- orchestration (0.5.8): continuation into the next role without a tick, paused Reviews that are
+  unclaimable and never abandoned, in-place `review retry` that keeps partial proposals, runner
+  failure handling that does not stop the queue, deterministic full-text submission, per-record
+  audit groups with screening batches, content-bound audit reuse after a changed record, correction
+  halts, and routine pause controls through Hermes's public cron CLI;
 - the retained retrieval, evidence, appraisal, synthesis, verification, and export behavior.
 
 Run locally with:
@@ -37,8 +48,9 @@ uv run pytest
 uv build
 ```
 
-The final local run on 2026-09-16 collected and passed 185 tests; Ruff, `git diff --check`, wheel
-construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed.
+The 0.5.8 local run on 2026-09-17 collected and passed 211 tests; Ruff, `git diff --check`, wheel
+construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed. The
+final count is updated with each release commit.
 
 ## Hermes operational gates
 
@@ -64,22 +76,25 @@ The earlier two-session Selector terminal gate passed: both fresh chats returned
 Run. The retained artifact is
 `/tmp/hermes-medical-research-v0.5-codex-20260915/selector-qualification-2.json` on that host.
 
-On 2026-09-16, the six profiles were also installed into the live `/home/jk/.hermes` registry used
-by Hermes Agent 0.21.3 and the macOS remote gateway. Bot Mode discovered them automatically, and a
+On 2026-09-16, the six profiles were also installed into the live `~/.hermes` registry on
+`jkworkstation`, used by Hermes Agent 0.21.3 and the macOS remote gateway. Bot Mode discovered them automatically, and a
 manual Selector task submitted through the macOS Bot roster produced one accepted CLI receipt. This
 result qualifies terminal access but predates ADR 0002. The cron fleet, multiplexed gateway, three
 full Reviews, and living-review gates have not yet been qualified.
 
-## Release and repository rename gate
+### Extractor qualification (2026-09-16, 0.5.7)
 
-The GitHub repository must remain at its current name until all three full Hermes runs pass. After a
-passing qualification artifact is reviewed, rename the repository to `hermes-medical-research`,
-update its description/topics, tag `v0.5.0`, and verify the GitHub-based `uv tool` and `pipx`
-installation examples. There is no PyPI or plugin-ZIP release in this design.
+A bounded linked Run on `jkworkstation` acquired three full texts and recorded eight extraction and
+appraisal pairs. A separate reviewer verified all 8 extraction quotes, 31 appraisal quotes, locators,
+and numerical transcriptions, but found that one trial's Mini-CEX and satisfaction outcomes were never
+extracted. That gap motivated the 0.5.8 outcome-decision contract. The run is retained unchanged as
+provenance; it is not a qualification of 0.5.8.
 
-After the gate, the intended rename is:
+## Repository and release record
 
-```bash
-gh repo rename hermes-medical-research --repo junhewk/medical-deep-research-plugin
-git remote set-url origin git@github.com:junhewk/hermes-medical-research.git
-```
+On 2026-09-17 the Hermes line split from the Claude Code/Codex plugin line. GitHub
+`junhewk/medical-deep-research-plugin` was renamed `junhewk/hermes-medical-research`; the 0.4.0
+plugin line remains on branch `legacy/claude-codex-0.4` and tag `v0.4.0`. Releases are Git tags
+installed with `uv tool install` or `pipx install` from the repository. There is no PyPI or
+plugin-ZIP release in this design. The cron fleet, multiplexed gateway, three full Reviews, and
+living-review gates above remain open until recorded here.

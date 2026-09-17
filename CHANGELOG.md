@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.8 - 2026-09-17
+
+- Made assessment completeness deterministic. Each selected record now needs a `dispositions` row
+  that marks every protocol outcome `extracted`, `not_reported`, or `not_applicable`, with inspected
+  locations for unreported outcomes. Extraction rows bind to `protocol_outcome`; submissions that
+  leave an outcome undecided are rejected and routing reopens a record without its decisions.
+- Seeded one prefilled extraction/appraisal scaffold per protocol outcome, an `outcome_checklist` of
+  likely source locations, and deterministic pruning of untouched scaffolds.
+- Linked synthesis evidence through `protocol_outcome`, listed unreported records in synthesis
+  packets, bounded synthesis packet size, audited disposition rows against full text, and exported
+  `dispositions.csv` with a per-outcome decision table. Runs that recorded extractions before the
+  contract keep validating with an explicit warning.
+- Added `mdr source find` and `mdr source read` for locator-level access to tables and results, and
+  accepted global options after the subcommand.
+- Replaced the agent-prompt workers with script-only serial runners for every role
+  (`mdr hermes drain --role`). Each Task gets one fresh Hermes session with an instruction file of
+  exact commands and a per-role turn ceiling. An unfinished Task is failed with backoff instead of
+  aborting the queue, and full-text acquisition is submitted without a model session.
+- Routed the next Task immediately after any acceptance, closed claim records on acceptance, and
+  pinned the resolved `mdr` executable in every returned command.
+- Made paused Reviews unclaimable and exempt from abandonment blocking, added `mdr review retry` to
+  reopen a blocked Cycle in place, and let a retried Task keep its partial proposal.
+- Packed report audits per record with screening-only batches, bound receipts to target content so
+  unchanged groups keep them, corrected one audit group at a time, and halted a Run whose group stays
+  unresolved after two corrections. The audit contract version is now 2.
+- Fixed final readiness checks rejecting every audited report with more than one finding.
+- Added `mdr hermes routines --status`, `--pause-all`, and `--resume-all`, and reported paused
+  Routines in doctor.
+- Moved request-schema and recovery guidance into the managed Coordinator profile and told every
+  profile never to edit skills or run scripts.
+
 ## 0.5.7 - 2026-09-16
 
 - Preserve relevance-ranked search order when attaching a deduplicated corpus so one-article
@@ -18,6 +49,11 @@
   continuing until the Selector queue is empty.
 - Runs that serial worker as a managed no-agent Routine with a 24-hour script ceiling and an
   overlap lock, while each individual Selector session retains a small turn ceiling.
+
+## 0.5.5 - withdrawn
+
+- An unreleased bounded Selector batching experiment. It was reverted before deployment; 0.5.6
+  restored one article per Selector task.
 
 ## 0.5.4 - 2026-09-16
 

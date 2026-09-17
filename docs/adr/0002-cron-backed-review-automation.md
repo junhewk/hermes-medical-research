@@ -1,6 +1,6 @@
 # ADR 0002: Cron-backed durable Review automation
 
-- Status: accepted
+- Status: accepted; gated agent workers superseded by ADR 0003
 - Date: 2026-09-16
 - Supersedes: ADR 0001's Bot-to-Bot message routing and managed-roster readiness gate
 
