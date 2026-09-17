@@ -57,7 +57,8 @@ SOURCE_PAGE_LIMIT = 16 * 1024
 SOURCE_IDS_PER_PAGE = 100
 CHECKLIST_LIMIT = 6 * 1024
 MAX_CORRECTIONS_PER_GROUP = 2
-SYNTHESIS_TEXT_LIMITS = (600, 240, 0)
+# (extraction text, disposition rationale) character limits, tried in order to fit the packet.
+SYNTHESIS_TEXT_LIMITS = ((600, 300), (240, 160), (0, 0))
 CORE_BIOMEDICAL_SOURCES = frozenset(BIOMEDICAL_INDEX_SOURCES)
 RUN_ID_PREFIX = "run-"
 TASK_ID_PREFIX = "task-"
@@ -1382,18 +1383,29 @@ class TaskEngine:
                             {
                                 "record_id": row["record_id"],
                                 "status": item["status"],
-                                "rationale": item["rationale"][:300],
+                                "rationale": item["rationale"],
                             }
                         )
         logical.extend(f"disposition:{item['record_id']}" for item in decisions)
         packet_data: dict[str, Any] = {}
-        for limit in SYNTHESIS_TEXT_LIMITS:
+        for text_limit, rationale_limit in SYNTHESIS_TEXT_LIMITS:
             packet_data = {
                 "outcome": outcome,
-                "extractions": [_synthesis_row(row, limit) for row in related],
-                "unreported_dispositions": decisions,
+                "extractions": [_synthesis_row(row, text_limit) for row in related],
+                "unreported_dispositions": [
+                    {
+                        "record_id": item["record_id"],
+                        "status": item["status"],
+                        **(
+                            {"rationale": item["rationale"][:rationale_limit]}
+                            if rationale_limit
+                            else {}
+                        ),
+                    }
+                    for item in decisions
+                ],
             }
-            if limit == 0 or len(json.dumps(packet_data, ensure_ascii=False).encode()) <= (
+            if text_limit == 0 or len(json.dumps(packet_data, ensure_ascii=False).encode()) <= (
                 TASK_PACKET_LIMIT - 4 * 1024
             ):
                 break

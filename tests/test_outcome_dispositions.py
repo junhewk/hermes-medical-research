@@ -322,6 +322,55 @@ async def test_synthesis_links_rows_by_protocol_outcome_and_lists_gaps(tmp_path)
         validate_contribution_v2(engine.workspace, finding, contribution)
 
 
+def test_synthesis_packet_degrades_to_fit_many_records(tmp_path, monkeypatch):
+    engine, record_id, _ = contract_run(tmp_path)
+    workspace = engine.workspace
+    long_text = "x" * 2000
+    rows = [
+        {
+            "extraction_id": f"e{index}",
+            "record_id": record_id,
+            "protocol_outcome": OUTCOMES[0],
+            "population": long_text,
+            "comparison": "c",
+            "outcome": "o",
+            "timepoint": "t",
+            "effect": {"measure": "mean difference", "value": 1},
+            "result": long_text,
+            "source_location": {"document_id": "d", "locator": "l", "quote": long_text},
+        }
+        for index in range(20)
+    ]
+    decisions = [
+        {
+            "record_id": f"r-{index:020d}",
+            "outcomes": [
+                {"protocol_outcome": OUTCOMES[0], "status": "not_reported", "rationale": long_text}
+            ],
+        }
+        for index in range(60)
+    ]
+    original_rows = workspace.rows
+
+    def rows_for(stage, **kwargs):
+        if stage == "extractions":
+            return [{**row, "population": "p"} for row in rows]
+        if stage == "dispositions":
+            return decisions
+        return original_rows(stage, **kwargs)
+
+    monkeypatch.setattr(workspace, "rows", rows_for)
+    manifest = workspace.load()
+    manifest["datasets"]["dispositions"] = {"digest": "fixture"}
+    monkeypatch.setattr(workspace, "load", lambda: manifest)
+
+    spec = engine._synthesis_spec(OUTCOMES[0])
+    size = len(json.dumps(spec["packet_data"]).encode())
+    assert size <= TASK_PACKET_LIMIT - 4 * 1024
+    assert "rationale" not in spec["packet_data"]["unreported_dispositions"][0]
+    assert spec["packet_data"]["extractions"][0]["result_truncated"] is True
+
+
 @pytest.mark.asyncio
 async def test_missing_disposition_reopens_the_record_assessment(tmp_path):
     engine, record_id, document_id = contract_run(tmp_path)
