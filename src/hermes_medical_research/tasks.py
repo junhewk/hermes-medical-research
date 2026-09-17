@@ -42,9 +42,11 @@ from .packets import (
     _extraction,
     _finding,
     _source,
+    assessment_field_rules,
     find_in_documents,
     outcome_hits,
     scaffold_extraction_id,
+    synthesis_field_rules,
 )
 from .validation import DISPOSITION_STATUSES, METHODS
 from .workflow import current_digests, finalize, submit_batch
@@ -1279,6 +1281,7 @@ class TaskEngine:
             "study": study,
             "coverage": coverage,
             "protocol_outcomes": outcomes,
+            "field_rules": assessment_field_rules(contract),
             "methods": {
                 name: {"version": version, "domains": domains.split()}
                 for name, (version, domains) in METHODS.items()
@@ -1391,6 +1394,7 @@ class TaskEngine:
         for text_limit, rationale_limit in SYNTHESIS_TEXT_LIMITS:
             packet_data = {
                 "outcome": outcome,
+                "field_rules": synthesis_field_rules(),
                 "extractions": [_synthesis_row(row, text_limit) for row in related],
                 "unreported_dispositions": [
                     {

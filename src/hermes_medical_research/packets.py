@@ -203,6 +203,121 @@ def outcome_hits(
     return result
 
 
+def assessment_field_rules(contract: bool) -> dict[str, Any]:
+    """Allowed values and cross-field rules that the validators enforce, stated up front."""
+    from .evidence import BASES, COMPARATORS
+    from .validation import DISPOSITION_STATUSES
+
+    rules: dict[str, Any] = {
+        "extraction": {
+            "protocol_outcome": "exactly one protocol outcome string as listed in the packet",
+            "outcome": "the paper's own label for this measure",
+            "population, comparison, timepoint, result, direction_rationale, support_rationale": (
+                "nonempty text"
+            ),
+            "support_checked": "true once you confirmed the quote supports the result",
+            "sample_size": "positive integer or null",
+            "comparator_type": sorted(COMPARATORS),
+            "outcome_type": ["benefit", "context", "harm"],
+            "favors": ["comparator", "intervention", "neither", "not-applicable", "uncertain"],
+            "effect.basis": sorted(BASES),
+            "effect.measure, effect.units": "nonempty text",
+            "effect.value, effect.ci_low, effect.ci_high": (
+                "number or null; a null value needs effect.missing_reason"
+            ),
+            "effect.interval_type": {
+                "none": "ci_low and ci_high must be null",
+                "confidence or credible": "both endpoints and interval_level between 0 and 100",
+            },
+            "between_group basis": "requires comparator_type other than none or not_applicable",
+            "qualitative basis": "effect.value must be null",
+            "single-arm or intervention-only data": (
+                "group_summary or qualitative, never between_group"
+            ),
+            "source_location": "document_id, locator, and a quote copied verbatim from source_read",
+            "harms (outcome_type harm only)": (
+                "reporting counts, monitored_without_counts, or not_reported; attribution; arms"
+            ),
+        },
+        "appraisal": {
+            "domains.*.status": ["assessed", "pending", "unavailable"],
+            "domains.*.judgment": (
+                "a judgment such as low, some_concerns, or high when assessed; "
+                "not_assessed otherwise"
+            ),
+            "domains.*.source_locations": "document_id, locator, quote for every assessed domain",
+            "domains.*.missing_reason (unavailable only)": [
+                "access_unavailable",
+                "insufficient_detail",
+                "not_reported",
+            ],
+            "unavailable domains": "assessment_basis text and inspected_locations",
+            "completion": "complete if all assessed, limited if any unavailable, else pending",
+            "overall_judgment": [
+                "descriptive",
+                "high",
+                "low",
+                "not_assessable",
+                "some_concerns",
+                "unclear",
+            ],
+            "limited or pending appraisal": "overall_judgment unclear or not_assessable",
+            "overall, rationale": "nonempty text",
+        },
+    }
+    if contract:
+        rules["dispositions"] = {
+            "outcomes[].status": list(DISPOSITION_STATUSES),
+            "extracted": "at least one filled extraction row with this protocol_outcome",
+            "extraction_ids": "leave empty; mdr fills them",
+            "not_reported or not_applicable": (
+                "rationale plus inspected_locations with document_id and locator"
+            ),
+        }
+    return rules
+
+
+def synthesis_field_rules() -> dict[str, Any]:
+    from .evidence import COMPARATORS
+    from .validation import GRADE_DOMAINS, RELATIONSHIPS
+
+    return {
+        "finding.claim_basis": [
+            "association",
+            "comparative",
+            "context",
+            "diagnostic_accuracy",
+            "gap",
+            "ranking",
+            "within_group",
+        ],
+        "finding.comparator_type": sorted(COMPARATORS),
+        "gap": "empty evidence, gap_reason, gap_basis, and not-assessable certainty",
+        "evidence[].use": ["context", "direct", "indirect"],
+        "evidence[].relationship": sorted(RELATIONSHIPS),
+        "evidence[]": (
+            "weight_rationale, alignment_rationale, and claim_support_checked true; direct use "
+            "needs the same comparator_type and an extraction bound to this protocol outcome"
+        ),
+        "comparative claims": "non-context evidence must have effect.basis between_group",
+        "certainty.framework": ["GRADE-informed", "descriptive"],
+        "certainty.rating": [
+            "high",
+            "low",
+            "moderate",
+            "not-applicable",
+            "not-assessable",
+            "very-low",
+        ],
+        "GRADE-informed": (
+            "rationale, starting_point, rating_explanation, and text for every domain: "
+            + ", ".join(GRADE_DOMAINS)
+        ),
+        "descriptive": "rating not-applicable",
+        "overlap.status": ["mapped", "not_applicable", "suspected", "unknown"],
+    }
+
+
 def _source(workspace, record_id: str) -> dict[str, Any]:
     record = workspace.index("records")[record_id]
     docs = [

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.9 - 2026-09-17
+
+- Renewed worker claims every 10 minutes while a serial runner's Hermes session is still working,
+  and allowed 75 minutes per session attempt. On the Hermes host a single model turn can take 30
+  seconds or more, so an assessment session could otherwise outlast its 60-minute claim lease.
+- Stated every allowed value and cross-field rule in assessment and synthesis packets as
+  `field_rules`, built from the validators' own constants. In the 0.5.8 host smoke test the
+  Extractor followed the new outcome procedure but spent many turns reading package source code
+  to learn the schema; the skills now point to `field_rules` and forbid reading source or help text.
+
 ## 0.5.8 - 2026-09-17
 
 - Made assessment completeness deterministic. Each selected record now needs a `dispositions` row

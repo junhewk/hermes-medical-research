@@ -217,6 +217,13 @@ def test_assessment_packet_lists_every_protocol_outcome_with_locations(tmp_path)
     assert "source find" in opened["source_find"]
     assert "source read" in opened["source_read"]
     assert "Submission is rejected while any outcome is undecided" in packet["instructions"]
+    rules = packet["field_rules"]
+    assert "between_group" in rules["extraction"]["effect.basis"]
+    assert rules["dispositions"]["outcomes[].status"] == [
+        "extracted",
+        "not_reported",
+        "not_applicable",
+    ]
 
 
 @pytest.mark.asyncio
@@ -300,6 +307,7 @@ async def test_synthesis_links_rows_by_protocol_outcome_and_lists_gaps(tmp_path)
     await engine.submit("extract", task_id, path, EXTRACTOR)
 
     exam = engine._synthesis_spec(OUTCOMES[0])
+    assert "comparative" in exam["packet_data"]["field_rules"]["finding.claim_basis"]
     assert [row["extraction_id"] for row in exam["packet_data"]["extractions"]] == [extraction_id]
     assert exam["packet_data"]["unreported_dispositions"] == []
     skills = engine._synthesis_spec(OUTCOMES[1])

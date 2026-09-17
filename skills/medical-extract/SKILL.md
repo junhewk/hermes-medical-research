@@ -16,6 +16,8 @@ by returning only the `run_id`, `task_id`, and recorded state.
 Rules:
 - Use only the supplied commands and files. Replace uppercase placeholders such as SEARCH WORDS,
   DOCUMENT_ID, and LOCATOR; change nothing else in a command.
+- The packet's `field_rules` lists every allowed value and cross-field rule. Never read package
+  source code or `--help` output to learn the schema.
 - Edit only the proposal file, with the file tool. Never edit skills, packets, or run files.
 - Never run Python, heredocs, or scripts, and never page `source_show` to slice JSON.
 - Quote verbatim from `source_read` text at the cited `document_id` and `locator`.

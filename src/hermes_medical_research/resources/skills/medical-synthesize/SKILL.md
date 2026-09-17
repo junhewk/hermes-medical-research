@@ -17,6 +17,7 @@ packet, proposal, and supplied commands, replacing only their uppercase placehol
 The Synthesizer completes exactly one assigned outcome. The packet summarizes each bound extraction
 and lists `unreported_dispositions`: records whose sources were inspected and did not report this
 outcome. Use them when describing gaps. Read a full row with `source_show` when a summary is short.
+The packet's `field_rules` lists every allowed value; never read package source code to learn it.
 
 The Auditor independently checks every assigned frozen target and never corrects author work. A
 finding group returns one `record`; a report group returns one `report_reviews` entry per target.
