@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -69,8 +68,9 @@ PROFILE_MAX_TURNS = {
 }
 WORKER_SCRIPT_TIMEOUT_SECONDS = 24 * 60 * 60
 HOST_ATTEMPTS = 3
-HOST_TIMEOUT_SECONDS = 20 * 60
-LEASE_RESERVE_SECONDS = 5 * 60
+# One session may take many slow model turns; the runner renews its claim while it works.
+HOST_TIMEOUT_SECONDS = 75 * 60
+LEASE_RENEW_SECONDS = 10 * 60
 
 
 def _home(value: Path | None) -> Path:
@@ -875,19 +875,18 @@ async def drain(
                 state = engine.task_automation(claim["task_id"])["state"]
                 outcome = None if state == "in_progress" else state
             else:
-                expires = datetime.fromisoformat(claim["expires_at"])
                 for _ in range(HOST_ATTEMPTS):
-                    remaining = (expires - datetime.now(UTC)).total_seconds()
-                    if remaining < LEASE_RESERVE_SECONDS:
-                        last_error = "claim lease is nearly expired; retry later"
-                        break
                     try:
-                        completed = await asyncio.to_thread(
-                            call, executable, home, claim, actor, role
+                        completed = await _run_renewing(
+                            automation, claim, actor, call, executable, home, role
                         )
                         detail = (completed.stderr or completed.stdout or "").strip()
                     except subprocess.TimeoutExpired:
                         detail = f"host session exceeded {HOST_TIMEOUT_SECONDS} seconds"
+                    except ValidationError as exc:
+                        detail = f"claim could not be renewed: {exc}"
+                        last_error = detail
+                        break
                     state = engine.task_automation(claim["task_id"])["state"]
                     if state != "in_progress":
                         outcome = state
@@ -916,6 +915,26 @@ async def drain(
             failed.append(record)
     finally:
         lock.release()
+
+
+async def _run_renewing(
+    automation: Any,
+    claim: dict[str, Any],
+    actor: Any,
+    call: Callable[..., subprocess.CompletedProcess[str]],
+    executable: str,
+    home: Path,
+    role: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run one host session in a worker thread, renewing its claim until the session exits."""
+    session = asyncio.ensure_future(
+        asyncio.to_thread(call, executable, home, claim, actor, role)
+    )
+    while True:
+        done, _ = await asyncio.wait({session}, timeout=LEASE_RENEW_SECONDS)
+        if done:
+            return session.result()
+        automation.renew(claim["claim_id"], actor)
 
 
 async def drain_selector(**kwargs: Any) -> dict[str, Any]:

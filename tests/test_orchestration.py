@@ -379,3 +379,53 @@ async def _finalized(workspace) -> bool:
     from hermes_medical_research.workflow import finalize
 
     return (await finalize(workspace, offline=True))["completed"]
+
+
+@pytest.mark.asyncio
+async def test_runner_renews_the_claim_while_a_slow_session_works(tmp_path, monkeypatch):
+    current = [datetime.now(UTC) + timedelta(seconds=2)]
+    automation, workspace = review_with_records(
+        tmp_path, "slow-session", 1, clock=lambda: current[0]
+    )
+    await automation.tick()
+    actor = Actor("mdr-selector", "slow-session", "selector")
+    claim = automation.claim("select", actor)
+    first_expiry = claim["expires_at"]
+    current[0] += timedelta(minutes=50)
+    renewed = automation.renew(claim["claim_id"], actor)
+    assert renewed["expires_at"] > first_expiry
+    task = workspace.load()["task_engine"]["tasks"][claim["task_id"]]
+    assert task["lease"]["expires_at"] == renewed["expires_at"]
+    assert task["lease"]["renewals"] == 1
+    with pytest.raises(ValidationError, match="different Hermes session"):
+        automation.renew(claim["claim_id"], Actor("mdr-selector", "other", "selector"))
+    current[0] += timedelta(minutes=61)
+    with pytest.raises(ValidationError, match="already expired"):
+        automation.renew(claim["claim_id"], actor)
+
+
+@pytest.mark.asyncio
+async def test_run_renewing_extends_the_lease_until_the_session_exits(tmp_path, monkeypatch):
+    import threading
+
+    from hermes_medical_research import hermes
+
+    renewals: list[str] = []
+    release = threading.Event()
+
+    class FakeAutomation:
+        def renew(self, claim_id, _actor):
+            renewals.append(claim_id)
+            if len(renewals) == 2:
+                release.set()
+
+    def slow_session(*_args):
+        release.wait(5)
+        return subprocess.CompletedProcess([], 0, "done", "")
+
+    monkeypatch.setattr(hermes, "LEASE_RENEW_SECONDS", 0.01)
+    completed = await hermes._run_renewing(
+        FakeAutomation(), {"claim_id": "claim-x"}, None, slow_session, "h", tmp_path, "selector"
+    )
+    assert completed.stdout == "done"
+    assert renewals[:2] == ["claim-x", "claim-x"]

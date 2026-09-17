@@ -2203,6 +2203,30 @@ class TaskEngine:
             self.workspace.save(manifest)
         return {"task_id": task_id, "claim_id": claim_id, "attempt": attempt}
 
+    def renew_lease(
+        self, task_id: str, claim_id: str, *, expires_at: str, at: str | None = None
+    ) -> dict[str, Any]:
+        """Extend an unexpired active lease while its host session is still working."""
+        _safe_id(task_id, TASK_ID_PREFIX)
+        current = datetime.fromisoformat(at) if at else datetime.now(UTC)
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            task = self._ledger(manifest)["tasks"].get(task_id)
+            lease = task.get("lease") if task else None
+            if not task or not lease or lease.get("claim_id") != claim_id:
+                raise ValidationError("claim no longer owns this task")
+            if lease.get("state") != "active" or task.get("state") not in {
+                "pending",
+                "in_progress",
+            }:
+                raise ValidationError("claim lease is not active")
+            if current >= datetime.fromisoformat(lease["expires_at"]):
+                raise ValidationError("claim lease already expired")
+            lease["expires_at"] = expires_at
+            lease["renewals"] = int(lease.get("renewals", 0)) + 1
+            self.workspace.save(manifest)
+        return {"task_id": task_id, "claim_id": claim_id, "expires_at": expires_at}
+
     def fail_lease(
         self,
         task_id: str,

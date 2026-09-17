@@ -629,6 +629,27 @@ class AutomationEngine:
                 )
         return result
 
+    def renew(self, claim_id: str, actor: Actor) -> dict[str, Any]:
+        """Extend the session-bound lease of a claim whose host session is still running."""
+        path = self.claims / f"{claim_id}.json"
+        with self.lock:
+            claim = _read_json(path)
+            if claim.get("claim_id") != claim_id or claim.get("state") != "active":
+                raise ValidationError("claim is not active")
+            if (
+                claim.get("actor_profile") != actor.profile
+                or claim.get("actor_session_id") != actor.session_id
+            ):
+                raise ValidationError("claim belongs to a different Hermes session")
+            expires = _at(self.clock() + timedelta(minutes=LEASE_MINUTES))
+            engine = TaskEngine(self.catalog.workspace(claim["run_id"]))
+            result = engine.renew_lease(
+                claim["task_id"], claim_id, expires_at=expires, at=_at(self.clock())
+            )
+            claim["expires_at"] = expires
+            _write_json(path, claim)
+        return result
+
     def fail(self, claim_id: str, actor: Actor, *, code: str, message: str) -> dict[str, Any]:
         path = self.claims / f"{claim_id}.json"
         with self.lock:
