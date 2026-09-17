@@ -265,6 +265,12 @@ def assessment_field_rules(contract: bool) -> dict[str, Any]:
                 "unclear",
             ],
             "limited or pending appraisal": "overall_judgment unclear or not_assessable",
+            "same_as": (
+                "a row {extraction_id, same_as: ID} copies the full appraisal ID at submission; "
+                "fill the study appraisal once and write a separate full row only when an "
+                "outcome's risk of bias differs"
+            ),
+            "pending": "an extracted row's appraisal cannot stay pending at submission",
             "overall, rationale": "nonempty text",
         },
     }
@@ -407,6 +413,11 @@ def _extraction(
     if protocol_outcome is not None:
         row["protocol_outcome"] = protocol_outcome
     return row
+
+
+def study_appraisal_id(record_id: str) -> str:
+    """Identity of the one full appraisal template that outcome rows copy with ``same_as``."""
+    return f"study-appraisal-{record_id}"
 
 
 def scaffold_extraction_id(record_id: str, index: int) -> str:

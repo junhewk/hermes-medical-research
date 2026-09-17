@@ -46,6 +46,7 @@ from .packets import (
     find_in_documents,
     outcome_hits,
     scaffold_extraction_id,
+    study_appraisal_id,
     synthesis_field_rules,
 )
 from .validation import DISPOSITION_STATUSES, METHODS
@@ -1263,12 +1264,24 @@ class TaskEngine:
             for row in self.workspace.rows("appraisals", fresh=False)
         }
         method = _assessment_method(study)
-        proposed_appraisals = [
-            deepcopy(appraisals[row["extraction_id"]])
-            if row["extraction_id"] in appraisals
-            else _appraisal(row["extraction_id"], method)
-            for row in existing
-        ]
+        if contract:
+            # One full study appraisal; each new outcome row copies it unless its bias differs.
+            template_id = study_appraisal_id(record_id)
+            proposed_appraisals = [
+                deepcopy(appraisals[row["extraction_id"]])
+                if row["extraction_id"] in appraisals
+                else {"extraction_id": row["extraction_id"], "same_as": template_id}
+                for row in existing
+            ]
+            if any("same_as" in row for row in proposed_appraisals):
+                proposed_appraisals.insert(0, _appraisal(template_id, method))
+        else:
+            proposed_appraisals = [
+                deepcopy(appraisals[row["extraction_id"]])
+                if row["extraction_id"] in appraisals
+                else _appraisal(row["extraction_id"], method)
+                for row in existing
+            ]
         source = _source(self.workspace, record_id)
         source_ids = [row["document_id"] for row in source["documents"]]
         coverage = deepcopy(self.workspace.index("coverage")[record_id])
@@ -1721,6 +1734,7 @@ class TaskEngine:
             scaffold_extraction_id(record_id, index): outcome
             for index, outcome in enumerate(outcomes, start=1)
         }
+        appraisals = self._expand_same_as(record_id, appraisals)
         pruned: list[str] = []
         kept: list[dict[str, Any]] = []
         for row in extractions:
@@ -1749,6 +1763,12 @@ class TaskEngine:
             if orphaned:
                 detail += f"; appraisal without extraction: {', '.join(orphaned)}"
             raise ValidationError(detail)
+        problems: list[str] = [
+            f"appraisal for {row.get('extraction_id')} is still pending; assess each domain or "
+            "mark it unavailable with a missing_reason"
+            for row in kept_appraisals
+            if row.get("completion") == "pending"
+        ]
         merged = {
             row["extraction_id"]: row
             for row in self.workspace.rows("extractions", fresh=False)
@@ -1757,7 +1777,6 @@ class TaskEngine:
         merged.update(
             {row["extraction_id"]: row for row in kept if isinstance(row.get("extraction_id"), str)}
         )
-        problems: list[str] = []
         bound: dict[str, list[str]] = {}
         for extraction_id, row in sorted(merged.items()):
             value = row.get("protocol_outcome")
@@ -1827,6 +1846,34 @@ class TaskEngine:
         normalized["stages"]["appraisals"]["records"] = kept_appraisals
         normalized["stages"]["dispositions"]["records"] = [disposition]
         return normalized, pruned
+
+    @staticmethod
+    def _expand_same_as(
+        record_id: str, appraisals: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Replace ``same_as`` rows with copies of full appraisals; drop the study template."""
+        template_id = study_appraisal_id(record_id)
+        full = {row.get("extraction_id"): row for row in appraisals if "same_as" not in row}
+        problems = []
+        expanded = []
+        for row in appraisals:
+            if "same_as" not in row:
+                if row.get("extraction_id") != template_id:
+                    expanded.append(row)
+                continue
+            source = full.get(row.get("same_as"))
+            if source is None:
+                problems.append(
+                    f"appraisal {row.get('extraction_id')} same_as must name a full appraisal "
+                    f"in this proposal, such as {template_id}"
+                )
+                continue
+            copy = deepcopy(source)
+            copy["extraction_id"] = row.get("extraction_id")
+            expanded.append(copy)
+        if problems:
+            raise ValidationError("assessment is incomplete: " + " | ".join(problems))
+        return expanded
 
     def _submit_synthesis(self, task: dict[str, Any], proposal: Any) -> dict[str, Any]:
         if not isinstance(proposal, dict) or proposal.get("schema_version") != TASK_PACKET_VERSION:

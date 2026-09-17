@@ -166,7 +166,10 @@ def fill_exam(proposal: dict, document_id: str, outcome: str = OUTCOMES[0]) -> s
     appraisal = next(
         item
         for item in proposal["stages"]["appraisals"]["records"]
-        if item["extraction_id"] == row["extraction_id"]
+        if item["extraction_id"].startswith("study-appraisal-")
+    )
+    assert {"extraction_id": row["extraction_id"], "same_as": appraisal["extraction_id"]} in (
+        proposal["stages"]["appraisals"]["records"]
     )
     appraisal.update(
         completion="limited",
@@ -255,6 +258,8 @@ async def test_dispositions_are_accepted_and_untouched_scaffolds_pruned(tmp_path
     workspace = engine.workspace
     assert [row["extraction_id"] for row in workspace.rows("extractions")] == [extraction_id]
     assert set(workspace.index("appraisals")) == {extraction_id}
+    stored_appraisal = workspace.index("appraisals")[extraction_id]
+    assert stored_appraisal["completion"] == "limited" and "same_as" not in stored_appraisal
     stored = workspace.index("dispositions")[record_id]["outcomes"]
     assert stored[0]["extraction_ids"] == [extraction_id]
     assert stored[1]["extraction_ids"] == stored[2]["extraction_ids"] == []
@@ -311,6 +316,38 @@ async def test_test_statistics_are_not_accepted_as_effect_estimates(tmp_path):
 
     assert not result["accepted"]
     assert "must be an effect estimate" in result["errors"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_same_as_rows_copy_one_appraisal_and_pending_copies_are_rejected(tmp_path):
+    engine, record_id, document_id = contract_run(tmp_path)
+    task_id, _, _, path, proposal = open_assessment(engine)
+    fill_exam(proposal, document_id)
+    decide(proposal, OUTCOMES[0], "extracted")
+    decide(proposal, OUTCOMES[1], "not_reported", document_id)
+    decide(proposal, OUTCOMES[2], "not_reported", document_id)
+    appraisals = proposal["stages"]["appraisals"]["records"]
+    template = appraisals[0]
+    pending = dict(template)
+    pending.update(completion="pending")
+    rows = [dict(row) for row in appraisals]
+    rows[0] = {**template, "completion": "pending"}
+    for domain in rows[0]["domains"].values():
+        domain.update(status="pending")
+    path.write_text(
+        json.dumps({**proposal, "stages": {**proposal["stages"], "appraisals": {
+            "schema_version": "2", "records": rows}}})
+    )
+    with pytest.raises(ValidationError, match="is still pending"):
+        await engine.submit("extract", task_id, path, EXTRACTOR)
+
+    rows[1] = {"extraction_id": rows[1]["extraction_id"], "same_as": "study-appraisal-missing"}
+    path.write_text(
+        json.dumps({**proposal, "stages": {**proposal["stages"], "appraisals": {
+            "schema_version": "2", "records": rows}}})
+    )
+    with pytest.raises(ValidationError, match="same_as must name a full appraisal"):
+        await engine.submit("extract", task_id, path, EXTRACTOR)
 
 
 @pytest.mark.asyncio
@@ -442,12 +479,10 @@ async def test_missing_disposition_reopens_the_record_assessment(tmp_path):
             "records": [r for r in rows if r["extraction_id"] == extraction_id],
         },
     )
+    template = next(a for a in appraisals if a["extraction_id"].startswith("study-appraisal-"))
     engine.workspace.put(
         "appraisals",
-        {
-            "schema_version": "2",
-            "records": [a for a in appraisals if a["extraction_id"] == extraction_id],
-        },
+        {"schema_version": "2", "records": [{**template, "extraction_id": extraction_id}]},
     )
 
     _, _, _, _, reopened = open_assessment(engine)
@@ -456,6 +491,14 @@ async def test_missing_disposition_reopens_the_record_assessment(tmp_path):
         f"result-{record_id}-o2",
         f"result-{record_id}-o3",
     ]
+    reopened_appraisals = reopened["stages"]["appraisals"]["records"]
+    assert reopened_appraisals[0]["extraction_id"] == f"study-appraisal-{record_id}"
+    assert reopened_appraisals[1]["extraction_id"] == extraction_id
+    assert "same_as" not in reopened_appraisals[1]
+    assert reopened_appraisals[2] == {
+        "extraction_id": f"result-{record_id}-o2",
+        "same_as": f"study-appraisal-{record_id}",
+    }
     assert all(
         item["status"] == ""
         for item in reopened["stages"]["dispositions"]["records"][0]["outcomes"]

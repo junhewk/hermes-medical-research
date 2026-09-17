@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.11 - 2026-09-17
+
+- Seeded assessment proposals with one full `study-appraisal-...` template and `same_as` outcome
+  rows that copy it at submission; a separate full appraisal is needed only when an outcome's risk
+  of bias differs. In the 0.5.9 smoke test the Extractor spent about 13 of 32 minutes writing seven
+  near-identical appraisals into a 49 KB proposal.
+- Rejected per-outcome assessments whose extracted rows still have pending appraisals, so an
+  accepted record is not immediately reopened.
+
 ## 0.5.10 - 2026-09-17
 
 - Stopped cascading validation errors: when one stage in a submission fails, stages that depend on

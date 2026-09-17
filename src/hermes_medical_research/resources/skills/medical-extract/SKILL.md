@@ -33,9 +33,11 @@ record to an existing study only with explicit identity evidence such as the sam
 1. Run `source_find` with the outcome's words and instrument names, and check
    `likely_locations`.
 2. Run `source_read` on the best hits. Results are often in `table:N` or results paragraphs.
-3. If reported, fill the prefilled extraction row whose `protocol_outcome` matches it and fill its
-   appraisal. `outcome` is the paper's own label. For another estimand of the same outcome, copy
-   the filled pair with a new `extraction_id` such as `result-...-o2b`.
+3. If reported, fill the prefilled extraction row whose `protocol_outcome` matches it. `outcome` is
+   the paper's own label. For another estimand of the same outcome, copy the filled row with a new
+   `extraction_id` such as `result-...-o2b` and add `{extraction_id, same_as}` for it.
+   Fill the one full `study-appraisal-...` row once; outcome rows copy it through `same_as`. Write
+   a full appraisal for an outcome only when its risk of bias differs.
 4. Set that outcome's `dispositions` status to `extracted`. mdr fills `extraction_ids`.
 5. If the study did not measure it, set status `not_reported`, or `not_applicable` when the design
    cannot measure it. Discussion or limitation remarks are not a measured outcome. Add a one-sentence rationale and `inspected_locations` with each `document_id` and

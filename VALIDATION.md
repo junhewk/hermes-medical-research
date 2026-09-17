@@ -48,7 +48,7 @@ uv run pytest
 uv build
 ```
 
-The 0.5.10 local run on 2026-09-17 collected and passed 217 tests; Ruff, `git diff --check`, wheel
+The 0.5.11 local run on 2026-09-17 collected and passed 218 tests; Ruff, `git diff --check`, wheel
 construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed. The
 final count is updated with each release commit.
 
