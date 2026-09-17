@@ -48,7 +48,7 @@ uv run pytest
 uv build
 ```
 
-The 0.5.8 local run on 2026-09-17 collected and passed 212 tests; Ruff, `git diff --check`, wheel
+The 0.5.9 local run on 2026-09-17 collected and passed 214 tests; Ruff, `git diff --check`, wheel
 construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed. The
 final count is updated with each release commit.
 
@@ -89,6 +89,18 @@ appraisal pairs. A separate reviewer verified all 8 extraction quotes, 31 apprai
 and numerical transcriptions, but found that one trial's Mini-CEX and satisfaction outcomes were never
 extracted. That gap motivated the 0.5.8 outcome-decision contract. The run is retained unchanged as
 provenance; it is not a qualification of 0.5.8.
+
+### 0.5.8 host smoke test (2026-09-17)
+
+In an isolated store on `jkworkstation`, the three extractor-qualification articles were seeded
+with screening, coverage, and study links, and the 0.5.8 Extractor runner was started. The runner
+acquired all three full texts deterministically without a model session and routed straight into
+the first assessment. The session followed the per-outcome procedure: it searched every protocol
+outcome with `source find` and read the exam paragraph and both Mini-CEX and satisfaction tables
+with `source read`. It then spent most of 30 turns reading installed package source to learn allowed
+field values, and single model turns took 10 to 60 seconds. The attempt was stopped before
+submission. These findings produced 0.5.9: packet `field_rules`, and claim renewal during long
+sessions.
 
 ## Repository and release record
 
