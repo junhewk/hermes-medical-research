@@ -42,6 +42,7 @@ METHODS = {
 GRADE_DOMAINS = ("risk_of_bias", "inconsistency", "indirectness", "imprecision", "publication_bias")
 RELATIONSHIPS = {"supports", "contradicts", "mixed", "incomparable", "context"}
 SCOPE_FIELDS = ("population", "comparison", "outcome", "timepoint")
+DISPOSITION_STATUSES = ("extracted", "not_reported", "not_applicable")
 
 
 def _choice(value: Any, choices: set[str], name: str) -> None:
@@ -67,6 +68,116 @@ def validate_location(workspace: Workspace, location: Any, record_id: str) -> di
     if normalized_text(quote) not in normalized_text(text):
         raise ValidationError("source quote does not occur at the recorded location")
     return doc
+
+
+def validate_inspected(
+    workspace: Workspace, record_id: str, locations: Any, name: str
+) -> None:
+    """Require real, non-metadata locations of this record that the author says they read."""
+    if not isinstance(locations, list) or not locations:
+        raise ValidationError(f"{name} must list the document_id and locator you inspected")
+    documents = {
+        document["document_id"]: document
+        for document in workspace.source_documents()
+        if document["record_id"] == record_id and document["kind"] != "metadata"
+    }
+    for location in locations:
+        if not isinstance(location, dict):
+            raise ValidationError(f"{name} entries must be objects with document_id and locator")
+        document = documents.get(location.get("document_id"))
+        if document is None:
+            raise ValidationError(
+                f"{name} names an unknown or metadata-only document: "
+                f"{location.get('document_id')!r}"
+            )
+        if location.get("locator") not in {s["locator"] for s in document["segments"]}:
+            raise ValidationError(
+                f"{name} names an unknown locator: {location.get('locator')!r}"
+            )
+
+
+def validate_dispositions(workspace: Workspace, rows: list[dict[str, Any]]) -> None:
+    """Every assessed record decides every protocol outcome exactly once."""
+    records = workspace.index("records")
+    screening = workspace.index("screening")
+    studies = workspace.index("studies")
+    extractions = workspace.rows("extractions")
+    outcomes = workspace.load()["protocol"]["outcomes"]
+    for row in rows:
+        rid = row.get("record_id")
+        _known(rid, records, "record_id")
+        if _known(rid, screening, "screened record")["decision"] != "include":
+            raise ValidationError("outcome dispositions describe included records only")
+        study = _known(row.get("study_id"), studies, "study_id")
+        if rid not in study["record_ids"]:
+            raise ValidationError("disposition record is not linked to its study")
+        items = row.get("outcomes")
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise ValidationError("dispositions.outcomes must be an array of objects")
+        named = [item.get("protocol_outcome") for item in items]
+        missing = [outcome for outcome in outcomes if outcome not in named]
+        unknown = [str(value) for value in named if value not in outcomes]
+        duplicates = sorted({str(value) for value in named if named.count(value) > 1})
+        if missing or unknown or duplicates:
+            detail = "; ".join(
+                part
+                for part in (
+                    "missing: " + ", ".join(missing) if missing else "",
+                    "unknown: " + ", ".join(unknown) if unknown else "",
+                    "duplicated: " + ", ".join(duplicates) if duplicates else "",
+                )
+                if part
+            )
+            raise ValidationError(
+                f"dispositions must decide every protocol outcome exactly once ({detail})"
+            )
+        bound: dict[str, set[str]] = {}
+        for extraction in extractions:
+            if extraction["record_id"] == rid:
+                bound.setdefault(str(extraction.get("protocol_outcome")), set()).add(
+                    extraction["extraction_id"]
+                )
+        for item in items:
+            outcome = item["protocol_outcome"]
+            status = item.get("status")
+            if status is None or status == "":
+                raise ValidationError(
+                    f"outcome {outcome!r} is undecided; set status to "
+                    + ", ".join(DISPOSITION_STATUSES)
+                )
+            _choice(status, set(DISPOSITION_STATUSES), f"outcome {outcome!r} status")
+            ids = item.get("extraction_ids")
+            if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+                raise ValidationError(f"outcome {outcome!r} extraction_ids must be an array")
+            expected = bound.get(outcome, set())
+            if status == "extracted":
+                if not expected:
+                    raise ValidationError(
+                        f"outcome {outcome!r} is extracted but no extraction row has "
+                        f"protocol_outcome {outcome!r}"
+                    )
+                if set(ids) != expected:
+                    raise ValidationError(
+                        f"outcome {outcome!r} extraction_ids must equal the rows bound to it: "
+                        + ", ".join(sorted(expected))
+                    )
+            else:
+                if expected:
+                    raise ValidationError(
+                        f"outcome {outcome!r} is {status} but extraction rows are bound to it: "
+                        + ", ".join(sorted(expected))
+                    )
+                if ids:
+                    raise ValidationError(
+                        f"outcome {outcome!r} is {status}; extraction_ids must be empty"
+                    )
+                require_text(item.get("rationale"), f"outcome {outcome!r} rationale")
+                validate_inspected(
+                    workspace,
+                    rid,
+                    item.get("inspected_locations"),
+                    f"outcome {outcome!r} inspected_locations",
+                )
 
 
 def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) -> None:
@@ -140,6 +251,12 @@ def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) ->
             study = _known(row.get("study_id"), studies, "study_id")
             if rid not in study["record_ids"]:
                 raise ValidationError("extraction record is not linked to its study")
+            if workspace.outcome_contract or "protocol_outcome" in row:
+                _choice(
+                    row.get("protocol_outcome"),
+                    set(workspace.load()["protocol"]["outcomes"]),
+                    "protocol_outcome",
+                )
             for name in SCOPE_FIELDS:
                 require_text(row.get(name), name)
             require_text(row.get("result"), "reported result")
@@ -212,6 +329,12 @@ def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) ->
                     )
                 for location in locations:
                     validate_location(workspace, location, extraction["record_id"])
+    elif stage == "dispositions":
+        if not workspace.outcome_contract:
+            raise ValidationError(
+                "dispositions require the per-outcome assessment contract; this Run predates it"
+            )
+        validate_dispositions(workspace, rows)
     elif stage == "synthesis":
         validate_synthesis(workspace, payload)
     elif stage not in {"records", "documents", "coverage", "reviews"}:
@@ -327,6 +450,8 @@ def validate_complete(workspace: Workspace) -> list[str]:
     if {e["extraction_id"] for e in extractions} != set(workspace.index("appraisals")):
         raise ValidationError("record an appraisal for every extraction")
     covered = {e["record_id"] for e in extractions}
+    if workspace.outcome_contract:
+        covered |= set(workspace.index("dispositions"))
     unassessed = [
         rid for rid, row in screening.items() if row["decision"] == "include" and rid not in covered
     ]

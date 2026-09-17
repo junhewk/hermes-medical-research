@@ -153,9 +153,13 @@ def build_review_targets(
         "studies": "study_id",
         "extractions": "extraction_id",
         "appraisals": "extraction_id",
+        "dispositions": "record_id",
         "coverage": "record_id",
     }
-    for stage in ("screening", "studies", "extractions", "appraisals", "coverage"):
+    for stage in ("screening", "studies", "extractions", "appraisals", "dispositions", "coverage"):
+        if stage not in stages:
+            # Runs from before per-outcome dispositions have no such stage to audit.
+            continue
         for index, row in enumerate(stages[stage]["records"]):
             entity_id = str(row.get(id_fields[stage]) or index)
             target = _target(
@@ -169,6 +173,7 @@ def build_review_targets(
             )
             target.update(
                 requires_sources=stage in {"extractions", "appraisals"},
+                # An absence claim is checked against full text; titles cannot settle it.
                 allow_metadata_only=stage in {"screening", "studies", "coverage"},
             )
             if stage == "studies":
@@ -398,7 +403,10 @@ def citation_contract(workspace: Workspace) -> dict[str, Any]:
             "outcome membership.",
             "Use no sources only for protocol/workflow decisions or an explicit evidence gap.",
         ],
-        "source_access": "Use mdr source list, then mdr source show for bounded pages.",
+        "source_access": (
+            "Use source_find to locate text in allowed documents and source_read to quote one "
+            "locator; source_show pages logical records."
+        ),
     }
 
 

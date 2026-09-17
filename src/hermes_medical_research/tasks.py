@@ -35,16 +35,27 @@ from hermes_medical_research.search.query import compile_strategy
 
 from . import audit
 from .fulltext import fetch_fulltexts
-from .packets import _appraisal, _extraction, _finding, _source
-from .validation import METHODS
+from .packets import (
+    _appraisal,
+    _disposition,
+    _extraction,
+    _finding,
+    _source,
+    find_in_documents,
+    outcome_hits,
+    scaffold_extraction_id,
+)
+from .validation import DISPOSITION_STATUSES, METHODS
 from .workflow import current_digests, finalize, submit_batch
-from .workspace import Workspace, digest, now
+from .workspace import OUTCOME_CONTRACT, Workspace, digest, now
 
 TASK_ENGINE_VERSION = "1"
 TASK_PACKET_VERSION = "1"
 TASK_PACKET_LIMIT = 32 * 1024
 SOURCE_PAGE_LIMIT = 16 * 1024
 SOURCE_IDS_PER_PAGE = 100
+CHECKLIST_LIMIT = 6 * 1024
+SYNTHESIS_TEXT_LIMITS = (600, 240, 0)
 CORE_BIOMEDICAL_SOURCES = frozenset(BIOMEDICAL_INDEX_SOURCES)
 RUN_ID_PREFIX = "run-"
 TASK_ID_PREFIX = "task-"
@@ -429,6 +440,7 @@ class TaskEngine:
             )
             ledger["state"] = _state_for_role(task["role"])
             self.workspace.save(manifest)
+            base = f"mdr --actor {ROLE_PROFILES[task['role']]}"
             view = {
                 "run_id": self.run_id,
                 "task_id": task_id,
@@ -436,7 +448,8 @@ class TaskEngine:
                 "kind": task["kind"],
                 "packet_path": str(self.workspace.path / task["packet_file"]),
                 "proposal_path": str(self.workspace.path / task["proposal_file"]),
-                "submit": f"mdr --actor {ROLE_PROFILES[task['role']]} {command} submit "
+                **source_commands(base, self.run_id, task_id),
+                "submit": f"{base} {command} submit "
                 f"{self.run_id} {task_id} --from "
                 f"{self.workspace.path / task['proposal_file']}",
             }
@@ -508,11 +521,35 @@ class TaskEngine:
                 for row in [*result["records"], *result["report_reviews"]]:
                     row["audit_task_id"] = task_id
             else:
-                self._validate_batch_scope(task, proposal)
-                result = submit_batch(self.workspace, proposal)
+                normalized, pruned = self._validate_batch_scope(task, proposal)
+                result = submit_batch(self.workspace, normalized)
                 if not result["accepted"]:
+                    result["next"] = (
+                        "Correct the listed fields in the proposal file, then run the same "
+                        "submit command again."
+                    )
                     return result
+                if pruned:
+                    result["pruned_scaffolds"] = pruned
             return self._accept(task_id, actor, proposal_digest, result)
+
+    def _open_source(
+        self, task_id: str, actor: Actor, claim_token: str | None
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Guard every source read by active task, claim, packet, digests, and scope."""
+        _safe_id(task_id, TASK_ID_PREFIX)
+        manifest = self.workspace.load()
+        task = self._ledger(manifest)["tasks"].get(task_id)
+        if not task or task.get("role") != actor.role or task.get("state") != "in_progress":
+            raise ValidationError("source access requires the actor's active task")
+        self._require_claim(manifest, task, actor, claim_token)
+        self._validate_packet(task)
+        if task["base_digests"] != current_digests(self.workspace):
+            raise ValidationError("task inputs changed; stale source access rejected")
+        allowed = sorted(set(task.get("allowed_source_ids", [])))
+        if digest(allowed) != task.get("allowed_sources_digest"):
+            raise ValidationError("task source scope was modified")
+        return task, allowed
 
     def source_show(
         self,
@@ -525,19 +562,7 @@ class TaskEngine:
     ) -> dict[str, Any]:
         if page < 1:
             raise ValidationError("source page must be positive")
-        _safe_id(task_id, TASK_ID_PREFIX)
-        manifest = self.workspace.load()
-        ledger = self._ledger(manifest)
-        task = ledger["tasks"].get(task_id)
-        if not task or task.get("role") != actor.role or task.get("state") != "in_progress":
-            raise ValidationError("source access requires the actor's active task")
-        self._require_claim(manifest, task, actor, claim_token)
-        self._validate_packet(task)
-        if task["base_digests"] != current_digests(self.workspace):
-            raise ValidationError("task inputs changed; stale source access rejected")
-        allowed = set(task.get("allowed_source_ids", []))
-        if digest(sorted(allowed)) != task.get("allowed_sources_digest"):
-            raise ValidationError("task source scope was modified")
+        _, allowed = self._open_source(task_id, actor, claim_token)
         if source_id not in allowed:
             raise ValidationError("source is outside this task's bounded corpus view")
         value = self._source_value(source_id)
@@ -555,6 +580,79 @@ class TaskEngine:
             "content": chunks[page - 1],
         }
 
+    def source_find(
+        self,
+        task_id: str,
+        query: str,
+        actor: Actor,
+        *,
+        source_id: str | None = None,
+        offset: int = 0,
+        limit: int = 5,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Rank locators in the task's documents by query terms, with short snippets."""
+        _, allowed = self._open_source(task_id, actor, claim_token)
+        documents = self.workspace.source_index()
+        if source_id is not None:
+            if source_id not in allowed:
+                raise ValidationError("source is outside this task's bounded corpus view")
+            if source_id not in documents:
+                raise ValidationError("source find searches documents; use source show instead")
+            selected = [documents[source_id]]
+        else:
+            selected = [documents[item] for item in allowed if item in documents]
+        if not selected:
+            raise ValidationError("this task has no documents to search")
+        return {
+            "run_id": self.run_id,
+            "task_id": task_id,
+            **find_in_documents(selected, query, offset=offset, limit=limit),
+            "next": "Read a hit with source_read using its document_id and locator.",
+        }
+
+    def source_read(
+        self,
+        task_id: str,
+        source_id: str,
+        locator: str,
+        page: int,
+        actor: Actor,
+        *,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one located segment's exact text, paged, for verbatim quotes."""
+        if page < 1:
+            raise ValidationError("source page must be positive")
+        _, allowed = self._open_source(task_id, actor, claim_token)
+        if source_id not in allowed:
+            raise ValidationError("source is outside this task's bounded corpus view")
+        document = self.workspace.source_index().get(source_id)
+        if document is None:
+            raise ValidationError("source read reads documents; use source show instead")
+        segments = document["segments"]
+        index = next(
+            (i for i, segment in enumerate(segments) if segment["locator"] == locator), None
+        )
+        if index is None:
+            raise ValidationError(
+                f"unknown locator {locator!r} in {source_id}; use source_find to list locators"
+            )
+        chunks = _utf8_pages(segments[index]["text"], SOURCE_PAGE_LIMIT)
+        if page > len(chunks):
+            raise ValidationError(f"segment has {len(chunks)} page(s)")
+        return {
+            "run_id": self.run_id,
+            "task_id": task_id,
+            "document_id": source_id,
+            "locator": locator,
+            "previous_locator": segments[index - 1]["locator"] if index else None,
+            "next_locator": segments[index + 1]["locator"] if index + 1 < len(segments) else None,
+            "page": page,
+            "pages": len(chunks),
+            "text": chunks[page - 1],
+        }
+
     def source_list(
         self,
         task_id: str,
@@ -565,18 +663,7 @@ class TaskEngine:
     ) -> dict[str, Any]:
         if page < 1:
             raise ValidationError("source page must be positive")
-        _safe_id(task_id, TASK_ID_PREFIX)
-        manifest = self.workspace.load()
-        task = self._ledger(manifest)["tasks"].get(task_id)
-        if not task or task.get("role") != actor.role or task.get("state") != "in_progress":
-            raise ValidationError("source access requires the actor's active task")
-        self._require_claim(manifest, task, actor, claim_token)
-        self._validate_packet(task)
-        if task["base_digests"] != current_digests(self.workspace):
-            raise ValidationError("task inputs changed; stale source access rejected")
-        allowed = sorted(task.get("allowed_source_ids", []))
-        if digest(allowed) != task.get("allowed_sources_digest"):
-            raise ValidationError("task source scope was modified")
+        _, allowed = self._open_source(task_id, actor, claim_token)
         pages = max(1, (len(allowed) + SOURCE_IDS_PER_PAGE - 1) // SOURCE_IDS_PER_PAGE)
         if page > pages:
             raise ValidationError(f"source list has {pages} page(s)")
@@ -821,7 +908,19 @@ class TaskEngine:
                 self.workspace.save(manifest)
             return result
 
+    def _adopt_outcome_contract(self, manifest: dict[str, Any]) -> None:
+        """Enforce per-outcome dispositions on modern Runs that have not assessed anything yet."""
+        if (
+            manifest.get("evidence_version") != "2"
+            or manifest.get("assessment_contract")
+            or "extractions" in manifest["datasets"]
+        ):
+            return
+        manifest["assessment_contract"] = OUTCOME_CONTRACT
+        self.workspace.save(manifest)
+
     def _next_spec(self, manifest: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any] | None:
+        self._adopt_outcome_contract(manifest)
         revision = ledger.get("revision")
         if revision:
             return self._correction_spec(revision)
@@ -858,11 +957,16 @@ class TaskEngine:
         attempts = manifest["fulltext_attempts"]
         limit = manifest["protocol"]["fulltexts"]
         capacity = limit == "all" or len(attempts) < int(limit)
+        contract = self.workspace.outcome_contract
         already_extracted = {
             row["record_id"]
             for row in self.workspace.rows("extractions", fresh=False)
             if "extractions" in datasets
         }
+        if contract and "dispositions" in datasets:
+            already_extracted |= {
+                row["record_id"] for row in self.workspace.rows("dispositions", fresh=False)
+            }
         no_text = [
             record_id
             for record_id in selected
@@ -885,20 +989,30 @@ class TaskEngine:
             if "appraisals" in datasets and not self.workspace.stale("appraisals", manifest)
             else {}
         )
-        unfinished = [
-            record_id
-            for record_id in selected
-            if not any(row["record_id"] == record_id for row in extractions)
-            or any(
-                row["extraction_id"] not in appraisals
-                or appraisals[row["extraction_id"]].get("completion") == "pending"
-                for row in extractions
-                if row["record_id"] == record_id
+        dispositions = (
+            self.workspace.index("dispositions")
+            if contract
+            and "dispositions" in datasets
+            and not self.workspace.stale("dispositions", manifest)
+            else {}
+        )
+
+        def finished(record_id: str) -> bool:
+            rows = [row for row in extractions if row["record_id"] == record_id]
+            if contract and record_id not in dispositions:
+                return False
+            if not contract and not rows:
+                return False
+            return all(
+                row["extraction_id"] in appraisals
+                and appraisals[row["extraction_id"]].get("completion") != "pending"
+                for row in rows
             )
-        ]
+
+        unfinished = [record_id for record_id in selected if not finished(record_id)]
         if any(
             self.workspace.stale(stage, manifest)
-            for stage in ("extractions", "appraisals")
+            for stage in ("extractions", "appraisals", "dispositions")
             if stage in datasets
         ):
             unfinished = selected
@@ -1104,12 +1218,26 @@ class TaskEngine:
         }
 
     def _assessment_spec(self, record_id: str, study: dict[str, Any]) -> dict[str, Any]:
+        manifest = self.workspace.load()
+        outcomes = manifest["protocol"]["outcomes"]
+        contract = self.workspace.outcome_contract
         existing = [
             deepcopy(row)
             for row in self.workspace.rows("extractions", fresh=False)
             if row["record_id"] == record_id
         ]
-        if not existing:
+        if contract:
+            bound = {row.get("protocol_outcome") for row in existing}
+            identifiers = {row["extraction_id"] for row in existing}
+            for index, outcome in enumerate(outcomes, start=1):
+                extraction_id = scaffold_extraction_id(record_id, index)
+                if outcome not in bound and extraction_id not in identifiers:
+                    existing.append(
+                        _extraction(
+                            self.workspace, record_id, study["study_id"], extraction_id, outcome
+                        )
+                    )
+        elif not existing:
             existing = [
                 _extraction(self.workspace, record_id, study["study_id"], "result-" + record_id)
             ]
@@ -1117,13 +1245,7 @@ class TaskEngine:
             row["extraction_id"]: row
             for row in self.workspace.rows("appraisals", fresh=False)
         }
-        method = (
-            "robis"
-            if study["kind"] == "systematic-review"
-            else "rob2"
-            if study["kind"] == "primary"
-            else "descriptive"
-        )
+        method = _assessment_method(study)
         proposed_appraisals = [
             deepcopy(appraisals[row["extraction_id"]])
             if row["extraction_id"] in appraisals
@@ -1133,51 +1255,141 @@ class TaskEngine:
         source = _source(self.workspace, record_id)
         source_ids = [row["document_id"] for row in source["documents"]]
         coverage = deepcopy(self.workspace.index("coverage")[record_id])
-        return {
-            "kind": "assessment",
-            "target_ids": [record_id],
-            "instructions": (
+        stages: dict[str, Any] = {
+            "extractions": {"schema_version": "2", "records": existing},
+            "appraisals": {"schema_version": "2", "records": proposed_appraisals},
+        }
+        packet_data: dict[str, Any] = {
+            "source": source,
+            "study": study,
+            "coverage": coverage,
+            "protocol_outcomes": outcomes,
+            "methods": {
+                name: {"version": version, "domains": domains.split()}
+                for name, (version, domains) in METHODS.items()
+            },
+        }
+        if contract:
+            stored = {
+                row["record_id"]: row
+                for row in self.workspace.rows("dispositions", fresh=False)
+            }
+            disposition = deepcopy(stored.get(record_id)) or _disposition(
+                record_id, study["study_id"], outcomes
+            )
+            stages["dispositions"] = {"schema_version": "2", "records": [disposition]}
+            packet_data["outcome_checklist"] = self._outcome_checklist(
+                record_id, outcomes, coverage, existing
+            )
+            instructions = (
+                "Decide every protocol outcome in outcome_checklist for this record. For each "
+                "outcome, search the assigned documents with source_find and read the best "
+                "locator with source_read; results are often in table:N. If the record reports "
+                "the outcome, fill that outcome's prefilled extraction row (protocol_outcome is "
+                "already set) and its appraisal, copy the pair with a new extraction_id for each "
+                "further estimand, and set the outcome's disposition status to extracted. "
+                "Otherwise set status to not_reported or not_applicable with a rationale and the "
+                "inspected_locations you read. Leave unused scaffold rows unchanged; mdr removes "
+                "them. Submission is rejected while any outcome is undecided."
+            )
+        else:
+            instructions = (
                 "Extract every relevant reported estimand for the selected protocol outcomes. "
                 "The initial extraction and appraisal rows are scaffolds, not a one-row cap: add "
                 "one distinct extraction and matching appraisal for each needed estimand, then "
                 "complete every design-appropriate appraisal."
-            ),
+            )
+        return {
+            "kind": "assessment",
+            "target_ids": [record_id],
+            "instructions": instructions,
             "proposal": {
                 "schema_version": "2",
                 "base_digests": current_digests(self.workspace),
-                "stages": {
-                    "extractions": {"schema_version": "2", "records": existing},
-                    "appraisals": {"schema_version": "2", "records": proposed_appraisals},
-                },
+                "stages": stages,
             },
-            "packet_data": {
-                "source": source,
-                "study": study,
-                "coverage": coverage,
-                "protocol_outcomes": self.workspace.load()["protocol"]["outcomes"],
-                "methods": {
-                    name: {"version": version, "domains": domains.split()}
-                    for name, (version, domains) in METHODS.items()
-                },
-            },
+            "packet_data": packet_data,
             "allowed_source_ids": source_ids,
         }
 
+    def _outcome_checklist(
+        self,
+        record_id: str,
+        outcomes: list[str],
+        coverage: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """One entry per protocol outcome, degraded deterministically to fit the packet."""
+        hinted = set(coverage.get("protocol_outcomes") or [])
+        checklist: list[dict[str, Any]] = []
+        for per_outcome in (3, 1, 0):
+            hits = (
+                outcome_hits(self.workspace, record_id, outcomes, per_outcome=per_outcome)
+                if per_outcome
+                else {outcome: [] for outcome in outcomes}
+            )
+            checklist = [
+                {
+                    "index": index,
+                    "protocol_outcome": outcome,
+                    "selector_flagged": outcome in hinted,
+                    "extraction_ids": [
+                        row["extraction_id"]
+                        for row in rows
+                        if row.get("protocol_outcome") == outcome
+                    ],
+                    "likely_locations": hits[outcome],
+                }
+                for index, outcome in enumerate(outcomes, start=1)
+            ]
+            if len(json.dumps(checklist, ensure_ascii=False).encode()) <= CHECKLIST_LIMIT:
+                break
+        return checklist
+
     def _synthesis_spec(self, outcome: str) -> dict[str, Any]:
-        protocol = self.workspace.load()["protocol"]
+        manifest = self.workspace.load()
+        protocol = manifest["protocol"]
         index = protocol["outcomes"].index(outcome) + 1
         related = [
-            row for row in self.workspace.rows("extractions") if row.get("outcome") == outcome
+            row
+            for row in self.workspace.rows("extractions")
+            if (row["protocol_outcome"] if "protocol_outcome" in row else row.get("outcome"))
+            == outcome
         ]
         logical = [f"extraction:{row['extraction_id']}" for row in related]
         logical.extend(f"appraisal:{row['extraction_id']}" for row in related)
         documents = [row["source_location"]["document_id"] for row in related]
+        decisions = []
+        if self.workspace.outcome_contract and "dispositions" in manifest["datasets"]:
+            for row in self.workspace.rows("dispositions"):
+                for item in row["outcomes"]:
+                    if item["protocol_outcome"] == outcome and item["status"] != "extracted":
+                        decisions.append(
+                            {
+                                "record_id": row["record_id"],
+                                "status": item["status"],
+                                "rationale": item["rationale"][:300],
+                            }
+                        )
+        logical.extend(f"disposition:{item['record_id']}" for item in decisions)
+        packet_data: dict[str, Any] = {}
+        for limit in SYNTHESIS_TEXT_LIMITS:
+            packet_data = {
+                "outcome": outcome,
+                "extractions": [_synthesis_row(row, limit) for row in related],
+                "unreported_dispositions": decisions,
+            }
+            if limit == 0 or len(json.dumps(packet_data, ensure_ascii=False).encode()) <= (
+                TASK_PACKET_LIMIT - 4 * 1024
+            ):
+                break
         return {
             "kind": "synthesis",
             "target_ids": [outcome],
             "instructions": (
                 "Synthesize one protocol outcome with explicit scope, weighting, "
-                "uncertainty, and gaps."
+                "uncertainty, and gaps. Read full extraction and appraisal rows with source_show "
+                "when a packet summary is shortened."
             ),
             "proposal": {
                 "schema_version": TASK_PACKET_VERSION,
@@ -1186,26 +1398,7 @@ class TaskEngine:
                 "limitations": [],
                 "finding": _finding(outcome, index),
             },
-            "packet_data": {
-                "outcome": outcome,
-                "extractions": [
-                    {
-                        key: row.get(key)
-                        for key in (
-                            "extraction_id",
-                            "record_id",
-                            "population",
-                            "comparison",
-                            "outcome",
-                            "timepoint",
-                            "effect",
-                            "result",
-                            "source_location",
-                        )
-                    }
-                    for row in related
-                ],
-            },
+            "packet_data": packet_data,
             "allowed_source_ids": list(dict.fromkeys([*logical, *documents])),
         }
 
@@ -1310,6 +1503,10 @@ class TaskEngine:
                 extraction = self.workspace.index("extractions")[target["entity_id"]]
                 study = self.workspace.index("studies")[extraction["study_id"]]
                 spec = self._assessment_spec(extraction["record_id"], study)
+            elif kind == "dispositions":
+                disposition = self.workspace.index("dispositions")[target["entity_id"]]
+                study = self.workspace.index("studies")[disposition["study_id"]]
+                spec = self._assessment_spec(target["entity_id"], study)
             else:
                 outcome = self.workspace.load()["protocol"]["outcomes"][0]
                 spec = self._synthesis_spec(outcome)
@@ -1376,7 +1573,10 @@ class TaskEngine:
         )
         return task
 
-    def _validate_batch_scope(self, task: dict[str, Any], proposal: Any) -> None:
+    def _validate_batch_scope(
+        self, task: dict[str, Any], proposal: Any
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Check exact task scope; normalize assessment scaffolds and outcome bindings."""
         if not isinstance(proposal, dict) or proposal.get("base_digests") != task["base_digests"]:
             raise ValidationError("proposal base_digests differ from the task")
         stages = proposal.get("stages")
@@ -1419,19 +1619,153 @@ class TaskEngine:
             ) - target:
                 raise ValidationError("study update may only add the assigned record")
         elif task["kind"] == "assessment":
-            extractions = (stages.get("extractions") or {}).get("records")
-            appraisals = (stages.get("appraisals") or {}).get("records")
-            if (
-                not isinstance(extractions, list)
-                or not isinstance(appraisals, list)
-                or not all(isinstance(row, dict) for row in [*extractions, *appraisals])
-            ):
-                raise ValidationError("assessment requires extraction and appraisal records")
+            return self._assessment_scope(task, proposal, stages, target)
+        return proposal, []
+
+    def _assessment_scope(
+        self,
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        stages: dict[str, Any],
+        target: set[str],
+    ) -> tuple[dict[str, Any], list[str]]:
+        extractions = (stages.get("extractions") or {}).get("records")
+        appraisals = (stages.get("appraisals") or {}).get("records")
+        if (
+            not isinstance(extractions, list)
+            or not isinstance(appraisals, list)
+            or not all(isinstance(row, dict) for row in [*extractions, *appraisals])
+        ):
+            raise ValidationError("assessment requires extraction and appraisal records")
+        if not self.workspace.outcome_contract:
             if {row.get("record_id") for row in extractions} != target:
                 raise ValidationError("extractions must cover only the assigned record")
             extraction_ids = {row.get("extraction_id") for row in extractions}
             if {row.get("extraction_id") for row in appraisals} != extraction_ids:
                 raise ValidationError("every assigned extraction requires one appraisal")
+            return proposal, []
+        (record_id,) = tuple(target)
+        dispositions = (stages.get("dispositions") or {}).get("records")
+        if (
+            not isinstance(dispositions, list)
+            or len(dispositions) != 1
+            or not isinstance(dispositions[0], dict)
+            or dispositions[0].get("record_id") != record_id
+        ):
+            raise ValidationError(
+                "assessment requires exactly one dispositions row for the assigned record"
+            )
+        outcomes = self.workspace.load()["protocol"]["outcomes"]
+        scaffolds = {
+            scaffold_extraction_id(record_id, index): outcome
+            for index, outcome in enumerate(outcomes, start=1)
+        }
+        pruned: list[str] = []
+        kept: list[dict[str, Any]] = []
+        for row in extractions:
+            extraction_id = row.get("extraction_id")
+            if extraction_id in scaffolds and row == _extraction(
+                self.workspace,
+                record_id,
+                row.get("study_id"),
+                extraction_id,
+                scaffolds[extraction_id],
+            ):
+                pruned.append(extraction_id)
+                continue
+            kept.append(row)
+        kept_appraisals = [row for row in appraisals if row.get("extraction_id") not in pruned]
+        if any(row.get("record_id") != record_id for row in kept):
+            raise ValidationError("extractions must cover only the assigned record")
+        extraction_ids = [row.get("extraction_id") for row in kept]
+        appraisal_ids = [row.get("extraction_id") for row in kept_appraisals]
+        without_appraisal = sorted(str(value) for value in set(extraction_ids) - set(appraisal_ids))
+        orphaned = sorted(str(value) for value in set(appraisal_ids) - set(extraction_ids))
+        if without_appraisal or orphaned or len(set(appraisal_ids)) != len(appraisal_ids):
+            detail = "every extraction needs exactly one appraisal with the same extraction_id"
+            if without_appraisal:
+                detail += f"; missing appraisal: {', '.join(without_appraisal)}"
+            if orphaned:
+                detail += f"; appraisal without extraction: {', '.join(orphaned)}"
+            raise ValidationError(detail)
+        merged = {
+            row["extraction_id"]: row
+            for row in self.workspace.rows("extractions", fresh=False)
+            if row["record_id"] == record_id
+        }
+        merged.update(
+            {row["extraction_id"]: row for row in kept if isinstance(row.get("extraction_id"), str)}
+        )
+        problems: list[str] = []
+        bound: dict[str, list[str]] = {}
+        for extraction_id, row in sorted(merged.items()):
+            value = row.get("protocol_outcome")
+            if value not in outcomes:
+                problems.append(
+                    f"extraction {extraction_id} needs protocol_outcome set to one of: "
+                    + "; ".join(outcomes)
+                )
+                continue
+            bound.setdefault(value, []).append(extraction_id)
+        disposition = deepcopy(dispositions[0])
+        items = disposition.get("outcomes")
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise ValidationError("dispositions.outcomes must be an array of objects")
+        named = [item.get("protocol_outcome") for item in items]
+        missing = [outcome for outcome in outcomes if outcome not in named]
+        if missing:
+            problems.append("add a dispositions entry for: " + "; ".join(missing))
+        for item in items:
+            outcome = item.get("protocol_outcome")
+            if outcome not in outcomes:
+                problems.append(f"remove the unknown dispositions entry {outcome!r}")
+                continue
+            if named.count(outcome) > 1:
+                problems.append(f"decide outcome {outcome!r} only once")
+                continue
+            status = item.get("status")
+            ids = bound.get(outcome, [])
+            if status not in DISPOSITION_STATUSES:
+                problems.append(
+                    f"outcome {outcome!r} is undecided; set status to "
+                    + ", ".join(DISPOSITION_STATUSES)
+                )
+                continue
+            supplied = item.get("extraction_ids") or []
+            if status == "extracted":
+                if not ids:
+                    problems.append(
+                        f"outcome {outcome!r} is extracted but no filled extraction row has "
+                        f"protocol_outcome {outcome!r}"
+                    )
+                elif supplied and sorted(supplied) != ids:
+                    problems.append(
+                        f"outcome {outcome!r} extraction_ids must be {', '.join(ids)} "
+                        "(or leave the list empty for mdr to fill)"
+                    )
+                item["extraction_ids"] = ids
+                continue
+            if ids:
+                problems.append(
+                    f"outcome {outcome!r} is {status} but extraction rows are bound to it: "
+                    f"{', '.join(ids)}; set status to extracted or change their protocol_outcome"
+                )
+            item["extraction_ids"] = []
+            if not isinstance(item.get("rationale"), str) or not item["rationale"].strip():
+                problems.append(f"outcome {outcome!r} needs a rationale for {status}")
+            locations = item.get("inspected_locations")
+            if not isinstance(locations, list) or not locations:
+                problems.append(
+                    f"outcome {outcome!r} needs inspected_locations: the document_id and "
+                    "locator of each section or table you read"
+                )
+        if problems:
+            raise ValidationError("assessment is incomplete: " + " | ".join(problems))
+        normalized = deepcopy(proposal)
+        normalized["stages"]["extractions"]["records"] = kept
+        normalized["stages"]["appraisals"]["records"] = kept_appraisals
+        normalized["stages"]["dispositions"]["records"] = [disposition]
+        return normalized, pruned
 
     def _submit_synthesis(self, task: dict[str, Any], proposal: Any) -> dict[str, Any]:
         if not isinstance(proposal, dict) or proposal.get("schema_version") != TASK_PACKET_VERSION:
@@ -1909,7 +2243,10 @@ class TaskEngine:
         }
         if selected:
             return changed
-        for stage in ("studies", "extractions", "appraisals"):
+        stages = ["studies", "extractions", "appraisals"]
+        if self.workspace.outcome_contract:
+            stages.append("dispositions")
+        for stage in stages:
             if stage not in self.workspace.load()["datasets"]:
                 self.workspace.put(stage, {"schema_version": "2", "records": []})
                 changed = True
@@ -1965,6 +2302,8 @@ class TaskEngine:
             return self.workspace.index("appraisals")[identifier]
         if prefix == "study":
             return self.workspace.index("studies")[identifier]
+        if prefix == "disposition":
+            return self.workspace.index("dispositions")[identifier]
         raise ValidationError("unknown source identifier")
 
     def _supersede_stale(self, manifest: dict[str, Any], ledger: dict[str, Any]) -> None:
@@ -2005,6 +2344,49 @@ class TaskEngine:
         if "records" not in manifest["datasets"]:
             return "created"
         return "awaiting_route"
+
+
+def source_commands(base: str, run_id: str, task_id: str) -> dict[str, str]:
+    """Exact bounded source-access commands; placeholders are uppercase words."""
+    return {
+        "source_list": f"{base} source list {run_id} {task_id}",
+        "source_show": f"{base} source show {run_id} {task_id} SOURCE_ID --page N",
+        "source_find": f"{base} source find {run_id} {task_id} SEARCH WORDS",
+        "source_read": f"{base} source read {run_id} {task_id} DOCUMENT_ID LOCATOR",
+    }
+
+
+def _assessment_method(study: dict[str, Any]) -> str:
+    if study["kind"] == "systematic-review":
+        return "robis"
+    if study["kind"] == "primary":
+        return "rob2"
+    return "descriptive"
+
+
+def _synthesis_row(row: dict[str, Any], limit: int) -> dict[str, Any]:
+    """Summarize one extraction for a synthesis packet; full rows stay readable as sources."""
+    value = {
+        key: row.get(key)
+        for key in (
+            "extraction_id",
+            "record_id",
+            "protocol_outcome",
+            "population",
+            "comparison",
+            "outcome",
+            "timepoint",
+            "effect",
+        )
+    }
+    if limit:
+        value["result"] = str(row.get("result", ""))[:limit]
+        location = dict(row.get("source_location") or {})
+        location["quote"] = str(location.get("quote", ""))[:limit]
+        value["source_location"] = location
+    else:
+        value["result_truncated"] = True
+    return value
 
 
 def _state_for_role(role: str) -> str:

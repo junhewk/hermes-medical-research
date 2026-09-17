@@ -350,3 +350,25 @@ def test_living_review_adds_real_cadence_routine(tmp_path: Path):
     scheduled = next(job for job in result["jobs"] if job["name"] == "mdr-review-living-exercise")
     assert scheduled["schedule"] == "0 3 * * 1"
     assert scheduled["no_agent"]
+
+
+@pytest.mark.asyncio
+async def test_claim_returns_token_bound_find_and_read_commands(tmp_path: Path):
+    automation = AutomationEngine(tmp_path)
+    created = automation.create_review(
+        "source-commands",
+        protocol(),
+        schedule="once",
+        timezone="Asia/Seoul",
+    )
+    run_id = automation.review_status(created["name"])["cycles"][0]["run_id"]
+    workspace = automation.catalog.workspace(run_id)
+    search, _ = completed_search(workspace, tmp_path / "search", count=1)
+    workspace.attach(search.path)
+    await automation.tick()
+
+    claim = automation.claim("select", Actor("mdr-selector", "find-session", "selector"))
+    for key in ("source_list", "source_show", "source_find", "source_read"):
+        assert f"--claim-token {claim['claim_token']}" in claim[key]
+    assert claim["source_find"].endswith("source find " f"{run_id} {claim['task_id']} SEARCH WORDS")
+    assert claim["source_read"].endswith("DOCUMENT_ID LOCATOR")

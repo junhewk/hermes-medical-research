@@ -31,12 +31,16 @@ DEPENDENCIES = {
     "studies": ("records", "screening"),
     "extractions": ("records", "documents", "screening", "studies"),
     "appraisals": ("extractions",),
+    # One row per assessed record deciding every protocol outcome: extracted, not reported,
+    # or not applicable.  It follows extractions so a batch validates bindings in one pass.
+    "dispositions": ("records", "documents", "screening", "studies", "extractions"),
     "coverage": ("records", "screening"),
-    "synthesis": ("extractions", "appraisals", "studies"),
+    "synthesis": ("extractions", "appraisals", "studies", "dispositions"),
     "reviews": (
         "synthesis",
         "extractions",
         "appraisals",
+        "dispositions",
         "studies",
         "documents",
         "records",
@@ -51,9 +55,13 @@ ID_FIELDS = {
     "studies": "study_id",
     "extractions": "extraction_id",
     "appraisals": "extraction_id",
+    "dispositions": "record_id",
     "coverage": "record_id",
     "reviews": "finding_id",
 }
+# Runs created or first assessed by 0.5.8+ must decide every protocol outcome per record.
+# The marker lives in the manifest, outside the protocol, so Review protocol digests are stable.
+OUTCOME_CONTRACT = "outcome-dispositions"
 
 
 def digest(value: Any) -> str:
@@ -183,6 +191,8 @@ class Workspace:
             "searches": {},
             "fulltext_attempts": {},
         }
+        if evidence_version == "2":
+            data["assessment_contract"] = OUTCOME_CONTRACT
         self.path.mkdir(parents=True, exist_ok=True)
         self.store.write_json("question.json", question.to_dict())
         self.save(data)
@@ -193,11 +203,22 @@ class Workspace:
         return self.load().get("evidence_version", "1")
 
     @property
+    def outcome_contract(self) -> bool:
+        manifest = self.load()
+        return (
+            manifest.get("evidence_version") == "2"
+            and manifest.get("assessment_contract") == OUTCOME_CONTRACT
+        )
+
+    @property
     def required_stages(self) -> tuple[str, ...]:
+        modern = self.evidence_version == "2"
+        contract = self.outcome_contract
         return tuple(
             s
             for s in DEPENDENCIES
-            if self.evidence_version == "2" or s not in {"coverage", "reviews"}
+            if (modern or s not in {"coverage", "reviews"})
+            and (contract or s != "dispositions")
         )
 
     def stage_version(self, stage: str) -> str:

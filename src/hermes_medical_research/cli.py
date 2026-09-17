@@ -79,6 +79,21 @@ def parser() -> argparse.ArgumentParser:
     show.add_argument("task_id")
     show.add_argument("source_id")
     show.add_argument("--page", type=int, default=1)
+    find = source_commands.add_parser(
+        "find", help="Rank document locators by search words, with short snippets"
+    )
+    find.add_argument("run_id")
+    find.add_argument("task_id")
+    find.add_argument("words", nargs="+")
+    find.add_argument("--source", dest="source_id")
+    find.add_argument("--offset", type=int, default=0)
+    find.add_argument("--limit", type=int, default=5)
+    read = source_commands.add_parser("read", help="Read one document locator verbatim")
+    read.add_argument("run_id")
+    read.add_argument("task_id")
+    read.add_argument("source_id")
+    read.add_argument("locator")
+    read.add_argument("--page", type=int, default=1)
 
     final = commands.add_parser("finalize", help="Verify and export a fully audited run")
     final.add_argument("run_id")
@@ -349,6 +364,25 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return engine.source_list(
                 args.task_id, args.page, _actor(args), claim_token=args.claim_token
             )
+        if args.action == "find":
+            return engine.source_find(
+                args.task_id,
+                " ".join(args.words),
+                _actor(args),
+                source_id=args.source_id,
+                offset=args.offset,
+                limit=args.limit,
+                claim_token=args.claim_token,
+            )
+        if args.action == "read":
+            return engine.source_read(
+                args.task_id,
+                args.source_id,
+                args.locator,
+                args.page,
+                _actor(args),
+                claim_token=args.claim_token,
+            )
         return engine.source_show(
             args.task_id,
             args.source_id,
@@ -384,9 +418,35 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+GLOBAL_OPTIONS = ("--actor", "--session-id", "--claim-token", "--store")
+
+
+def hoist_global_options(argv: list[str]) -> list[str]:
+    """Move root options written after a subcommand to the front, preserving their values."""
+    front: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        name = item.split("=", 1)[0]
+        if name in GLOBAL_OPTIONS:
+            if "=" in item:
+                front.append(item)
+            elif index + 1 < len(argv):
+                front.extend(argv[index : index + 2])
+                index += 1
+            else:
+                rest.append(item)
+        else:
+            rest.append(item)
+        index += 1
+    return [*front, *rest]
+
+
 def main(argv: list[str] | None = None) -> int:
+    arguments = hoist_global_options(list(sys.argv[1:] if argv is None else argv))
     try:
-        result = asyncio.run(dispatch(parser().parse_args(argv)))
+        result = asyncio.run(dispatch(parser().parse_args(arguments)))
     except (ValidationError, OSError, KeyError, TypeError, ValueError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

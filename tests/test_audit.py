@@ -373,3 +373,19 @@ def test_mdr_cli_creates_and_routes_an_opaque_run(tmp_path, capsys):
     routed = json.loads(capsys.readouterr().out)
     assert routed["run_id"] == created["run_id"]
     assert routed["profile"] == "mdr-searcher"
+
+
+def test_global_options_are_accepted_after_the_subcommand(tmp_path, capsys):
+    from hermes_medical_research.cli import hoist_global_options
+
+    assert hoist_global_options(
+        ["extract", "claim", "--actor", "mdr-extractor", "--store=/tmp/x"]
+    ) == ["--actor", "mdr-extractor", "--store=/tmp/x", "extract", "claim"]
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(protocol()))
+    store = tmp_path / "store"
+    assert main(["run", "create", "--request", str(request), "--store", str(store)]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert main(["run", "next", created["run_id"], "--store", str(store), "--actor",
+                 "mdr-coordinator"]) == 0
+    assert json.loads(capsys.readouterr().out)["profile"] == "mdr-searcher"

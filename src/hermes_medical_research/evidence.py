@@ -196,6 +196,12 @@ def validate_contribution_v2(workspace: Workspace, finding: dict, contribution: 
             )
         if use == "direct" and extraction["comparator_type"] != finding["comparator_type"]:
             raise ValidationError("different comparator types require indirect or context use")
+    bound = extraction.get("protocol_outcome")
+    if use == "direct" and bound is not None and bound not in finding["protocol_outcomes"]:
+        raise ValidationError(
+            f"direct evidence must be bound to one of the finding's protocol outcomes; "
+            f"{extraction['extraction_id']} measures {bound!r}, so use indirect or context"
+        )
     appraisal = workspace.index("appraisals")[extraction["extraction_id"]]
     if use != "context" and appraisal["completion"] == "pending":
         raise ValidationError(
@@ -361,13 +367,38 @@ def readiness(workspace: Workspace) -> list[str]:
     if set(coverage) != included:
         raise ValidationError("record detailed-assessment selection for every included record")
     extracted = {e["record_id"] for e in workspace.rows("extractions")}
+    contract = workspace.outcome_contract
+    dispositions = workspace.index("dispositions") if contract else {}
     for rid, item in coverage.items():
-        if item["selection"] == "selected" and rid not in extracted:
-            raise ValidationError(
-                f"selected record {rid} has no extraction; assess or explain unavailable evidence"
-            )
+        if item["selection"] == "selected":
+            if contract and rid not in dispositions:
+                raise ValidationError(
+                    f"selected record {rid} has no outcome dispositions; "
+                    "decide every protocol outcome for it"
+                )
+            if not contract and rid not in extracted:
+                raise ValidationError(
+                    f"selected record {rid} has no extraction; "
+                    "assess or explain unavailable evidence"
+                )
         if item["selection"] != "selected":
             warnings.append(f"Detailed assessment {item['selection']} for {rid}: {item['reason']}")
+    if not contract and extracted:
+        warnings.append(
+            f"Outcome completeness was not verified per protocol outcome for {len(extracted)} "
+            "assessed records; this Run predates outcome dispositions."
+        )
+    if contract:
+        unreported = sum(
+            item["status"] != "extracted"
+            for row in dispositions.values()
+            for item in row["outcomes"]
+        )
+        if unreported:
+            warnings.append(
+                f"{unreported} record-outcome decisions were recorded as not reported or "
+                "not applicable after source inspection."
+            )
     pending = [
         a["extraction_id"] for a in workspace.rows("appraisals") if a["completion"] == "pending"
     ]

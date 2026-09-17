@@ -232,6 +232,31 @@ def export(workspace: Workspace) -> dict[str, Any]:
         "Counts describe this recorded workflow; "
         "they are not evidence of a completed systematic review.",
         "",
+    ]
+    if modern and workspace.outcome_contract:
+        decided = [item for row in workspace.rows("dispositions") for item in row["outcomes"]]
+        md += [
+            "### Outcome decisions per assessed record",
+            "",
+            *_table(
+                ["Protocol outcome", "Extracted", "Not reported", "Not applicable"],
+                [
+                    [
+                        outcome,
+                        *(
+                            sum(
+                                item["protocol_outcome"] == outcome and item["status"] == status
+                                for item in decided
+                            )
+                            for status in ("extracted", "not_reported", "not_applicable")
+                        ),
+                    ]
+                    for outcome in protocol["outcomes"]
+                ],
+            ),
+            "",
+        ]
+    md += [
         "## Findings",
         "",
     ]
@@ -547,6 +572,28 @@ def export(workspace: Workspace) -> dict[str, Any]:
             [{**r, "title": records[r["record_id"]]["title"]} for r in workspace.rows("coverage")],
             ["record_id", "title", "selection", "reason", "protocol_outcomes"],
         )
+    dispositions = workspace.rows("dispositions") if modern and workspace.outcome_contract else []
+    if modern and workspace.outcome_contract:
+        outputs["dispositions.csv"] = _csv(
+            [
+                {
+                    "record_id": row["record_id"],
+                    "title": records[row["record_id"]]["title"],
+                    **item,
+                }
+                for row in dispositions
+                for item in row["outcomes"]
+            ],
+            [
+                "record_id",
+                "title",
+                "protocol_outcome",
+                "status",
+                "rationale",
+                "extraction_ids",
+                "inspected_locations",
+            ],
+        )
     for filename, content in outputs.items():
         _atomic_write(workspace.path / filename, content)
     workspace.store.write_json("selection-counts.json", flow)
@@ -557,6 +604,7 @@ def export(workspace: Workspace) -> dict[str, Any]:
             "quality": "qualified" if warnings else "ready",
             "limitations": list(dict.fromkeys(warnings)),
             "coverage": workspace.rows("coverage") if modern else [],
+            "dispositions": dispositions,
             "claim_reviews": workspace.rows("reviews") if modern else [],
             "report_reviews": workspace.read("reviews").get("report_reviews", []) if modern else [],
             "protocol": protocol,

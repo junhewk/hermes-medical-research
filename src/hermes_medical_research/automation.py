@@ -27,7 +27,7 @@ from hermes_medical_research.search.artifacts import canonical_json
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.search.ranking import deduplicate
 
-from .tasks import COMMAND_ROLES, ROLE_PROFILES, Actor, RunCatalog, TaskEngine
+from .tasks import COMMAND_ROLES, ROLE_PROFILES, Actor, RunCatalog, TaskEngine, source_commands
 from .workspace import digest
 
 AUTOMATION_SCHEMA_VERSION = "1"
@@ -538,10 +538,7 @@ class AutomationEngine:
             "expires_at": _at(expires),
             "attempt": lease["attempt"],
             **opened,
-            "source_list": f"{base} source list {selected['run_id']} {selected['task_id']}",
-            "source_show": (
-                f"{base} source show {selected['run_id']} {selected['task_id']} SOURCE_ID --page N"
-            ),
+            **source_commands(base, selected["run_id"], selected["task_id"]),
             "submit": (
                 f"{base} {command} submit {selected['run_id']} {selected['task_id']} "
                 f"--from {opened['proposal_path']}"

@@ -102,10 +102,13 @@ def stage_errors(workspace: Workspace, stage: str, payload: dict) -> list[dict]:
                 )
             else:
                 seen.add(rid)
-            try:
-                validate_stage(workspace, stage, {**payload, key: [row]})
-            except (ValidationError, KeyError, TypeError, AttributeError) as exc:
-                errors.append(error(stage, str(rid), exc))
+            # Audit receipts are checked against the complete finding and report-target sets,
+            # so a one-row slice of the reviews stage is never valid on its own.
+            if stage != "reviews":
+                try:
+                    validate_stage(workspace, stage, {**payload, key: [row]})
+                except (ValidationError, KeyError, TypeError, AttributeError) as exc:
+                    errors.append(error(stage, str(rid), exc))
             # Collect per-contribution diagnostics without changing the finding's evidence body.
             # Body-level certainty and overlap rules must see all contributors together.
             contributions = row.get("evidence") if stage == "synthesis" else None

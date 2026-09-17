@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 from hermes_medical_research.search.models import ValidationError
@@ -48,6 +50,159 @@ def documents(
     return {"total": len(items), "offset": offset, "segments": items[offset : offset + limit]}
 
 
+_TERM = re.compile(r"[0-9a-z][0-9a-z\-]*[0-9a-z]|[0-9a-z]", re.IGNORECASE)
+_STOP_TERMS = frozenset(
+    {
+        "about",
+        "among",
+        "and",
+        "between",
+        "for",
+        "from",
+        "into",
+        "other",
+        "outcome",
+        "outcomes",
+        "that",
+        "the",
+        "their",
+        "these",
+        "this",
+        "those",
+        "with",
+    }
+)
+FIND_LIMIT = 20
+SNIPPET_BEFORE = 120
+SNIPPET_AFTER = 240
+
+
+def terms(text: str) -> list[str]:
+    """Distinct casefolded search terms; hyphenated names such as Mini-CEX stay whole."""
+    values = []
+    for match in _TERM.finditer(text.casefold()):
+        term = match.group(0)
+        if len(term) < 3 or term in _STOP_TERMS:
+            continue
+        values.append(term)
+        # "mini-cex" should also match text that writes "Mini CEX" or "CEX".
+        values.extend(part for part in term.split("-") if len(part) >= 3)
+    return list(dict.fromkeys(values))
+
+
+def _snippet(
+    text: str,
+    needles: list[str],
+    *,
+    before: int = SNIPPET_BEFORE,
+    after: int = SNIPPET_AFTER,
+) -> str:
+    folded = text.casefold()
+    positions = [folded.find(needle) for needle in needles if needle in folded]
+    start = min(positions) if positions else 0
+    begin = max(0, start - before)
+    end = min(len(text), start + after)
+    value = " ".join(text[begin:end].split())
+    return ("..." if begin else "") + value + ("..." if end < len(text) else "")
+
+
+def find_in_documents(
+    documents: list[dict[str, Any]], query: str, *, offset: int = 0, limit: int = 5
+) -> dict[str, Any]:
+    """Rank segments by distinct query terms across documents, keeping document order on ties."""
+    if offset < 0 or not 1 <= limit <= FIND_LIMIT:
+        raise ValidationError(f"offset must be nonnegative and limit between 1 and {FIND_LIMIT}")
+    needles = terms(query)
+    if not needles:
+        raise ValidationError("query needs at least one term of three or more characters")
+    ranked = []
+    position = 0
+    for document in documents:
+        segments = document.get("segments", [])
+        for index, segment in enumerate(segments):
+            folded = segment["text"].casefold()
+            matched = [needle for needle in needles if needle in folded]
+            if matched:
+                ranked.append((-len(matched), position, document, index, matched))
+            position += 1
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    hits = []
+    for negative, _, document, index, matched in ranked[offset : offset + limit]:
+        segments = document["segments"]
+        segment = segments[index]
+        hits.append(
+            {
+                "document_id": document["document_id"],
+                "locator": segment["locator"],
+                "matched_terms": matched,
+                "match_count": -negative,
+                "previous_locator": segments[index - 1]["locator"] if index else None,
+                "next_locator": (
+                    segments[index + 1]["locator"] if index + 1 < len(segments) else None
+                ),
+                "snippet": _snippet(segment["text"], matched),
+            }
+        )
+    return {
+        "query_terms": needles,
+        "total": len(ranked),
+        "offset": offset,
+        "limit": limit,
+        "hits": hits,
+    }
+
+
+def outcome_hits(
+    workspace,
+    record_id: str,
+    outcomes: list[str],
+    *,
+    per_outcome: int = 3,
+    preview: int = 120,
+) -> dict[str, list[dict[str, str]]]:
+    """Point the Extractor at likely result locations for each protocol outcome.
+
+    Hits are navigation aids only.  Terms are weighted by rarity within the record's citable
+    non-metadata segments so generic words such as "clinical" do not dominate.
+    """
+    segments = [
+        (document["document_id"], segment)
+        for document in workspace.source_documents(fresh=False)
+        if document["record_id"] == record_id and document["kind"] != "metadata"
+        for segment in document["segments"]
+    ]
+    folded = [segment["text"].casefold() for _, segment in segments]
+    result: dict[str, list[dict[str, str]]] = {}
+    for outcome in outcomes:
+        needles = terms(outcome)
+        weights = {}
+        for needle in needles:
+            frequency = sum(needle in text for text in folded)
+            if frequency:
+                weights[needle] = math.log((1 + len(segments)) / frequency)
+        scored = []
+        for index, ((document_id, segment), text) in enumerate(
+            zip(segments, folded, strict=True)
+        ):
+            matched = [needle for needle in weights if needle in text]
+            if not matched:
+                continue
+            score = sum(weights[needle] for needle in matched)
+            scored.append((-score, index, document_id, segment, matched))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        result[outcome] = [
+            {
+                "document_id": document_id,
+                "locator": segment["locator"],
+                "preview": _snippet(
+                    segment["text"], matched, before=preview // 4, after=preview - preview // 4
+                ),
+            }
+            for _, _, document_id, segment, matched in scored[:per_outcome]
+        ]
+    return result
+
+
 def _source(workspace, record_id: str) -> dict[str, Any]:
     record = workspace.index("records")[record_id]
     docs = [
@@ -91,8 +246,14 @@ def _source(workspace, record_id: str) -> dict[str, Any]:
     }
 
 
-def _extraction(workspace, record_id: str, study_id: str, extraction_id: str) -> dict:
-    return {
+def _extraction(
+    workspace,
+    record_id: str,
+    study_id: str,
+    extraction_id: str,
+    protocol_outcome: str | None = None,
+) -> dict:
+    row = {
         "extraction_id": extraction_id,
         "record_id": record_id,
         "study_id": study_id,
@@ -120,6 +281,31 @@ def _extraction(workspace, record_id: str, study_id: str, extraction_id: str) ->
         "source_location": {"document_id": "", "locator": "", "quote": ""},
         "support_checked": False,
         "support_rationale": "",
+    }
+    if protocol_outcome is not None:
+        row["protocol_outcome"] = protocol_outcome
+    return row
+
+
+def scaffold_extraction_id(record_id: str, index: int) -> str:
+    """Deterministic scaffold identity for the index-th (1-based) protocol outcome."""
+    return f"result-{record_id}-o{index}"
+
+
+def _disposition(record_id: str, study_id: str, outcomes: list[str]) -> dict:
+    return {
+        "record_id": record_id,
+        "study_id": study_id,
+        "outcomes": [
+            {
+                "protocol_outcome": outcome,
+                "status": "",
+                "rationale": "",
+                "extraction_ids": [],
+                "inspected_locations": [],
+            }
+            for outcome in outcomes
+        ],
     }
 
 
