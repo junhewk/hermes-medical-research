@@ -27,7 +27,15 @@ from hermes_medical_research.search.artifacts import canonical_json
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.search.ranking import deduplicate
 
-from .tasks import COMMAND_ROLES, ROLE_PROFILES, Actor, RunCatalog, TaskEngine, source_commands
+from .tasks import (
+    COMMAND_ROLES,
+    ROLE_PROFILES,
+    Actor,
+    RunCatalog,
+    TaskEngine,
+    mdr_command,
+    source_commands,
+)
 from .workspace import digest
 
 AUTOMATION_SCHEMA_VERSION = "1"
@@ -35,6 +43,7 @@ REVIEW_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 LEASE_MINUTES = 60
 RETRY_MINUTES = (5, 30)
 MAX_ATTEMPTS = 3
+ABANDONED_MINUTES = 95
 ROLES = tuple(COMMAND_ROLES.values())
 
 
@@ -325,13 +334,63 @@ class AutomationEngine:
         return result
 
     def set_paused(self, name: str, paused: bool) -> dict[str, Any]:
+        """Pause stops new claims and abandonment blocking; in-flight leases may finish."""
         path, review = self._load_review(_slug(name), with_path=True)
         with self._review_lock(path):
             review = self._load_review(name)
             review["state"] = "paused" if paused else "active"
+            if not paused:
+                # Waiting time while paused must not count toward worker abandonment.
+                review["resumed_at"] = _at(self.clock())
             self._event(path, review, "review.paused" if paused else "review.resumed", {})
             self._save_review(path, review)
         return self._review_view(review)
+
+    def retry_review(self, name: str, actor: Actor, *, reason: str) -> dict[str, Any]:
+        """Reopen the latest blocked Cycle in place, keeping every accepted result."""
+        actor.require("coordinator")
+        message = str(reason).strip()
+        if not message:
+            raise ValidationError("retry reason must be nonempty")
+        name = _slug(name)
+        with self.lock:
+            path, review = self._load_review(name, with_path=True)
+            with self._review_lock(path):
+                review = self._load_review(name)
+                if self._active_cycle(review):
+                    raise ValidationError("Review already has an active Cycle")
+                latest = review["cycles"][-1]
+                if latest["status"] != "blocked":
+                    raise ValidationError("only a blocked latest Cycle can be retried")
+                at = _at(self.clock())
+                engine = TaskEngine(self.catalog.workspace(latest["run_id"]))
+                result = engine.retry_blocked(reason=message, at=at)
+                latest.setdefault("retries", []).append(
+                    {
+                        "at": at,
+                        "reason": message,
+                        "previous_finished_at": latest.get("finished_at"),
+                        "task_ids": result["retried_task_ids"],
+                    }
+                )
+                latest["status"] = "active"
+                latest.pop("finished_at", None)
+                latest.pop("result_digest", None)
+                review["resumed_at"] = at
+                self._event(
+                    path,
+                    review,
+                    "cycle.retried",
+                    {"cycle_id": latest["cycle_id"], "reason": message, **result},
+                )
+                self._save_review(path, review)
+        return {
+            "name": name,
+            "state": review["state"],
+            "cycle": latest["number"],
+            "cycle_state": "active",
+            **result,
+        }
 
     def cancel_review(self, name: str, actor: Actor, *, reason: str) -> dict[str, Any]:
         """Cancel one active Cycle without deleting its immutable artifacts."""
@@ -527,8 +586,9 @@ class AutomationEngine:
                 "expires_at": _at(expires),
             }
             _write_json(self.claims / f"{claim_id}.json", claim)
+        executable = mdr_command()
         base = (
-            f"mdr --store {shlex.quote(str(self.root))} "
+            f"{executable} --store {shlex.quote(str(self.root))} "
             f"--actor {ROLE_PROFILES[role]} --session-id {actor.session_id} "
             f"--claim-token {token}"
         )
@@ -544,7 +604,7 @@ class AutomationEngine:
                 f"--from {opened['proposal_path']}"
             ),
             "fail": (
-                f"mdr --store {shlex.quote(str(self.root))} "
+                f"{executable} --store {shlex.quote(str(self.root))} "
                 f"--actor {ROLE_PROFILES[role]} --session-id {actor.session_id} "
                 f"work fail {claim_id} "
                 "--code CODE --message MESSAGE"
@@ -653,7 +713,8 @@ class AutomationEngine:
                     f'Medical Review "{event["review"]}" cycle {event["cycle"]} '
                     f"is {label}. Event {event['event_id']}. "
                     f"Acknowledge after presenting this update with: "
-                    f"mdr review acknowledge {event['event_id']}"
+                    f"{mdr_command()} --store {shlex.quote(str(self.root))} "
+                    f"review acknowledge {event['event_id']}"
                 )
         return ""
 
@@ -667,7 +728,7 @@ class AutomationEngine:
                 continue
             review = self._load_review(review_dir.name)
             active = self._active_cycle(review)
-            if not active or active["status"] != "active":
+            if not active or active["status"] != "active" or review["state"] == "paused":
                 continue
             engine = TaskEngine(self.catalog.workspace(active["run_id"]))
             status = engine.status()
@@ -727,12 +788,17 @@ class AutomationEngine:
     def _block_abandoned(
         self, engine: TaskEngine, review_path: Path, review: dict[str, Any]
     ) -> bool:
+        if review["state"] == "paused":
+            return False
+        resumed = _parse(review["resumed_at"]) if review.get("resumed_at") else None
         for task in engine.status()["active"]:
             detail = engine.task_automation(task["task_id"])
             if detail["state"] != "pending" or detail.get("lease"):
                 continue
             available = _parse(detail.get("available_at") or detail["created_at"])
-            if self.clock() - available < timedelta(minutes=95):
+            if resumed and resumed > available:
+                available = resumed
+            if self.clock() - available < timedelta(minutes=ABANDONED_MINUTES):
                 continue
             result = engine.block_unclaimed(task["task_id"], at=_at(self.clock()))
             self._event(

@@ -329,14 +329,15 @@ def validate_v2(workspace: Workspace, stage: str, payload: dict) -> None:
                 if outcome not in workspace.load()["protocol"]["outcomes"]:
                     raise ValidationError("unknown coverage protocol outcome")
     elif stage == "reviews":
+        from .audit import current_group_digests, validate_receipt
+
         findings = {f["finding_id"]: f for f in workspace.read("synthesis")["findings"]}
+        digests = current_group_digests(workspace) if payload["records"] else {}
         for row in payload["records"]:
             finding = _known(row.get("finding_id"), findings, "review finding_id")
             if row.get("review_digest") != review_digest(workspace, finding):
                 raise ValidationError("review_digest differs from the current claim and evidence")
-            from .audit import validate_receipt
-
-            validate_receipt(workspace, row)
+            validate_receipt(workspace, row, digests)
             _choice(row.get("status"), {"pass", "revise"}, "claim review status")
             checks = object_field(row, "checks")
             if set(checks) != set(REVIEW_CHECKS):

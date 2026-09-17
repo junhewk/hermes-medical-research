@@ -12,9 +12,12 @@ from hermes_medical_research.search.models import ValidationError
 from .evidence import REVIEW_CHECKS, review_digest
 from .workspace import Workspace, digest, normalized_text
 
-AUDIT_CONTRACT_VERSION = "1"
+AUDIT_CONTRACT_VERSION = "2"
 VERDICTS = {"supported", "unsupported", "uncertain"}
 CHECK_STATUSES = {"pass", "revise", "not_applicable"}
+# Report targets are packed into bounded groups so one auditor session covers a whole record.
+GROUP_TARGET_BYTES = 14 * 1024
+SCREENING_BATCH = 12
 
 
 class AuditContentError(ValidationError):
@@ -80,9 +83,11 @@ def _target(
     field: str,
     paths: list[str],
     value: Any,
-    candidate_digest: str,
+    evidence_digest: str,
     check: str | None = None,
 ) -> dict[str, Any]:
+    """A target's review digest covers its assertion and every source it may be checked
+    against, so an unchanged target keeps its receipt when unrelated evidence changes."""
     body = {
         "kind": kind,
         "entity_id": entity_id,
@@ -93,7 +98,7 @@ def _target(
     result = {
         "target_id": f"{prefix}-{digest(body)[:20]}",
         **body,
-        "review_digest": digest({"candidate_digest": candidate_digest, **body}),
+        "review_digest": digest({"evidence_digest": evidence_digest, **body}),
     }
     if check is not None:
         result["check"] = check
@@ -102,17 +107,29 @@ def _target(
 
 def build_review_targets(
     frozen: dict[str, Any],
+    finding_evidence: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build exhaustive target sets whose IDs and assertions are candidate-bound."""
-    candidate_digest = digest(frozen)
+    """Build exhaustive, content-bound target sets for the frozen candidate."""
     stages = frozen["stages"]
     protocol = frozen["protocol"]
     documents = stages["documents"]["records"]
+    document_digests = {document["document_id"]: digest(document) for document in documents}
     documents_by_record: dict[str, list[str]] = {}
     for document in documents:
         documents_by_record.setdefault(document["record_id"], []).append(
             document["document_id"]
         )
+    finding_evidence = finding_evidence or {}
+
+    def sources_digest(document_ids: list[str], **extra: Any) -> str:
+        return digest(
+            {
+                "documents": [[item, document_digests[item]] for item in sorted(document_ids)],
+                "protocol": protocol,
+                **extra,
+            }
+        )
+
     report_targets: list[dict[str, Any]] = []
     finding_targets: list[dict[str, Any]] = []
 
@@ -123,10 +140,11 @@ def build_review_targets(
         field="protocol",
         paths=["/protocol"],
         value=protocol,
-        candidate_digest=candidate_digest,
+        evidence_digest=digest({"workflow": frozen["workflow"]}),
     )
     protocol_target["result_group"] = "report-narrative"
     protocol_target["allowed_document_ids"] = []
+    protocol_target["record_id"] = None
     report_targets.append(protocol_target)
 
     synthesis = stages["synthesis"]
@@ -137,17 +155,18 @@ def build_review_targets(
         field="synthesis.report",
         paths=["/stages/synthesis/title", "/stages/synthesis/limitations"],
         value={"title": synthesis["title"], "limitations": synthesis["limitations"]},
-        candidate_digest=candidate_digest,
+        evidence_digest=sources_digest(
+            list(document_digests), findings=synthesis["findings"], workflow=frozen["workflow"]
+        ),
     )
     narrative_target["result_group"] = "report-narrative"
     narrative_target["allowed_document_ids"] = [
         document["document_id"] for document in documents
     ]
+    narrative_target["record_id"] = None
     report_targets.append(narrative_target)
 
-    extraction_records = {
-        row["extraction_id"]: row["record_id"] for row in stages["extractions"]["records"]
-    }
+    extraction_rows = {row["extraction_id"]: row for row in stages["extractions"]["records"]}
     id_fields = {
         "screening": "record_id",
         "studies": "study_id",
@@ -162,6 +181,35 @@ def build_review_targets(
             continue
         for index, row in enumerate(stages[stage]["records"]):
             entity_id = str(row.get(id_fields[stage]) or index)
+            if stage == "studies":
+                record_id = None
+                allowed = [
+                    document_id
+                    for linked in row["record_ids"]
+                    for document_id in documents_by_record.get(linked, [])
+                ]
+                extra: dict[str, Any] = {}
+                group_kind, group_id = "study", entity_id
+            else:
+                record_id = (
+                    extraction_rows[entity_id]["record_id"]
+                    if stage == "appraisals"
+                    else row["record_id"]
+                )
+                allowed = documents_by_record.get(record_id, [])
+                if stage == "appraisals":
+                    extra = {"extraction": extraction_rows[entity_id]}
+                elif stage == "dispositions":
+                    extra = {
+                        "extractions": [
+                            item
+                            for item in stages["extractions"]["records"]
+                            if item["record_id"] == record_id
+                        ]
+                    }
+                else:
+                    extra = {}
+                group_kind, group_id = "record", record_id
             target = _target(
                 prefix="report",
                 kind=stage,
@@ -169,36 +217,18 @@ def build_review_targets(
                 field=f"stages.{stage}.records[{index}]",
                 paths=[f"/stages/{stage}/records/{index}"],
                 value=row,
-                candidate_digest=candidate_digest,
+                evidence_digest=sources_digest(allowed, **extra),
             )
             target.update(
                 requires_sources=stage in {"extractions", "appraisals"},
                 # An absence claim is checked against full text; titles cannot settle it.
                 allow_metadata_only=stage in {"screening", "studies", "coverage"},
+                allowed_document_ids=allowed,
+                result_group=f"report-{group_kind}-{digest([group_kind, group_id])[:12]}",
+                record_id=record_id,
             )
             if stage == "studies":
-                group_kind, group_id = "study", entity_id
-            elif stage == "extractions":
-                group_kind, group_id = "record", row["record_id"]
-            elif stage == "appraisals":
-                group_kind, group_id = "record", extraction_records[entity_id]
-            else:
-                group_kind, group_id = "record", row["record_id"]
-            if stage == "studies":
-                allowed = [
-                    document_id
-                    for record_id in row["record_ids"]
-                    for document_id in documents_by_record.get(record_id, [])
-                ]
-            else:
-                record_id = (
-                    extraction_records[entity_id]
-                    if stage == "appraisals"
-                    else row["record_id"]
-                )
-                allowed = documents_by_record.get(record_id, [])
-            target["allowed_document_ids"] = allowed
-            target["result_group"] = f"report-{group_kind}-{digest([group_kind, group_id])[:12]}"
+                target["study_record_ids"] = list(row["record_ids"])
             report_targets.append(target)
 
     for index, finding in enumerate(synthesis["findings"]):
@@ -233,6 +263,19 @@ def build_review_targets(
                 "evidence": finding.get("evidence"),
             },
         }
+        extraction_ids = {
+            contribution["extraction_id"]
+            for contribution in finding.get("evidence", [])
+            if isinstance(contribution, dict)
+            and isinstance(contribution.get("extraction_id"), str)
+        }
+        allowed = list(
+            dict.fromkeys(
+                row["source_location"]["document_id"]
+                for row in stages["extractions"]["records"]
+                if row["extraction_id"] in extraction_ids
+            )
+        )
         for check, value in values.items():
             target = _target(
                 prefix="finding",
@@ -241,23 +284,13 @@ def build_review_targets(
                 field=f"stages.synthesis.findings[{index}].{check}",
                 paths=[f"/stages/synthesis/findings/{index}"],
                 value=value,
-                candidate_digest=candidate_digest,
+                evidence_digest=sources_digest(
+                    allowed, finding=finding_evidence.get(finding["finding_id"], digest(finding))
+                ),
                 check=check,
             )
             target["allow_metadata_only"] = check == "scope"
-            extraction_ids = {
-                contribution["extraction_id"]
-                for contribution in finding.get("evidence", [])
-                if isinstance(contribution, dict)
-                and isinstance(contribution.get("extraction_id"), str)
-            }
-            target["allowed_document_ids"] = list(
-                dict.fromkeys(
-                    row["source_location"]["document_id"]
-                    for row in stages["extractions"]["records"]
-                    if row["extraction_id"] in extraction_ids
-                )
-            )
+            target["allowed_document_ids"] = allowed
             finding_targets.append(target)
 
     membership_targets: list[dict[str, Any]] = []
@@ -291,7 +324,10 @@ def build_review_targets(
                         f"{mapping_index}"
                     ],
                     value=value,
-                    candidate_digest=candidate_digest,
+                    evidence_digest=sources_digest(
+                        allowed,
+                        finding=finding_evidence.get(finding["finding_id"], digest(finding)),
+                    ),
                     check="overlap",
                 )
                 target.update(
@@ -317,12 +353,90 @@ def _observation_template(target: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _report_units(report_targets: list[dict[str, Any]]) -> list[tuple[str, list[dict]]]:
+    """Order report targets into indivisible units keyed by the record they describe."""
+    narrative = [t for t in report_targets if t["record_id"] is None and t["kind"] != "studies"]
+    by_record: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    order: list[str] = []
+    multi_record_studies: list[dict[str, Any]] = []
+    for target in report_targets:
+        if target["kind"] == "studies":
+            linked = target["study_record_ids"]
+            if len(linked) == 1:
+                record_id = linked[0]
+            else:
+                multi_record_studies.append(target)
+                continue
+        elif target["record_id"] is None:
+            continue
+        else:
+            record_id = target["record_id"]
+        if record_id not in by_record:
+            by_record[record_id] = {"core": [], "results": []}
+            order.append(record_id)
+        bucket = "results" if target["kind"] in {"extractions", "appraisals"} else "core"
+        by_record[record_id][bucket].append(target)
+    units: list[tuple[str, list[dict[str, Any]]]] = [("narrative", narrative)]
+    for record_id in order:
+        core = by_record[record_id]["core"]
+        results = by_record[record_id]["results"]
+        if not results and [t["kind"] for t in core] == ["screening"]:
+            units.append(("screening-only", core))
+            continue
+        units.append((f"record:{record_id}", core))
+        appraisals = {t["entity_id"]: t for t in results if t["kind"] == "appraisals"}
+        for target in results:
+            if target["kind"] == "extractions":
+                pair = [target]
+                if target["entity_id"] in appraisals:
+                    pair.append(appraisals.pop(target["entity_id"]))
+                units.append((f"record:{record_id}", pair))
+        for target in appraisals.values():
+            units.append((f"record:{record_id}", [target]))
+    for target in multi_record_studies:
+        units.append((f"study:{target['entity_id']}", [target]))
+    return units
+
+
+def _pack_report_groups(report_targets: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Pack units into bounded groups without mixing records, except screening-only batches."""
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_key: str | None = None
+    size = 0
+    for key, unit in _report_units(report_targets):
+        if not unit:
+            continue
+        unit_size = len(canonical_json(unit).encode())
+        limit = SCREENING_BATCH if key == "screening-only" else None
+        fits = (
+            current
+            and key == current_key
+            and size + unit_size <= GROUP_TARGET_BYTES
+            and (limit is None or len(current) + len(unit) <= limit)
+        )
+        if not fits:
+            if current:
+                groups.append(current)
+            current, current_key, size = [], key, 0
+        current.extend(unit)
+        size += unit_size
+    if current:
+        groups.append(current)
+    return groups
+
+
 def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
-    """Return bounded, exhaustive audit groups for the current candidate."""
+    """Return bounded, exhaustive audit groups whose digests change only with their content."""
     frozen = candidate(workspace)
     candidate_digest = digest(frozen)
-    report_targets, finding_targets, membership_targets = build_review_targets(frozen)
     findings = {row["finding_id"]: row for row in frozen["stages"]["synthesis"]["findings"]}
+    finding_evidence = {
+        finding_id: review_digest(workspace, finding) for finding_id, finding in findings.items()
+    }
+    report_targets, finding_targets, membership_targets = build_review_targets(
+        frozen, finding_evidence
+    )
     groups: list[dict[str, Any]] = []
     for finding_id, finding in findings.items():
         targets = [row for row in finding_targets if row["entity_id"] == finding_id]
@@ -346,11 +460,19 @@ def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
                 "targets": targets,
                 "membership_targets": memberships,
                 "allowed_document_ids": allowed_document_ids,
+                "group_digest": digest(
+                    {
+                        "finding": finding_evidence[finding_id],
+                        "targets": [
+                            [t["target_id"], t["review_digest"]] for t in [*targets, *memberships]
+                        ],
+                    }
+                ),
                 "proposal": {
                     "schema_version": AUDIT_CONTRACT_VERSION,
                     "record": {
                         "finding_id": finding_id,
-                        "review_digest": review_digest(workspace, finding),
+                        "review_digest": finding_evidence[finding_id],
                         "status": "revise",
                         "checks": {
                             check: {"status": "revise", "rationale": ""} for check in REVIEW_CHECKS
@@ -370,24 +492,35 @@ def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
                 },
             }
         )
-    for target in report_targets:
+    for targets in _pack_report_groups(report_targets):
+        identity = digest([[t["kind"], t["entity_id"]] for t in targets])[:20]
         groups.append(
             {
-                "group_id": f"report:{target['target_id']}",
+                "group_id": f"report:{identity}",
                 "kind": "report",
-                "entity_id": target["target_id"],
-                "targets": [target],
+                "entity_id": identity,
+                "targets": targets,
                 "membership_targets": [],
-                "allowed_document_ids": target["allowed_document_ids"],
+                "allowed_document_ids": list(
+                    dict.fromkeys(
+                        document_id
+                        for target in targets
+                        for document_id in target["allowed_document_ids"]
+                    )
+                ),
+                "group_digest": digest([[t["target_id"], t["review_digest"]] for t in targets]),
                 "proposal": {
                     "schema_version": AUDIT_CONTRACT_VERSION,
-                    "report_review": {
-                        "target_id": target["target_id"],
-                        "review_digest": target["review_digest"],
-                        "result_group": target["result_group"],
-                        "status": "revise",
-                        "observations": [_observation_template(target)],
-                    },
+                    "report_reviews": [
+                        {
+                            "target_id": target["target_id"],
+                            "review_digest": target["review_digest"],
+                            "result_group": target["result_group"],
+                            "status": "revise",
+                            "observations": [_observation_template(target)],
+                        }
+                        for target in targets
+                    ],
                 },
             }
         )
@@ -515,13 +648,16 @@ def validate_task_result(
     workspace: Workspace, task: dict[str, Any], payload: Any
 ) -> dict[str, list[dict[str, Any]]]:
     """Validate one bounded audit proposal against its frozen target group."""
-    if task.get("candidate_digest") != digest(candidate(workspace)):
-        raise ValidationError("audit candidate changed; obtain a fresh task")
-    if not isinstance(payload, dict) or payload.get("schema_version") != AUDIT_CONTRACT_VERSION:
-        raise AuditContentError([_problem("schema", "audit schema_version must be '1'")])
     group = task.get("audit_group")
     if not isinstance(group, dict):
         raise ValidationError("audit task has no frozen target group")
+    current = current_group_digests(workspace)
+    if current.get(task.get("group_id")) != task.get("group_digest"):
+        raise ValidationError("audit targets changed; obtain a fresh task")
+    if not isinstance(payload, dict) or payload.get("schema_version") != AUDIT_CONTRACT_VERSION:
+        raise AuditContentError(
+            [_problem("schema", f"audit schema_version must be {AUDIT_CONTRACT_VERSION!r}")]
+        )
     targets = {row["target_id"]: row for row in group["targets"]}
     documents = {row["document_id"]: row for row in workspace.source_documents()}
     problems: list[dict[str, Any]] = []
@@ -635,28 +771,49 @@ def validate_task_result(
             problems.append(_problem("status", "a finding with revisions cannot pass"))
         records.append(deepcopy(row))
     elif group["kind"] == "report":
-        row = payload.get("report_review")
-        target = next(iter(targets.values()))
-        if not isinstance(row, dict):
-            raise AuditContentError([_problem("schema", "report audit requires report_review")])
-        for key in ("target_id", "review_digest", "result_group"):
-            if row.get(key) != target[key]:
-                problems.append(_problem("target_mismatch", f"report {key} differs"))
-        if row.get("status") not in {"pass", "revise"}:
-            problems.append(_problem("status", "report audit status must be pass or revise"))
-        observations = row.get("observations")
-        if not isinstance(observations, list) or len(observations) != 1:
-            problems.append(_problem("target_coverage", "report target needs one observation"))
-        else:
+        rows = payload.get("report_reviews")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise AuditContentError(
+                [_problem("schema", "report audit requires a report_reviews array")]
+            )
+        returned = [row.get("target_id") for row in rows]
+        if len(returned) != len(targets) or set(returned) != set(targets):
+            problems.append(
+                _problem("target_coverage", "return every report target exactly once")
+            )
+        for row in rows:
+            target = targets.get(row.get("target_id"))
+            if target is None:
+                continue
+            context = {"target_id": target["target_id"]}
+            for key in ("review_digest", "result_group"):
+                if row.get(key) != target[key]:
+                    problems.append(_problem("target_mismatch", f"report {key} differs", **context))
+            if row.get("status") not in {"pass", "revise"}:
+                problems.append(
+                    _problem("status", "report audit status must be pass or revise", **context)
+                )
+            observations = row.get("observations")
+            if not isinstance(observations, list) or len(observations) != 1:
+                problems.append(
+                    _problem("target_coverage", "report target needs one observation", **context)
+                )
+                continue
             _validate_observation(problems, observations[0], target, documents)
             if (
                 observations[0].get("verdict") in {"unsupported", "uncertain"}
                 and row.get("status") != "revise"
             ):
                 problems.append(
-                    _problem("unresolved", "unsupported report assertion requires revision")
+                    _problem(
+                        "unresolved", "unsupported report assertion requires revision", **context
+                    )
                 )
-        report_reviews.append(deepcopy(row))
+        order = {target_id: index for index, target_id in enumerate(targets)}
+        report_reviews.extend(
+            deepcopy(row)
+            for row in sorted(rows, key=lambda item: order.get(item.get("target_id"), len(order)))
+        )
     else:
         raise ValidationError("unknown audit group kind")
 
@@ -667,14 +824,22 @@ def validate_task_result(
     return {"records": records, "report_reviews": report_reviews}
 
 
-def _accepted_task(workspace: Workspace, task_id: Any) -> dict[str, Any]:
+def current_group_digests(workspace: Workspace) -> dict[str, str]:
+    _, groups = audit_groups(workspace)
+    return {group["group_id"]: group["group_digest"] for group in groups}
+
+
+def _accepted_task(
+    workspace: Workspace, task_id: Any, digests: dict[str, str] | None = None
+) -> dict[str, Any]:
     manifest = workspace.load()
     ledger = manifest.get("task_engine") or {}
     task = (ledger.get("tasks") or {}).get(task_id)
     if not task or task.get("state") != "accepted" or task.get("role") != "auditor":
         raise ValidationError("audit row lacks an accepted independent task receipt")
-    if task.get("candidate_digest") != digest(candidate(workspace)):
-        raise ValidationError("audit receipt is stale after candidate changes")
+    digests = current_group_digests(workspace) if digests is None else digests
+    if digests.get(task.get("group_id")) != task.get("group_digest"):
+        raise ValidationError("audit receipt is stale after its targets changed")
     result_file = task.get("result_file")
     relative = Path(result_file) if isinstance(result_file, str) else Path(".")
     if (
@@ -694,37 +859,42 @@ def _accepted_task(workspace: Workspace, task_id: Any) -> dict[str, Any]:
     return {**task, "result": result}
 
 
-def validate_receipt(workspace: Workspace, row: dict[str, Any]) -> None:
-    task = _accepted_task(workspace, row.get("audit_task_id"))
+def validate_receipt(
+    workspace: Workspace, row: dict[str, Any], digests: dict[str, str] | None = None
+) -> None:
+    task = _accepted_task(workspace, row.get("audit_task_id"), digests)
     if row not in task["result"].get("records", []):
         raise ValidationError("finding audit row does not match its immutable receipt")
 
 
 def validate_report_receipts(workspace: Workspace, payload: dict[str, Any]) -> None:
     if payload.get("audit_contract_version") != AUDIT_CONTRACT_VERSION:
-        raise ValidationError("a fresh v0.5 audit is required")
+        raise ValidationError("a fresh audit under the current audit contract is required")
     records = payload.get("records")
     report_reviews = payload.get("report_reviews")
     if not isinstance(records, list) or not isinstance(report_reviews, list):
         raise ValidationError("audit stage requires records and report_reviews arrays")
-    expected_candidate, groups = audit_groups(workspace)
+    _, groups = audit_groups(workspace)
+    digests = {group["group_id"]: group["group_digest"] for group in groups}
     expected_findings = {group["entity_id"] for group in groups if group["kind"] == "finding"}
-    expected_reports = {group["entity_id"] for group in groups if group["kind"] == "report"}
+    expected_reports = {
+        target["target_id"]: target
+        for group in groups
+        if group["kind"] == "report"
+        for target in group["targets"]
+    }
     if {row.get("finding_id") for row in records if isinstance(row, dict)} != expected_findings:
         raise ValidationError("audit every finding exactly once")
-    if {
-        row.get("target_id") for row in report_reviews if isinstance(row, dict)
-    } != expected_reports:
+    returned = [row.get("target_id") for row in report_reviews if isinstance(row, dict)]
+    if len(returned) != len(report_reviews) or len(set(returned)) != len(returned):
+        raise ValidationError("audit every report target exactly once")
+    if set(returned) != set(expected_reports):
         raise ValidationError("audit every report target exactly once")
     for row in records:
-        if not isinstance(row, dict):
-            raise ValidationError("finding audit rows must be objects")
-        validate_receipt(workspace, row)
+        validate_receipt(workspace, row, digests)
     for row in report_reviews:
-        if not isinstance(row, dict):
-            raise ValidationError("report audit rows must be objects")
-        task = _accepted_task(workspace, row.get("audit_task_id"))
-        if task.get("candidate_digest") != expected_candidate:
-            raise ValidationError("report audit belongs to another candidate")
+        if row.get("review_digest") != expected_reports[row["target_id"]]["review_digest"]:
+            raise ValidationError("report audit row belongs to changed target content")
+        task = _accepted_task(workspace, row.get("audit_task_id"), digests)
         if row not in task["result"].get("report_reviews", []):
             raise ValidationError("report audit row does not match its immutable receipt")

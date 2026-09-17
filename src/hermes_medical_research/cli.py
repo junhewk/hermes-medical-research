@@ -122,6 +122,11 @@ def parser() -> argparse.ArgumentParser:
     cancel = review_commands.add_parser("cancel")
     cancel.add_argument("name")
     cancel.add_argument("--reason", required=True)
+    retry = review_commands.add_parser(
+        "retry", help="Reopen a blocked latest Cycle in place with fresh task attempts"
+    )
+    retry.add_argument("name")
+    retry.add_argument("--reason", required=True)
 
     work = commands.add_parser("work", help="Drive the durable cron work queue")
     work_commands = work.add_subparsers(dest="action", required=True)
@@ -155,11 +160,25 @@ def parser() -> argparse.ArgumentParser:
     doctor_command = hermes_commands.add_parser("doctor")
     doctor_command.add_argument("--hermes-home", type=Path)
     routine_command = hermes_commands.add_parser("routines")
-    routine_command.add_argument("--apply", action="store_true")
+    routine_mode = routine_command.add_mutually_exclusive_group()
+    routine_mode.add_argument("--apply", action="store_true")
+    routine_mode.add_argument("--status", action="store_true")
+    routine_mode.add_argument("--pause-all", action="store_true")
+    routine_mode.add_argument("--resume-all", action="store_true")
     routine_command.add_argument("--hermes-home", type=Path)
-    drain_command = hermes_commands.add_parser("drain-selector", help=argparse.SUPPRESS)
+    drain_command = hermes_commands.add_parser(
+        "drain", help="Serially run one fresh Hermes session per claimed task for one role"
+    )
+    drain_command.add_argument(
+        "--role",
+        required=True,
+        choices=("searcher", "selector", "extractor", "synthesizer", "auditor"),
+    )
     drain_command.add_argument("--hermes-home", type=Path)
     drain_command.add_argument("--hermes-executable", type=Path)
+    legacy_drain = hermes_commands.add_parser("drain-selector", help=argparse.SUPPRESS)
+    legacy_drain.add_argument("--hermes-home", type=Path)
+    legacy_drain.add_argument("--hermes-executable", type=Path)
     return root
 
 
@@ -282,6 +301,8 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return automation.trigger(args.name, scheduled=args.scheduled)
         if args.action == "cancel":
             return automation.cancel_review(args.name, _actor(args), reason=args.reason)
+        if args.action == "retry":
+            return automation.retry_review(args.name, _actor(args), reason=args.reason)
         return automation.acknowledge(args.event_id)
 
     if args.command == "work":
@@ -394,7 +415,14 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "finalize":
         return await _engine(catalog, args.run_id).finalize(_actor(args), offline=args.offline)
 
-    from .hermes import bootstrap_profiles, doctor, drain_selector, routines
+    from .hermes import (
+        bootstrap_profiles,
+        doctor,
+        drain,
+        routine_status,
+        routines,
+        set_routines_paused,
+    )
 
     if args.action == "bootstrap":
         return bootstrap_profiles(
@@ -405,12 +433,23 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.action == "doctor":
         return doctor(hermes_home=args.hermes_home)
-    if args.action == "drain-selector":
-        return drain_selector(
+    if args.action in {"drain", "drain-selector"}:
+        result = await drain(
+            role=getattr(args, "role", "selector"),
             store=catalog.root,
             hermes_home=args.hermes_home,
             hermes_executable=args.hermes_executable,
         )
+        # Idle minutes stay silent so script-only Routines do not deliver empty reports.
+        if result["state"] in {"drained", "already_running"} and not (
+            result["processed"] or result["failed"]
+        ):
+            return {"_raw": ""}
+        return result
+    if args.status:
+        return routine_status(args.hermes_home)
+    if args.pause_all or args.resume_all:
+        return set_routines_paused(args.pause_all, hermes_home=args.hermes_home)
     return routines(
         apply=args.apply,
         hermes_home=args.hermes_home,

@@ -12,7 +12,11 @@ import pytest
 from test_research import completed_search
 
 from hermes_medical_research.automation import AutomationEngine
-from hermes_medical_research.hermes import _routine_specs, drain_selector, routines
+from hermes_medical_research.hermes import (
+    _routine_specs,
+    drain,
+    routines,
+)
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, TaskEngine
 
@@ -207,12 +211,9 @@ def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
         "mdr-work-auditor",
     }
     for job in result["jobs"]:
-        if not job["no_agent"]:
-            assert f"--actor {job['profile']}" in job["prompt"]
-    selector = next(job for job in result["jobs"] if job["profile"] == "mdr-selector")
-    assert selector["no_agent"]
-    assert selector["script"] == "mdr-work-selector.sh"
-    assert selector["prompt"] == ""
+        assert job["no_agent"] and job["prompt"] == "" and job["skills"] == []
+        assert job["script"] == f"{job['name']}.sh"
+        assert "monitor_script" not in job
     assert not (tmp_path / "hermes").exists()
 
 
@@ -231,7 +232,8 @@ def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path,
     asyncio.run(automation.tick())
     sessions: list[str] = []
 
-    def accept_one(_executable, _home, claim, actor):
+    def accept_one(_executable, _home, claim, actor, role):
+        assert role == "selector"
         packet = json.loads(Path(claim["packet_path"]).read_text())
         assert len(packet["target_ids"]) == 1
         proposal_path = Path(claim["proposal_path"])
@@ -257,13 +259,16 @@ def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path,
         "hermes_medical_research.hermes.shutil.which",
         lambda name: "/opt/hermes" if name == "hermes" else None,
     )
-    result = drain_selector(
-        store=tmp_path / "store",
-        hermes_home=tmp_path / "hermes",
-        invoke=accept_one,
+    result = asyncio.run(
+        drain(
+            role="selector",
+            store=tmp_path / "store",
+            hermes_home=tmp_path / "hermes",
+            invoke=accept_one,
+        )
     )
 
-    assert result == {"state": "drained", "processed": 12}
+    assert result == {"state": "drained", "role": "selector", "processed": 12, "failed": []}
     assert len(sessions) == len(set(sessions)) == 12
     assert len(workspace.rows("screening")) == 12
 
@@ -282,7 +287,7 @@ def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, m
     workspace.attach(search.path)
     asyncio.run(automation.tick())
 
-    def fail_one(_executable, _home, claim, actor):
+    def fail_one(_executable, _home, claim, actor, _role):
         automation.fail(
             claim["claim_id"],
             actor,
@@ -295,12 +300,17 @@ def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, m
         "hermes_medical_research.hermes.shutil.which",
         lambda name: "/opt/hermes" if name == "hermes" else None,
     )
-    with pytest.raises(ValidationError, match="recorded task .* as pending"):
-        drain_selector(
+    result = asyncio.run(
+        drain(
+            role="selector",
             store=tmp_path / "store",
             hermes_home=tmp_path / "hermes",
             invoke=fail_one,
         )
+    )
+    assert result["state"] == "drained"
+    assert result["processed"] == 0
+    assert [item["state"] for item in result["failed"]] == ["pending"]
 
     task = next(
         task
@@ -331,8 +341,10 @@ def test_routine_scripts_pin_the_mdr_executable(tmp_path: Path, monkeypatch):
 
     assert scripts
     assert all(f"exec {executable} ".encode() in content for content in scripts.values())
-    selector = scripts["mdr-selector/scripts/mdr-work-selector.sh"]
-    assert b"--hermes-executable /opt/hermes/bin/hermes" in selector
+    for role in ("searcher", "selector", "extractor", "synthesizer", "auditor"):
+        script = scripts[f"mdr-{role}/scripts/mdr-work-{role}.sh"]
+        assert f"hermes drain --role {role} ".encode() in script
+        assert b"--hermes-executable /opt/hermes/bin/hermes" in script
 
 
 def test_living_review_adds_real_cadence_routine(tmp_path: Path):

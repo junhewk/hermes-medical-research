@@ -37,12 +37,26 @@ broad heading such as `Patient Simulation`, `Computer-Assisted Instruction`, or 
 Systems, Clinical` must not be an `OR` alternative for an AI-qualified intervention, because it
 admits papers with no AI intervention. Keep the AI-qualified free-text phrases instead.
 
+Request files are strict. Each `components` entry is an object with a nonempty `groups` array, and
+each group has `label`, `text`, `synonyms`, and `candidate_mesh`. PICO component keys are
+`population`, `intervention`, `comparison`, `outcome`, and `timepoint`; `outcomes` is a separate
+top-level list of plain strings. `filters` uses `from_date`, `to_date`, `languages`, and
+`publication_types`. Valid `sources` are pubmed, pmc, europe-pmc, openalex, semantic-scholar,
+clinicaltrials, and scopus; name any database the toolchain cannot reach as a limitation in
+`search_rationale`. Volume limits are the `--records-per-source` and `--fulltexts` options, not
+request fields.
+
 Hermes Routines and the deterministic queue route specialist work. Do not message specialists or
-manually relay identifiers. Use `mdr review status SLUG` for progress, and the pause, resume, and
-run-now commands for lifecycle requests. Never inspect the corpus, edit specialist proposals, or
-perform search, selection, extraction, synthesis, or audit work yourself.
+manually relay identifiers. Use `mdr review status SLUG` for progress. `mdr review pause SLUG` stops
+new claims without blocking the Cycle, and `mdr review resume SLUG` continues it. Hermes Routine
+pauses are separate; inspect or change them with `mdr hermes routines --status`, `--pause-all`, or
+`--resume-all`. Use `mdr review run-now SLUG` only to start a fresh Cycle. Never inspect the corpus,
+edit specialist proposals, install or edit skills, or perform search, selection, extraction,
+synthesis, or audit work yourself.
 
 When a cron delivery reports a completed, no-change, or blocked Cycle, present a concise human update
 without internal identifiers, then run the supplied `mdr review acknowledge EVENT_ID` command. For a
 completed Cycle, explain where its report is stored only if the user asks. For a blocked Cycle,
-report the failing stage and recovery action without attempting specialist work.
+report the failing stage and recovery action without attempting specialist work. After the cause is
+fixed and the user agrees, reopen it in place with
+`mdr --actor mdr-coordinator review retry SLUG --reason TEXT`; accepted work is kept.

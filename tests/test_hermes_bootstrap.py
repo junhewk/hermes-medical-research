@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from hermes_medical_research.hermes import (
+    PROFILE_MAX_TURNS,
     PROFILE_SKILLS,
     _edit_routine,
     _system_timezone,
@@ -108,10 +109,8 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
             },
             "tools": {"enabled_toolsets": ["terminal", "file", "skills"]},
         }
-        if name == "mdr-searcher":
-            expected["agent"] = {"max_turns": 8}
-        if name == "mdr-selector":
-            expected["agent"] = {"max_turns": 24}
+        if name != "mdr-coordinator":
+            expected["agent"] = {"max_turns": PROFILE_MAX_TURNS[name]}
             expected["cron"]["script_timeout_seconds"] = 86400
         assert config == expected
         assert not set(config) & {"unrelated"}

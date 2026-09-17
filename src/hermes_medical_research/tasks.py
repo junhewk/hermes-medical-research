@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from copy import deepcopy
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ TASK_PACKET_LIMIT = 32 * 1024
 SOURCE_PAGE_LIMIT = 16 * 1024
 SOURCE_IDS_PER_PAGE = 100
 CHECKLIST_LIMIT = 6 * 1024
+MAX_CORRECTIONS_PER_GROUP = 2
 SYNTHESIS_TEXT_LIMITS = (600, 240, 0)
 CORE_BIOMEDICAL_SOURCES = frozenset(BIOMEDICAL_INDEX_SOURCES)
 RUN_ID_PREFIX = "run-"
@@ -102,6 +104,11 @@ def data_home(environ: dict[str, str] | None = None) -> Path:
     if not root.is_absolute():
         raise ValidationError("MDR_HOME and XDG_DATA_HOME must resolve to absolute paths")
     return root.resolve()
+
+
+def mdr_command() -> str:
+    """The resolved ``mdr`` executable, so Hermes sessions never depend on a reduced PATH."""
+    return shlex.quote(shutil.which("mdr") or "mdr")
 
 
 def _safe_id(value: str, prefix: str) -> str:
@@ -363,39 +370,45 @@ class TaskEngine:
     def route_next(self, actor: Actor) -> dict[str, Any]:
         actor.require("coordinator")
         with self.workspace.lock:
+            return self._route()
+
+    def _route(self) -> dict[str, Any]:
+        """Return the active Task or create the next one; the caller holds the workspace lock."""
+        manifest = self.workspace.load()
+        ledger = self._ledger(manifest)
+        self._validate_accepted_results(ledger)
+        self._supersede_stale(manifest, ledger)
+        active = next(
+            (
+                ledger["tasks"][task_id]
+                for task_id in ledger["order"]
+                if ledger["tasks"][task_id]["state"] in {"pending", "in_progress"}
+            ),
+            None,
+        )
+        if active:
+            self.workspace.save(manifest)
+            return _route_view(self.run_id, active)
+        if ledger.get("halt") or any(
+            task["state"] == "blocked" for task in ledger["tasks"].values()
+        ):
+            ledger["state"] = "blocked"
+            self.workspace.save(manifest)
+            return {"run_id": self.run_id, "task_id": None, "state": "blocked"}
+        if self._materialize_empty_stages(manifest):
             manifest = self.workspace.load()
             ledger = self._ledger(manifest)
-            self._validate_accepted_results(ledger)
-            self._supersede_stale(manifest, ledger)
-            active = next(
-                (
-                    ledger["tasks"][task_id]
-                    for task_id in ledger["order"]
-                    if ledger["tasks"][task_id]["state"] in {"pending", "in_progress"}
-                ),
-                None,
-            )
-            if active:
-                self.workspace.save(manifest)
-                return _route_view(self.run_id, active)
-            if any(task["state"] == "blocked" for task in ledger["tasks"].values()):
-                ledger["state"] = "blocked"
-                self.workspace.save(manifest)
-                return {"run_id": self.run_id, "task_id": None, "state": "blocked"}
-            if self._materialize_empty_stages(manifest):
-                manifest = self.workspace.load()
-                ledger = self._ledger(manifest)
-            spec = self._next_spec(manifest, ledger)
-            if spec is None:
-                manifest = self.workspace.load()
-                ledger = self._ledger(manifest)
-                state = self._derive_state(manifest, ledger)
-                ledger["state"] = state
-                self.workspace.save(manifest)
-                return {"run_id": self.run_id, "task_id": None, "state": state}
-            task = self._create_task(manifest, ledger, spec)
+        spec = self._next_spec(manifest, ledger)
+        if spec is None:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            state = self._derive_state(manifest, ledger)
+            ledger["state"] = state
             self.workspace.save(manifest)
-            return _route_view(self.run_id, task)
+            return {"run_id": self.run_id, "task_id": None, "state": state}
+        task = self._create_task(manifest, ledger, spec)
+        self.workspace.save(manifest)
+        return _route_view(self.run_id, task)
 
     def role_next(
         self,
@@ -429,7 +442,8 @@ class TaskEngine:
             self._validate_task_file(task, "proposal_file", "proposal.json")
             self._validate_packet(task)
             proposal = self.workspace.store.read_json(task["proposal_file"])
-            if pending and digest(proposal) != task["proposal_digest"]:
+            # A retried Task keeps the previous session's partial proposal edits.
+            if pending and not task.get("attempts") and digest(proposal) != task["proposal_digest"]:
                 raise ValidationError("task proposal template was modified before it was opened")
             if not pending and task.get("actor_profile") != actor.profile:
                 raise ValidationError("task is active under a different profile")
@@ -440,7 +454,7 @@ class TaskEngine:
             )
             ledger["state"] = _state_for_role(task["role"])
             self.workspace.save(manifest)
-            base = f"mdr --actor {ROLE_PROFILES[task['role']]}"
+            base = f"{mdr_command()} --actor {ROLE_PROFILES[task['role']]}"
             view = {
                 "run_id": self.run_id,
                 "task_id": task_id,
@@ -1406,15 +1420,13 @@ class TaskEngine:
         self, manifest: dict[str, Any], ledger: dict[str, Any]
     ) -> dict[str, Any] | None:
         candidate_digest, groups = audit.audit_groups(self.workspace)
-        accepted = {
-            task.get("group_id"): task
-            for task in ledger["tasks"].values()
-            if task.get("kind") == "audit"
-            and task.get("state") == "accepted"
-            and task.get("candidate_digest") == candidate_digest
-        }
+        accepted: dict[tuple[str, str], dict[str, Any]] = {}
+        for task_id in ledger["order"]:
+            task = ledger["tasks"][task_id]
+            if task.get("kind") == "audit" and task.get("state") == "accepted":
+                accepted[(task.get("group_id"), task.get("group_digest"))] = task
         for group in groups:
-            if group["group_id"] not in accepted:
+            if (group["group_id"], group["group_digest"]) not in accepted:
                 return {
                     "kind": "audit",
                     "target_ids": [row["target_id"] for row in group["targets"]],
@@ -1436,12 +1448,13 @@ class TaskEngine:
                     "allowed_source_ids": group["allowed_document_ids"],
                     "candidate_digest": candidate_digest,
                     "group_id": group["group_id"],
+                    "group_digest": group["group_digest"],
                 }
         rows: list[dict[str, Any]] = []
         report_rows: list[dict[str, Any]] = []
         revise_tasks: list[dict[str, Any]] = []
         for group in groups:
-            task = accepted[group["group_id"]]
+            task = accepted[(group["group_id"], group["group_digest"])]
             result = self.workspace.store.read_json(task["result_file"])
             rows.extend(result["records"])
             report_rows.extend(result["report_reviews"])
@@ -1451,9 +1464,30 @@ class TaskEngine:
             ):
                 revise_tasks.append(task)
         if revise_tasks:
+            # Correct one audit group at a time; the others keep their receipts until then.
             first = revise_tasks[0]
+            counts = ledger.setdefault("correction_counts", {})
+            if counts.get(first["group_id"], 0) >= MAX_CORRECTIONS_PER_GROUP:
+                ledger["halt"] = {
+                    "code": "audit_unresolved",
+                    "group_id": first["group_id"],
+                    "audit_task_id": first["task_id"],
+                    "at": now(),
+                }
+                ledger["state"] = "blocked"
+                ledger["events"].append(
+                    {
+                        "event": "run.halted",
+                        "code": "audit_unresolved",
+                        "task_id": first["task_id"],
+                        "at": now(),
+                    }
+                )
+                self.workspace.save(manifest)
+                return None
+            counts[first["group_id"]] = counts.get(first["group_id"], 0) + 1
             ledger["revision"] = {
-                "audit_task_ids": [task["task_id"] for task in revise_tasks],
+                "audit_task_ids": [first["task_id"]],
                 "group_id": first["group_id"],
                 "candidate_digest": candidate_digest,
                 "created_at": now(),
@@ -1486,7 +1520,18 @@ class TaskEngine:
             task_id = revision["audit_task_ids"][0]
             task = self._ledger(self.workspace.load())["tasks"][task_id]
             group = self._audit_task(task)["audit_group"]
-            target = group["targets"][0]
+            revised = set()
+            if task.get("result_file"):
+                result = self.workspace.store.read_json(task["result_file"], default=None) or {}
+                revised = {
+                    row.get("target_id")
+                    for row in result.get("report_reviews", [])
+                    if row.get("status") == "revise"
+                }
+            target = next(
+                (item for item in group["targets"] if item.get("target_id") in revised),
+                group["targets"][0],
+            )
             kind = target["kind"]
             if kind == "screening":
                 spec = self._screening_spec(target["entity_id"])
@@ -1535,7 +1580,7 @@ class TaskEngine:
             "proposal_path": str(self.workspace.path / proposal_file),
             "source_count": len(allowed_sources),
             "source_list": (
-                f"mdr --actor {ROLE_PROFILES[role]} source list {self.run_id} {task_id}"
+                f"{mdr_command()} --actor {ROLE_PROFILES[role]} source list {self.run_id} {task_id}"
             ),
             **spec["packet_data"],
         }
@@ -1562,7 +1607,7 @@ class TaskEngine:
             "created_at": now(),
             "attempts": [],
         }
-        for key in ("candidate_digest", "group_id", "correction_for"):
+        for key in ("candidate_digest", "group_id", "group_digest", "correction_for"):
             if key in spec:
                 task[key] = spec[key]
         ledger["tasks"][task_id] = task
@@ -1895,7 +1940,7 @@ class TaskEngine:
             "state": "plan_recorded",
             "plan_digest": digest(plan),
             "next": (
-                f"mdr --actor mdr-searcher search run {self.run_id} {task['task_id']}"
+                f"{mdr_command()} --actor mdr-searcher search run {self.run_id} {task['task_id']}"
             ),
         }
 
@@ -1935,14 +1980,58 @@ class TaskEngine:
                     old["state"] = "superseded"
                     old["superseded_at"] = now()
         ledger["events"].append({"event": "task.accepted", "task_id": task_id, "at": now()})
-        if manifest.get("automation") and task["role"] == "selector":
-            spec = self._next_spec(manifest, ledger)
-            if spec is not None and KIND_ROLES[spec["kind"]] == "selector":
-                continuation = self._create_task(manifest, ledger, spec)
-                task["continuation_task_id"] = continuation["task_id"]
         ledger["state"] = self._derive_state(manifest, ledger)
         self.workspace.save(manifest)
-        return self._receipt_view(task)
+        self._complete_claim_file(task)
+        automation = manifest.get("automation") or {}
+        # A refresh Cycle must be reconciled by the Coordinator tick before routing on.
+        awaiting_refresh = automation.get("predecessor_run_id") and not automation.get(
+            "refresh_reconciled"
+        )
+        if automation and not awaiting_refresh:
+            try:
+                routed = self._route()
+            except ValidationError as exc:
+                manifest = self.workspace.load()
+                self._ledger(manifest)["events"].append(
+                    {
+                        "event": "task.route_deferred",
+                        "task_id": task_id,
+                        "error": str(exc)[:500],
+                        "at": now(),
+                    }
+                )
+                self.workspace.save(manifest)
+            else:
+                if routed.get("task_id") and routed["task_id"] != task_id:
+                    manifest = self.workspace.load()
+                    stored = self._ledger(manifest)["tasks"][task_id]
+                    stored["continuation_task_id"] = routed["task_id"]
+                    self.workspace.save(manifest)
+        return self._receipt_view(self._ledger(self.workspace.load())["tasks"][task_id])
+
+    def _complete_claim_file(self, task: dict[str, Any]) -> None:
+        """Close the store-level claim record once its leased Task is accepted."""
+        lease = task.get("lease") or {}
+        claim_id = lease.get("claim_id")
+        if not isinstance(claim_id, str) or not claim_id.startswith("claim-"):
+            return
+        path = self.workspace.path.parent.parent / "claims" / f"{claim_id}.json"
+        if not path.is_file():
+            return
+        try:
+            claim = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if claim.get("state") != "active" or claim.get("task_id") != task["task_id"]:
+            return
+        claim.update(state="completed", completed_at=task.get("accepted_at") or now())
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(claim, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
 
     def task_automation(self, task_id: str) -> dict[str, Any]:
         """Return the bounded scheduling fields for one Task."""
@@ -1998,6 +2087,58 @@ class TaskEngine:
             "code": "operator_cancelled",
             "reason": message,
             "task_ids": cancelled,
+        }
+
+    def retry_blocked(self, *, reason: str, at: str) -> dict[str, Any]:
+        """Return operator- or worker-blocked Tasks to the queue with fresh attempts."""
+        message = str(reason).strip()
+        if not message:
+            raise ValidationError("retry reason must be nonempty")
+        retried: list[str] = []
+        with self.workspace.lock:
+            manifest = self.workspace.load()
+            ledger = self._ledger(manifest)
+            for task in ledger["tasks"].values():
+                if task["state"] != "blocked":
+                    continue
+                code = task.get("blocked_code") or (task.get("lease") or {}).get("code")
+                task.setdefault("retries", []).append(
+                    {
+                        "at": at,
+                        "reason": message,
+                        "code": code,
+                        "automation_attempts": task.get("automation_attempts", 0),
+                    }
+                )
+                for key in (
+                    "lease",
+                    "blocked_at",
+                    "blocked_code",
+                    "blocked_reason",
+                    "actor_profile",
+                    "actor_session_id",
+                ):
+                    task.pop(key, None)
+                task.update(state="pending", automation_attempts=0, available_at=at)
+                retried.append(task["task_id"])
+                ledger["events"].append(
+                    {"event": "task.retried", "task_id": task["task_id"], "code": code, "at": at}
+                )
+            halt = ledger.pop("halt", None)
+            if halt:
+                ledger.setdefault("correction_counts", {}).pop(halt.get("group_id"), None)
+                ledger["events"].append(
+                    {"event": "run.halt_cleared", "code": halt.get("code"), "at": at}
+                )
+            if not retried and not halt:
+                raise ValidationError("run has no blocked task or halt to retry")
+            ledger["state"] = self._derive_state(manifest, ledger)
+            self.workspace.save(manifest)
+        return {
+            "run_id": self.run_id,
+            "retried_task_ids": retried,
+            "halt_cleared": halt,
+            "state": ledger["state"],
         }
 
     def lease_task(
@@ -2194,8 +2335,12 @@ class TaskEngine:
             "accepted_at": task.get("accepted_at"),
         }
         if task.get("continuation_task_id"):
+            continuation = self._ledger(self.workspace.load())["tasks"].get(
+                task["continuation_task_id"], {}
+            )
             result["continuation"] = {
                 "task_id": task["continuation_task_id"],
+                "role": continuation.get("role"),
                 "state": "pending",
             }
         return result
@@ -2319,6 +2464,8 @@ class TaskEngine:
             and (self.workspace.path / "completion.json").is_file()
         ):
             return "finalized"
+        if ledger.get("halt"):
+            return "blocked"
         if ledger.get("revision"):
             return "revision_required"
         if any(task["state"] == "blocked" for task in ledger["tasks"].values()):

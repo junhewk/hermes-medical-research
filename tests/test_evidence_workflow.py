@@ -120,21 +120,6 @@ def record_reviews(workspace):
         assert route["role"] == "auditor"
         opened = engine.role_next("audit", route["task_id"], auditor)
         payload = json.loads(Path(opened["proposal_path"]).read_text())
-        container = payload.get("record") or payload["report_review"]
-        container["status"] = "pass"
-        if "checks" in container:
-            container["checks"] = {
-                check: {
-                    "status": "pass",
-                    "rationale": "Checked against the frozen synthetic evidence.",
-                }
-                for check in REVIEW_CHECKS
-            }
-        for observation in container["observations"]:
-            observation.update(
-                verdict="supported",
-                rationale="Fixture source and candidate target checked.",
-            )
         manifest = workspace.load()
         task = manifest["task_engine"]["tasks"][route["task_id"]]
         packet = workspace.store.read_json(task["packet_file"])
@@ -143,16 +128,32 @@ def record_reviews(workspace):
             for target in packet["audit_group"]["targets"]
         }
         fallback_source = workspace.rows("extractions")[0]["source_location"]
-        for observation in container["observations"]:
-            if targets[observation["target_id"]].get("requires_sources"):
-                observation["sources"] = [fallback_source]
-        target = packet["audit_group"]["targets"][0]
-        if target.get("requires_sources") and target["kind"] in {
-            "extractions",
-            "appraisals",
-        }:
-            extraction = workspace.index("extractions")[target["entity_id"]]
-            container["observations"][0]["sources"] = [extraction["source_location"]]
+        extractions = workspace.index("extractions")
+        containers = [payload["record"]] if "record" in payload else payload["report_reviews"]
+        for container in containers:
+            container["status"] = "pass"
+            if "checks" in container:
+                container["checks"] = {
+                    check: {
+                        "status": "pass",
+                        "rationale": "Checked against the frozen synthetic evidence.",
+                    }
+                    for check in REVIEW_CHECKS
+                }
+            for observation in container["observations"]:
+                observation.update(
+                    verdict="supported",
+                    rationale="Fixture source and candidate target checked.",
+                )
+                target = targets[observation["target_id"]]
+                if not target.get("requires_sources"):
+                    continue
+                if target["kind"] in {"extractions", "appraisals"}:
+                    observation["sources"] = [
+                        extractions[target["entity_id"]]["source_location"]
+                    ]
+                else:
+                    observation["sources"] = [fallback_source]
         result = audit.validate_task_result(workspace, engine._audit_task(task), payload)
         for row in [*result["records"], *result["report_reviews"]]:
             row["audit_task_id"] = route["task_id"]

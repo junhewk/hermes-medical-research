@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -41,9 +43,34 @@ DESCRIPTIONS = {
 MANAGED = "mdr-managed.json"
 ROUTINES_MANAGED = "mdr-routines.json"
 TOOLSETS = ["terminal", "file", "skills"]
-PROFILE_MAX_TURNS = {"mdr-searcher": 8, "mdr-selector": 24}
-SELECTOR_SCRIPT_TIMEOUT_SECONDS = 24 * 60 * 60
-SELECTOR_HOST_ATTEMPTS = 3
+WORKER_ROLES = ("searcher", "selector", "extractor", "synthesizer", "auditor")
+ROLE_SKILLS = {
+    "searcher": "medical-search",
+    "selector": "medical-select",
+    "extractor": "medical-extract",
+    "synthesizer": "medical-synthesize",
+    "auditor": "medical-synthesize",
+}
+ROLE_COMMANDS = {
+    "searcher": "search",
+    "selector": "select",
+    "extractor": "extract",
+    "synthesizer": "synthesize",
+    "auditor": "audit",
+}
+# Per-session model-turn ceilings for one claimed Task.  An assessment reads each protocol
+# outcome's locations and edits one proposal; an audit group checks several targets.
+PROFILE_MAX_TURNS = {
+    "mdr-searcher": 8,
+    "mdr-selector": 16,
+    "mdr-extractor": 60,
+    "mdr-synthesizer": 40,
+    "mdr-auditor": 48,
+}
+WORKER_SCRIPT_TIMEOUT_SECONDS = 24 * 60 * 60
+HOST_ATTEMPTS = 3
+HOST_TIMEOUT_SECONDS = 20 * 60
+LEASE_RESERVE_SECONDS = 5 * 60
 
 
 def _home(value: Path | None) -> Path:
@@ -162,8 +189,9 @@ def _desired_files(name: str, settings: dict[str, Any]) -> dict[str, bytes]:
         )
         if isinstance(value, str) and value.strip()
     }
-    if name == "mdr-selector":
-        cron["script_timeout_seconds"] = SELECTOR_SCRIPT_TIMEOUT_SECONDS
+    if name != "mdr-coordinator":
+        # Each worker Routine is a serial runner that may drain its queue for hours.
+        cron["script_timeout_seconds"] = WORKER_SCRIPT_TIMEOUT_SECONDS
     config = {
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),
@@ -363,6 +391,7 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
             ready = False
         profiles.append({"profile": name, "ready": not problems, "problems": problems})
     routine_state = _routine_health(home)
+    paused_routines = routine_status(home)["paused"] if routine_state["ready"] else []
     main_config = _source_settings(None, home)
     if not main_config:
         # Isolated qualification homes commonly contain only managed profiles,
@@ -414,6 +443,7 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
         "bot_mode_discovery": "automatic",
         "profiles": profiles,
         "routines": routine_state,
+        "paused_routines": paused_routines,
         "mdr": mdr_executable,
         "gateway_multiplex_profiles": multiplex,
         "cron_schedulers": cron_doctors,
@@ -517,69 +547,26 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
             "paused": False,
         }
     )
-    skill_for = {
-        "searcher": "medical-search",
-        "selector": "medical-select",
-        "extractor": "medical-extract",
-        "synthesizer": "medical-synthesize",
-        "auditor": "medical-synthesize",
-    }
-    command_for = {
-        "searcher": "search",
-        "selector": "select",
-        "extractor": "extract",
-        "synthesizer": "synthesize",
-        "auditor": "audit",
-    }
-    for role, skill in skill_for.items():
+    for role in WORKER_ROLES:
         profile = f"mdr-{role}"
-        if role == "selector":
-            script = "mdr-work-selector.sh"
-            scripts[f"{profile}/scripts/{script}"] = (
-                "#!/bin/sh\n"
-                f"exec {quoted_mdr} --store {quoted_store} hermes drain-selector "
-                f"--hermes-home {shlex.quote(str(home))} "
-                f"--hermes-executable {quoted_hermes}\n"
-            ).encode()
-            jobs.append(
-                {
-                    "profile": profile,
-                    "name": "mdr-work-selector",
-                    "schedule": "* * * * *",
-                    "prompt": "",
-                    "script": script,
-                    "no_agent": True,
-                    "deliver": None,
-                    "failure_deliver": "bot-chat:mdr-coordinator",
-                    "skills": [],
-                    "paused": False,
-                }
-            )
-            continue
-        monitor = f"mdr-probe-{role}.sh"
-        scripts[f"{profile}/scripts/{monitor}"] = (
+        script = f"mdr-work-{role}.sh"
+        scripts[f"{profile}/scripts/{script}"] = (
             "#!/bin/sh\n"
-            f"exec {quoted_mdr} --store {quoted_store} work probe {role}\n"
+            f"exec {quoted_mdr} --store {quoted_store} hermes drain --role {role} "
+            f"--hermes-home {shlex.quote(str(home))} "
+            f"--hermes-executable {quoted_hermes}\n"
         ).encode()
-        command = command_for[role]
-        prompt = (
-            f"Run `mdr --store {quoted_store} --actor {profile} {command} claim`. "
-            "If it returns idle, reply exactly [SILENT]. Otherwise perform the loaded skill "
-            "using only the returned packet, proposal, and exact commands. On any "
-            "unrecoverable error, run the returned fail command. Return only the recorded "
-            "state."
-        )
         jobs.append(
             {
                 "profile": profile,
                 "name": f"mdr-work-{role}",
                 "schedule": "* * * * *",
-                "prompt": prompt,
-                "monitor_script": monitor,
-                "no_agent": False,
+                "prompt": "",
+                "script": script,
+                "no_agent": True,
                 "deliver": None,
                 "failure_deliver": "bot-chat:mdr-coordinator",
-                "skills": [skill],
+                "skills": [],
                 "paused": False,
             }
         )
@@ -750,27 +737,41 @@ def _edit_routine(
         )
 
 
-def _invoke_selector_claim(
+def _invoke_claim(
     executable: str,
     home: Path,
     claim: dict[str, Any],
     actor: Any,
+    role: str,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one fresh Hermes session for exactly one already-claimed Task."""
+    commands = (
+        "source_list",
+        "source_show",
+        "source_find",
+        "source_read",
+        "submit",
+        "execute",
+        "run",
+        "approve",
+        "fail",
+    )
     instruction = {
-        "schema_version": "1",
+        "schema_version": "2",
+        "role": role,
+        "kind": claim.get("kind"),
         "run_id": claim["run_id"],
         "task_id": claim["task_id"],
         "packet_path": claim["packet_path"],
         "proposal_path": claim["proposal_path"],
-        "source_list": claim["source_list"],
-        "source_show": claim["source_show"],
-        "submit": claim["submit"],
-        "fail": claim["fail"],
+        **{key: claim[key] for key in commands if key in claim},
     }
+    skill = ROLE_SKILLS[role]
+    profile = f"mdr-{role}"
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
-        prefix="mdr-selector-",
+        prefix=f"mdr-{role}-",
         suffix=".json",
         delete=False,
     ) as handle:
@@ -780,49 +781,49 @@ def _invoke_selector_claim(
     try:
         instruction_path.chmod(0o600)
         prompt = (
-            "Use the medical-select skill. One article task is already claimed. "
-            f"Read the instruction file at {instruction_path}. Do not run a claim command and "
-            "do not process another task. Read only the supplied packet and bounded sources, "
-            "complete the one decision and reason in the proposal, and run the exact submit "
-            "command. If the task cannot be completed, run the exact fail command. Return only "
-            "the run_id, task_id, and recorded state."
+            f"Use the {skill} skill. One {claim.get('kind')} task is already claimed for you. "
+            f"Read the instruction file at {instruction_path}. It names the only packet, "
+            "proposal, and commands you may use. Do not run a claim command and do not start "
+            "another task. Complete this task as the skill describes, then return only the "
+            "run_id, task_id, and recorded state."
         )
         return subprocess.run(
-            [
-                executable,
-                "-p",
-                "mdr-selector",
-                "--skills",
-                "medical-select",
-                "-z",
-                prompt,
-            ],
+            [executable, "-p", profile, "--skills", skill, "-z", prompt],
             check=False,
             capture_output=True,
             text=True,
+            timeout=HOST_TIMEOUT_SECONDS,
             env={
                 **os.environ,
                 "HERMES_HOME": str(home),
                 "HERMES_SESSION_ID": actor.session_id,
-                "HERMES_SESSION_PROFILE": "mdr-selector",
+                "HERMES_SESSION_PROFILE": profile,
             },
         )
     finally:
         instruction_path.unlink(missing_ok=True)
 
 
-def drain_selector(
+async def drain(
     *,
+    role: str,
     store: Path,
     hermes_home: Path | None = None,
     hermes_executable: Path | None = None,
-    invoke: Callable[[str, Path, dict[str, Any], Any], subprocess.CompletedProcess[str]]
+    invoke: Callable[[str, Path, dict[str, Any], Any, str], subprocess.CompletedProcess[str]]
     | None = None,
 ) -> dict[str, Any]:
-    """Run one fresh host-native Selector session per article until its queue is empty."""
+    """Run one fresh host session per claimed Task until the role's queue is empty.
+
+    A Task that its host session cannot finish is failed through the durable queue, with
+    backoff, and the runner moves on instead of stalling every later Task.  Full-text
+    acquisition has no semantic choice, so the runner submits its fixed proposal itself.
+    """
     from .automation import AutomationEngine
     from .tasks import Actor, TaskEngine
 
+    if role not in ROLE_SKILLS:
+        raise ValidationError(f"unknown worker role: {role}")
     root = store.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     home = _home(hermes_home)
@@ -833,61 +834,156 @@ def drain_selector(
     )
     if executable is None:
         raise ValidationError("Hermes CLI is not installed or is not on PATH")
-    call = invoke or _invoke_selector_claim
-    lock = FileLock(str(root / ".selector-drain.lock"))
+    call = invoke or _invoke_claim
+    lock = FileLock(str(root / f".drain-{role}.lock"))
     try:
         lock.acquire(timeout=0)
     except FileLockTimeout:
-        return {"state": "already_running", "processed": 0}
+        return {"state": "already_running", "role": role, "processed": 0, "failed": []}
     processed = 0
+    failed: list[dict[str, Any]] = []
+    profile = f"mdr-{role}"
     try:
         automation = AutomationEngine(root)
         while True:
-            actor = Actor(
-                "mdr-selector",
-                f"serial-selector-{uuid4().hex}",
-                "selector",
-            )
-            claim = automation.claim("select", actor)
+            actor = Actor(profile, f"serial-{role}-{uuid4().hex}", role)
+            claim = automation.claim(ROLE_COMMANDS[role], actor)
             if claim.get("state") == "idle":
-                return {"state": "drained", "processed": processed}
-            packet = json.loads(Path(claim["packet_path"]).read_text(encoding="utf-8"))
-            if len(packet.get("target_ids", [])) != 1:
-                automation.fail(
-                    claim["claim_id"],
-                    actor,
-                    code="selector_scope_invalid",
-                    message="Selector task must contain exactly one article.",
-                )
-                raise ValidationError("Selector task must contain exactly one article")
+                return {
+                    "state": "drained",
+                    "role": role,
+                    "processed": processed,
+                    "failed": failed,
+                }
             engine = TaskEngine(automation.catalog.workspace(claim["run_id"]))
-            last_error = "Selector host invocation did not accept its assigned article."
-            for _ in range(SELECTOR_HOST_ATTEMPTS):
-                completed = call(executable, home, claim, actor)
-                task = engine.task_automation(claim["task_id"])
-                if task["state"] == "accepted":
-                    processed += 1
-                    break
-                if task["state"] != "in_progress":
-                    raise ValidationError(
-                        f"Selector host recorded task {claim['task_id']} as "
-                        f"{task['state']}"
+            packet = json.loads(Path(claim["packet_path"]).read_text(encoding="utf-8"))
+            outcome: str | None = None
+            last_error = f"{role} host session did not finish its assigned task."
+            if role == "selector" and len(packet.get("target_ids", [])) != 1:
+                last_error = "Selector task must contain exactly one article."
+            elif claim.get("kind") == "fulltext":
+                try:
+                    await engine.submit(
+                        "extract",
+                        claim["task_id"],
+                        Path(claim["proposal_path"]),
+                        actor,
+                        claim_token=claim["claim_token"],
                     )
-                detail = (completed.stderr or completed.stdout or "").strip()
-                last_error = detail[-500:] or last_error
+                except (ValidationError, OSError, json.JSONDecodeError) as exc:
+                    last_error = f"deterministic full-text submission failed: {exc}"[:500]
+                state = engine.task_automation(claim["task_id"])["state"]
+                outcome = None if state == "in_progress" else state
             else:
-                automation.fail(
-                    claim["claim_id"],
-                    actor,
-                    code="selector_host_failed",
-                    message=last_error,
-                )
-                raise ValidationError(
-                    f"Selector host failed task {claim['task_id']} after "
-                    f"{SELECTOR_HOST_ATTEMPTS} immediate attempts"
-                )
+                expires = datetime.fromisoformat(claim["expires_at"])
+                for _ in range(HOST_ATTEMPTS):
+                    remaining = (expires - datetime.now(UTC)).total_seconds()
+                    if remaining < LEASE_RESERVE_SECONDS:
+                        last_error = "claim lease is nearly expired; retry later"
+                        break
+                    try:
+                        completed = await asyncio.to_thread(
+                            call, executable, home, claim, actor, role
+                        )
+                        detail = (completed.stderr or completed.stdout or "").strip()
+                    except subprocess.TimeoutExpired:
+                        detail = f"host session exceeded {HOST_TIMEOUT_SECONDS} seconds"
+                    state = engine.task_automation(claim["task_id"])["state"]
+                    if state != "in_progress":
+                        outcome = state
+                        break
+                    last_error = detail[-500:] or last_error
+            if outcome == "accepted":
+                processed += 1
+                continue
+            record: dict[str, Any] = {
+                "run_id": claim["run_id"],
+                "task_id": claim["task_id"],
+                "kind": claim.get("kind"),
+            }
+            if outcome is None:
+                code = f"{role}_host_failed"
+                try:
+                    result = automation.fail(
+                        claim["claim_id"], actor, code=code, message=last_error
+                    )
+                    record.update(code=code, blocked=result["blocked"])
+                except ValidationError as exc:
+                    record.update(code=code, fail_not_recorded=str(exc))
+            else:
+                # The host session itself ran the fail command, or the Task was superseded.
+                record["state"] = outcome
+            failed.append(record)
     finally:
         lock.release()
+
+
+async def drain_selector(**kwargs: Any) -> dict[str, Any]:
+    """Compatibility entry point for Routine scripts written before 0.5.8."""
+    return await drain(role="selector", **kwargs)
+
+
+def routine_status(hermes_home: Path | None = None) -> dict[str, Any]:
+    """Report each managed Routine's Hermes pause state without changing it."""
+    home = _home(hermes_home)
+    manifest = _routine_manifest(home)
+    if manifest is None:
+        return {"installed": False, "jobs": [], "paused": []}
+    jobs = []
+    for managed in manifest.get("jobs", []):
+        matches = [
+            job
+            for job in _jobs(_profile_root(home, managed["profile"]))
+            if job.get("name") == managed["name"]
+        ]
+        job = matches[0] if len(matches) == 1 else {}
+        jobs.append(
+            {
+                "profile": managed["profile"],
+                "name": managed["name"],
+                "id": job.get("id"),
+                "present": len(matches) == 1,
+                "enabled": job.get("enabled", True) if job else False,
+                "state": job.get("state"),
+                "last_status": job.get("last_status"),
+                "last_run_at": job.get("last_run_at"),
+            }
+        )
+    return {
+        "installed": True,
+        "jobs": jobs,
+        "paused": [f"{job['profile']}/{job['name']}" for job in jobs if not job["enabled"]],
+    }
+
+
+def set_routines_paused(paused: bool, *, hermes_home: Path | None = None) -> dict[str, Any]:
+    """Pause or resume every managed Routine through Hermes's public cron CLI."""
+    home = _home(hermes_home)
+    executable = shutil.which("hermes")
+    if executable is None:
+        raise ValidationError("Hermes CLI is not installed or is not on PATH")
+    status = routine_status(home)
+    if not status["installed"]:
+        raise ValidationError("managed cron routines are not installed")
+    changed = []
+    for job in status["jobs"]:
+        if not job["present"] or not job["id"] or job["enabled"] == (not paused):
+            continue
+        completed = subprocess.run(
+            [executable, "-p", job["profile"], "cron", "pause" if paused else "resume", job["id"]],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "HERMES_HOME": str(home)},
+        )
+        if completed.returncode:
+            raise ValidationError(
+                f"Hermes could not {'pause' if paused else 'resume'} "
+                f"{job['profile']}/{job['name']}: "
+                f"{(completed.stderr or completed.stdout).strip()}"
+            )
+        changed.append(f"{job['profile']}/{job['name']}")
+    return {"changed": changed, **routine_status(home)}
 
 
 def routines(
