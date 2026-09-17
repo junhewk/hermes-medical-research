@@ -48,7 +48,7 @@ uv run pytest
 uv build
 ```
 
-The 0.5.9 local run on 2026-09-17 collected and passed 214 tests; Ruff, `git diff --check`, wheel
+The 0.5.10 local run on 2026-09-17 collected and passed 217 tests; Ruff, `git diff --check`, wheel
 construction, source-distribution construction, and a wheel-only `mdr` smoke test also passed. The
 final count is updated with each release commit.
 
@@ -101,6 +101,22 @@ with `source read`. It then spent most of 30 turns reading installed package sou
 field values, and single model turns took 10 to 60 seconds. The attempt was stopped before
 submission. These findings produced 0.5.9: packet `field_rules`, and claim renewal during long
 sessions.
+
+### 0.5.9 host smoke test (2026-09-17)
+
+The same seeded store was rerun on 0.5.9. The Extractor session read `field_rules` instead of
+package source and decided all seven protocol outcomes for PMID 42700004: knowledge test score,
+Mini-CEX clinical skills, and satisfaction were extracted, which closes the qualification gap;
+cognitive load was marked not reported with eight inspected locations; and one untouched scaffold
+was pruned. The first submission was rejected for one missing `effect.missing_reason`, which
+cascaded into eight misleading dependent-stage errors; the session patched the row and the second
+submission was accepted in one attempt, after about 32 minutes with a shared model endpoint.
+Review of the stored rows found a chi-square statistic recorded as a between-group effect and a
+discussion remark extracted as an outcome. These findings produced 0.5.10.
+
+The production refresh Cycle for `ai-med-ed-evidence-report-v4` reused 30 of 46 prior screening
+decisions; the other 16 differed only in citation counts and source result positions, which 0.5.10
+treats as volatile for future refreshes.
 
 ## Repository and release record
 

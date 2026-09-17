@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.10 - 2026-09-17
+
+- Stopped cascading validation errors: when one stage in a submission fails, stages that depend on
+  it report a single deferred note instead of errors echoing the upstream failure. In the 0.5.9
+  host smoke test one missing `effect.missing_reason` produced eight misleading errors.
+- Rejected test statistics and P values as effect estimates in per-outcome runs, and stated in
+  field rules and the Extractor skill that discussion or limitation remarks are not measured
+  outcomes. The smoke test recorded a chi-square statistic as a between-group effect and extracted a
+  discussion remark as an outcome.
+- Ignored citation counts and source result positions when deciding whether a screening decision
+  can be reused in a refresh Cycle. They blocked reuse of 16 of 46 decisions in the production
+  refresh without changing anything a screener judges.
+
 ## 0.5.9 - 2026-09-17
 
 - Renewed worker claims every 10 minutes while a serial runner's Hermes session is still working,

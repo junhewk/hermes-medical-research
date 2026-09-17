@@ -37,8 +37,8 @@ record to an existing study only with explicit identity evidence such as the sam
    appraisal. `outcome` is the paper's own label. For another estimand of the same outcome, copy
    the filled pair with a new `extraction_id` such as `result-...-o2b`.
 4. Set that outcome's `dispositions` status to `extracted`. mdr fills `extraction_ids`.
-5. If not reported, set status `not_reported`, or `not_applicable` when the design cannot measure
-   it. Add a one-sentence rationale and `inspected_locations` with each `document_id` and
+5. If the study did not measure it, set status `not_reported`, or `not_applicable` when the design
+   cannot measure it. Discussion or limitation remarks are not a measured outcome. Add a one-sentence rationale and `inspected_locations` with each `document_id` and
    `locator` you read. Leave that outcome's scaffold row unchanged; mdr removes it.
 
 Single-arm or intervention-only surveys stay descriptive: use `effect.basis` group_summary or

@@ -138,12 +138,16 @@ def _record_identity(record: dict[str, Any]) -> str:
 
 
 def _source_digest(record: dict[str, Any]) -> str:
+    # Retrieval position and citation counts change between refreshes without changing what a
+    # screener judges, so they must not invalidate an otherwise identical decision.
     volatile = {
         "record_id",
         "canonical_id",
         "native_merge_order",
         "retrieved_at",
         "rank",
+        "source_rank",
+        "citation_count",
         "score",
         "scores",
     }

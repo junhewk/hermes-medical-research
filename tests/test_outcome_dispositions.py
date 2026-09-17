@@ -265,6 +265,55 @@ async def test_dispositions_are_accepted_and_untouched_scaffolds_pruned(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_one_invalid_extraction_does_not_cascade_into_dependent_stage_errors(tmp_path):
+    engine, _, document_id = contract_run(tmp_path)
+    task_id, _, _, path, proposal = open_assessment(engine)
+    extraction_id = fill_exam(proposal, document_id)
+    row = next(
+        item
+        for item in proposal["stages"]["extractions"]["records"]
+        if item["extraction_id"] == extraction_id
+    )
+    row["effect"]["value"] = None
+    decide(proposal, OUTCOMES[0], "extracted")
+    decide(proposal, OUTCOMES[1], "not_reported", document_id)
+    decide(proposal, OUTCOMES[2], "not_reported", document_id)
+    path.write_text(json.dumps(proposal))
+
+    result = await engine.submit("extract", task_id, path, EXTRACTOR)
+
+    assert not result["accepted"]
+    messages = [item["message"] for item in result["errors"]]
+    assert messages[0] == "effect.missing_reason must be a nonempty string"
+    assert messages[1:] == [
+        "appraisals will be checked after the extractions errors are fixed",
+        "dispositions will be checked after the extractions errors are fixed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_test_statistics_are_not_accepted_as_effect_estimates(tmp_path):
+    engine, _, document_id = contract_run(tmp_path)
+    task_id, _, _, path, proposal = open_assessment(engine)
+    extraction_id = fill_exam(proposal, document_id)
+    row = next(
+        item
+        for item in proposal["stages"]["extractions"]["records"]
+        if item["extraction_id"] == extraction_id
+    )
+    row["effect"]["measure"] = "chi-square statistic"
+    decide(proposal, OUTCOMES[0], "extracted")
+    decide(proposal, OUTCOMES[1], "not_reported", document_id)
+    decide(proposal, OUTCOMES[2], "not_reported", document_id)
+    path.write_text(json.dumps(proposal))
+
+    result = await engine.submit("extract", task_id, path, EXTRACTOR)
+
+    assert not result["accepted"]
+    assert "must be an effect estimate" in result["errors"][0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_extraction_bound_to_an_unreported_outcome_is_rejected(tmp_path):
     engine, _, document_id = contract_run(tmp_path)
     task_id, _, _, path, proposal = open_assessment(engine)

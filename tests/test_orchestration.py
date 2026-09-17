@@ -429,3 +429,23 @@ async def test_run_renewing_extends_the_lease_until_the_session_exits(tmp_path, 
     )
     assert completed.stdout == "done"
     assert renewals[:2] == ["claim-x", "claim-x"]
+
+
+def test_screening_reuse_ignores_citation_counts_and_source_rank():
+    from hermes_medical_research.automation import _source_digest
+
+    record = {
+        "title": "Trial",
+        "abstract": "Text",
+        "citation_count": 3,
+        "source_rank": 7,
+        "source_records": [{"source": "openalex", "source_id": "W1", "source_rank": 7}],
+    }
+    later = {
+        **record,
+        "citation_count": 9,
+        "source_rank": 2,
+        "source_records": [{"source": "openalex", "source_id": "W1", "source_rank": 2}],
+    }
+    assert _source_digest(record) == _source_digest(later)
+    assert _source_digest(record) != _source_digest({**record, "abstract": "Changed text"})

@@ -43,6 +43,24 @@ GRADE_DOMAINS = ("risk_of_bias", "inconsistency", "indirectness", "imprecision",
 RELATIONSHIPS = {"supports", "contradicts", "mixed", "incomparable", "context"}
 SCOPE_FIELDS = ("population", "comparison", "outcome", "timepoint")
 DISPOSITION_STATUSES = ("extracted", "not_reported", "not_applicable")
+TEST_STATISTIC_TERMS = (
+    "chi-square",
+    "chi square",
+    "chi2",
+    "χ2",
+    "χ²",
+    "t statistic",
+    "t-statistic",
+    "t value",
+    "t-value",
+    "f statistic",
+    "f-statistic",
+    "z statistic",
+    "z-statistic",
+    "test statistic",
+    "p value",
+    "p-value",
+)
 
 
 def _choice(value: Any, choices: set[str], name: str) -> None:
@@ -275,6 +293,14 @@ def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) ->
                 )
             for field in ("measure", "units"):
                 require_text(effect.get(field), f"effect.{field}")
+            if workspace.outcome_contract and any(
+                term in effect["measure"].casefold() for term in TEST_STATISTIC_TERMS
+            ):
+                raise ValidationError(
+                    "effect.measure must be an effect estimate such as a mean difference, risk "
+                    "ratio, or proportion; put test statistics and P values in result and use "
+                    "null with effect.missing_reason when no estimate is reported"
+                )
             for name in ("value", "ci_low", "ci_high"):
                 if name not in effect:
                     raise ValidationError(f"effect.{name} is required; use null when unreported")

@@ -221,7 +221,10 @@ def assessment_field_rules(contract: bool) -> dict[str, Any]:
             "outcome_type": ["benefit", "context", "harm"],
             "favors": ["comparator", "intervention", "neither", "not-applicable", "uncertain"],
             "effect.basis": sorted(BASES),
-            "effect.measure, effect.units": "nonempty text",
+            "effect.measure, effect.units": (
+                "nonempty text; an effect estimate such as mean difference, risk ratio, or "
+                "proportion, never a test statistic or P value"
+            ),
             "effect.value, effect.ci_low, effect.ci_high": (
                 "number or null; a null value needs effect.missing_reason"
             ),
@@ -268,6 +271,10 @@ def assessment_field_rules(contract: bool) -> dict[str, Any]:
     if contract:
         rules["dispositions"] = {
             "outcomes[].status": list(DISPOSITION_STATUSES),
+            "reported outcome": (
+                "the study measured it; remarks in the discussion, limitations, or author opinion "
+                "are not a reported outcome"
+            ),
             "extracted": "at least one filled extraction row with this protocol_outcome",
             "extraction_ids": "leave empty; mdr fills them",
             "not_reported or not_applicable": (

@@ -159,9 +159,28 @@ def prepare_batch(workspace: Workspace, batch: dict) -> tuple[Preview, list[dict
                 ValidationError("record synthesis before its separate claim-review pass"),
             )
         ]
+    failed: set[str] = set()
     for stage in DEPENDENCIES:
         if stage not in stages:
             continue
+        blocked_by = sorted(dep for dep in DEPENDENCIES[stage] if dep in failed)
+        if blocked_by:
+            # Validating against the stored upstream stage would report errors that are only
+            # echoes of the upstream failure, so defer this stage with one explicit note.
+            errors.append(
+                error(
+                    stage,
+                    None,
+                    ValidationError(
+                        f"{stage} will be checked after the {', '.join(blocked_by)} errors "
+                        "are fixed"
+                    ),
+                    "deferred",
+                )
+            )
+            failed.add(stage)
+            continue
+        before = len(errors)
         try:
             incoming = stages[stage]
             if not isinstance(incoming, dict):
@@ -205,6 +224,8 @@ def prepare_batch(workspace: Workspace, batch: dict) -> tuple[Preview, list[dict
                 preview.put(stage, payload)
         except (ValidationError, KeyError, TypeError, AttributeError) as exc:
             errors.append(error(stage, None, exc))
+        if len(errors) > before:
+            failed.add(stage)
     return preview, errors
 
 
