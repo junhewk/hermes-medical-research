@@ -83,7 +83,7 @@ PROFILES: dict[str, ProfileSpec] = {
     ),
     "hmr-auditor": ProfileSpec(
         "Independently audits frozen evidence and report assertions.",
-        skills=("medical-synthesize",),
+        skills=("medical-audit",),
         toolsets=SESSION_TOOLSETS,
         max_turns=48,
         role="auditor",

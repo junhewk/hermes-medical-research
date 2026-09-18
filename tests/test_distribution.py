@@ -36,9 +36,10 @@ def test_distribution_has_one_executable_and_new_identity():
     }
 
 
-def test_exactly_three_small_hermes_skills_are_checked_in():
+def test_exactly_four_small_hermes_skills_are_checked_in():
     skills = sorted((ROOT / "skills").glob("*/SKILL.md"))
     assert [path.parent.name for path in skills] == [
+        "medical-audit",
         "medical-extract",
         "medical-select",
         "medical-synthesize",
@@ -86,3 +87,24 @@ def test_profiles_cover_every_role_without_a_plugin_lifecycle():
     assert not any((ROOT / ".claude-plugin").glob("*"))
     assert not (ROOT / "plugin.json").exists()
     assert not (ROOT / "plugin.yaml").exists()
+
+
+def test_each_session_role_carries_the_skill_for_its_own_work():
+    """The auditor once shipped with the synthesizer's skill.
+
+    That skill's audit half was four sentences, and on the first real audit the session spent
+    53 minutes reading the store and never submitted a single group.
+    """
+    from hermes_medical_research.hermes import PROFILES, SESSION_PROFILES
+
+    assert {role: PROFILES[name].skills for role, name in SESSION_PROFILES.items()} == {
+        "coordinator": (),
+        "selector": ("medical-select",),
+        "extractor": ("medical-extract",),
+        "synthesizer": ("medical-synthesize",),
+        "auditor": ("medical-audit",),
+    }
+    # A session role's skill is the one the runner names in its prompt, so a shared skill would
+    # send one role instructions written for another.
+    named = [spec.skills[0] for spec in PROFILES.values() if spec.skills]
+    assert len(named) == len(set(named))
