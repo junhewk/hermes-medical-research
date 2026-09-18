@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hermes_medical_research import quick_commands
+from hermes_medical_research import quick_commands, steps
 from hermes_medical_research.search.models import ValidationError
 
 ORIGINAL = """# my hermes config
@@ -137,3 +137,25 @@ def test_a_config_that_is_not_a_mapping_is_refused_without_writing(tmp_path):
     with pytest.raises(ValidationError):
         quick_commands.install(store=tmp_path / "store", hermes_home=home, apply=True)
     assert (home / "config.yaml").read_text() == "- one\n- two\n"
+
+
+def test_the_surface_can_shrink_without_looking_like_tampering(tmp_path, monkeypatch):
+    """Retiring a command is this package editing its own region, not touching someone else's.
+
+    Verification was passed only the new spec set, so a command the package had installed earlier
+    counted as unmanaged and its removal was refused.
+    """
+    home = tmp_path / "hermes"
+    store = tmp_path / "store"
+    quick_commands.install(store=store, apply=True, hermes_home=home)
+    config = home / "config.yaml"
+    before = set(yaml.safe_load(config.read_text())["quick_commands"])
+    assert {"hmr-search", "hmr-status"} <= before
+
+    monkeypatch.setattr(steps, "PUBLISHED_STEPS", ("search",))
+    result = quick_commands.install(store=store, apply=True, hermes_home=home)
+
+    after = yaml.safe_load(config.read_text())["quick_commands"]
+    assert result["applied"] is True
+    assert set(after) == {"hmr-search", "hmr-status", "hmr-stop"}
+    assert "hmr-extractor" not in after

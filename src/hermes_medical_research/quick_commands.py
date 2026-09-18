@@ -156,7 +156,11 @@ def install(
     home.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8")
     try:
-        _verify(original, updated, {} if remove else specs, managed=set(specs))
+        # This package owns what it is about to write and everything it recorded earlier. Passing
+        # only the new specs made its own retired commands look foreign, so shrinking the surface
+        # was refused as tampering.
+        _verify(original, updated, {} if remove else specs,
+                managed=set(specs) | set(recorded))
     except ValidationError:
         path.write_text(original, encoding="utf-8")
         raise
