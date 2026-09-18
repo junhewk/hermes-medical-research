@@ -514,3 +514,29 @@ async def test_a_session_is_told_its_submit_tool_only_when_one_exists(tmp_path, 
     assert not [key for key in written[1] if key.startswith("source_")]
     assert "proposal_path" not in written[1]
     del store
+
+
+@pytest.mark.parametrize("year", [2020, 2099])
+@pytest.mark.asyncio
+async def test_a_step_works_whatever_the_wall_clock_says(tmp_path, year):
+    """The ledger and the queue must agree on the time.
+
+    The ledger stamped a lease from the injected clock and then judged it against `datetime.now`,
+    so a clock behind the real one made every submission look late and one ahead made none expire.
+    The backoff test passed only while the real clock happened to sit before its fake 09:00, which
+    is why it began failing partway through a working day.
+    """
+    clock = {"now": datetime(year, 1, 1, 9, 0, tzinfo=UTC)}
+    store = tmp_path / "store"
+    automation, workspace, name = review_with_records(
+        tmp_path, "clockskew", 1, clock=lambda: clock["now"]
+    )
+    await automation.tick()
+
+    recorded = await steps.run_step(
+        "select", store=store, review=name, hermes_home=tmp_path / "h",
+        call=answering(store), invoke=None, clock=lambda: clock["now"],
+    )
+
+    assert (recorded["processed"], recorded["failed"]) == (1, 0)
+    assert len(workspace.rows("screening")) == 1

@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -346,11 +347,32 @@ def _empty_ledger() -> dict[str, Any]:
     }
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _at(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat()
+
+
 class TaskEngine:
     """Own task routing, packets, submissions, receipts, and legal transitions."""
 
-    def __init__(self, workspace: Workspace):
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        clock: Callable[[], datetime] = _utc_now,
+    ):
         self.workspace = workspace
+        # Every stamp this ledger writes and every deadline it checks come from here.  The queue
+        # that drives it carries its own clock, and a caller that injects one must see the two
+        # agree: a lease stamped from an injected clock and then judged against the real one is
+        # always expired, or never.
+        self.clock = clock
+
+    def _now(self) -> str:
+        return _at(self.clock())
 
     @property
     def run_id(self) -> str:
@@ -454,7 +476,7 @@ class TaskEngine:
                 raise ValidationError(f"task is {task['state']}; request a current task")
             if task["base_digests"] != current_digests(self.workspace):
                 task["state"] = "superseded"
-                task["superseded_at"] = now()
+                task["superseded_at"] = self._now()
                 self.workspace.save(manifest)
                 raise ValidationError("task inputs are stale; ask Coordinator for the next task")
             pending = task["state"] == "pending"
@@ -469,7 +491,11 @@ class TaskEngine:
             task["state"] = "in_progress"
             task["actor_profile"] = actor.profile
             task.setdefault("attempts", []).append(
-                {"profile": actor.profile, "session_id": actor.session_id, "started_at": now()}
+                {
+                    "profile": actor.profile,
+                    "session_id": actor.session_id,
+                    "started_at": self._now(),
+                }
             )
             ledger["state"] = _state_for_role(task["role"])
             self.workspace.save(manifest)
@@ -832,7 +858,7 @@ class TaskEngine:
                     "strategy_digest": strategy_digest(strategy),
                     "preflight_digest": inspected["preflight_digest"],
                     "expected_total": sum(counts.values()),
-                    "confirmed_at": now(),
+                    "confirmed_at": self._now(),
                 }
                 store.write_json("approval.json", approval)
             summary = await execute_search(strategy, store, session, credentials, inspected)
@@ -913,7 +939,7 @@ class TaskEngine:
                 "schema_version": ARTIFACT_SCHEMA_VERSION,
                 "strategy": {
                     "strategy_digest": current,
-                    "approved_at": now(),
+                    "approved_at": self._now(),
                     "selected_variants": {
                         source: item.selected_variant
                         for source, item in strategy.strategies.items()
@@ -1529,7 +1555,7 @@ class TaskEngine:
                     "code": "audit_unresolved",
                     "group_id": first["group_id"],
                     "audit_task_id": first["task_id"],
-                    "at": now(),
+                    "at": self._now(),
                 }
                 ledger["state"] = "blocked"
                 ledger["events"].append(
@@ -1537,7 +1563,7 @@ class TaskEngine:
                         "event": "run.halted",
                         "code": "audit_unresolved",
                         "task_id": first["task_id"],
-                        "at": now(),
+                        "at": self._now(),
                     }
                 )
                 self.workspace.save(manifest)
@@ -1547,7 +1573,7 @@ class TaskEngine:
                 "audit_task_ids": [first["task_id"]],
                 "group_id": first["group_id"],
                 "candidate_digest": candidate_digest,
-                "created_at": now(),
+                "created_at": self._now(),
             }
             ledger["state"] = "revision_required"
             self.workspace.save(manifest)
@@ -1672,7 +1698,7 @@ class TaskEngine:
             "proposal_digest": digest(proposal),
             "allowed_source_ids": allowed_sources,
             "allowed_sources_digest": digest(allowed_sources),
-            "created_at": now(),
+            "created_at": self._now(),
             "attempts": [],
         }
         for key in ("candidate_digest", "group_id", "group_digest", "correction_for"):
@@ -1682,7 +1708,7 @@ class TaskEngine:
         ledger["order"].append(task_id)
         ledger["state"] = _state_for_role(role)
         ledger["events"].append(
-            {"event": "task.created", "task_id": task_id, "role": role, "at": now()}
+            {"event": "task.created", "task_id": task_id, "role": role, "at": self._now()}
         )
         return task
 
@@ -2033,7 +2059,7 @@ class TaskEngine:
         task["search_plan"] = plan
         task["search_plan_digest"] = digest(plan)
         task["submission_digest"] = proposal_digest
-        task["plan_recorded_at"] = now()
+        task["plan_recorded_at"] = self._now()
         self.workspace.save(manifest)
         return {
             "run_id": self.run_id,
@@ -2065,7 +2091,7 @@ class TaskEngine:
             submission_digest=proposal_digest,
             result_file=result_file,
             result_digest=digest(result),
-            accepted_at=now(),
+            accepted_at=self._now(),
         )
         if task.get("lease"):
             task["lease"]["state"] = "completed"
@@ -2080,8 +2106,8 @@ class TaskEngine:
                 old = ledger["tasks"].get(old_id)
                 if old and old["state"] == "accepted":
                     old["state"] = "superseded"
-                    old["superseded_at"] = now()
-        ledger["events"].append({"event": "task.accepted", "task_id": task_id, "at": now()})
+                    old["superseded_at"] = self._now()
+        ledger["events"].append({"event": "task.accepted", "task_id": task_id, "at": self._now()})
         ledger["state"] = self._derive_state(manifest, ledger)
         self.workspace.save(manifest)
         self._complete_claim_file(task)
@@ -2100,7 +2126,7 @@ class TaskEngine:
                         "event": "task.route_deferred",
                         "task_id": task_id,
                         "error": str(exc)[:500],
-                        "at": now(),
+                        "at": self._now(),
                     }
                 )
                 self.workspace.save(manifest)
@@ -2127,7 +2153,7 @@ class TaskEngine:
             return
         if claim.get("state") != "active" or claim.get("task_id") != task["task_id"]:
             return
-        claim.update(state="completed", completed_at=task.get("accepted_at") or now())
+        claim.update(state="completed", completed_at=task.get("accepted_at") or self._now())
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         temporary.write_text(
             json.dumps(claim, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -2273,7 +2299,7 @@ class TaskEngine:
             if task["state"] != "pending" or task.get("lease"):
                 raise ValidationError("task is not available for claim")
             available = task.get("available_at")
-            current = datetime.fromisoformat(at) if at else datetime.now(UTC)
+            current = datetime.fromisoformat(at) if at else self.clock()
             if available and current < datetime.fromisoformat(available):
                 raise ValidationError("task retry is not available yet")
             attempt = int(task.get("automation_attempts", 0)) + 1
@@ -2294,7 +2320,7 @@ class TaskEngine:
                     "task_id": task_id,
                     "claim_id": claim_id,
                     "attempt": attempt,
-                    "at": now(),
+                    "at": self._now(),
                 }
             )
             self.workspace.save(manifest)
@@ -2305,7 +2331,7 @@ class TaskEngine:
     ) -> dict[str, Any]:
         """Extend an unexpired active lease while its host session is still working."""
         _safe_id(task_id, TASK_ID_PREFIX)
-        current = datetime.fromisoformat(at) if at else datetime.now(UTC)
+        current = datetime.fromisoformat(at) if at else self.clock()
         with self.workspace.lock:
             manifest = self.workspace.load()
             task = self._ledger(manifest)["tasks"].get(task_id)
@@ -2335,7 +2361,7 @@ class TaskEngine:
     ) -> dict[str, Any]:
         """Release a failed lease, apply bounded backoff, or block the Task."""
         _safe_id(task_id, TASK_ID_PREFIX)
-        failure_at = datetime.fromisoformat(at) if at else datetime.now(UTC)
+        failure_at = datetime.fromisoformat(at) if at else self.clock()
         with self.workspace.lock:
             manifest = self.workspace.load()
             ledger = self._ledger(manifest)
@@ -2451,7 +2477,7 @@ class TaskEngine:
             raise ValidationError("claim belongs to a different profile")
         if lease.get("actor_session_id") != actor.session_id:
             raise ValidationError("claim belongs to a different Hermes session")
-        if datetime.now(UTC) >= datetime.fromisoformat(lease["expires_at"]):
+        if self.clock() >= datetime.fromisoformat(lease["expires_at"]):
             raise ValidationError("claim lease expired; late result rejected")
 
     def _replay(self, task: dict[str, Any], proposal_digest: str) -> dict[str, Any] | None:
@@ -2593,7 +2619,7 @@ class TaskEngine:
         for task in ledger["tasks"].values():
             if task["state"] in {"pending", "in_progress"} and task["base_digests"] != current:
                 task["state"] = "superseded"
-                task["superseded_at"] = now()
+                task["superseded_at"] = self._now()
 
     def _derive_state(self, manifest: dict[str, Any], ledger: dict[str, Any]) -> str:
         if (

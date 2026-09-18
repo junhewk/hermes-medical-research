@@ -366,7 +366,7 @@ class AutomationEngine:
                 if latest["status"] != "blocked":
                     raise ValidationError("only a blocked latest Cycle can be retried")
                 at = _at(self.clock())
-                engine = TaskEngine(self.catalog.workspace(latest["run_id"]))
+                engine = TaskEngine(self.catalog.workspace(latest["run_id"]), clock=self.clock)
                 result = engine.retry_blocked(reason=message, at=at)
                 latest.setdefault("retries", []).append(
                     {
@@ -410,7 +410,7 @@ class AutomationEngine:
                 if active is None:
                     raise ValidationError("Review has no active Cycle to cancel")
                 cancelled_at = _at(self.clock())
-                engine = TaskEngine(self.catalog.workspace(active["run_id"]))
+                engine = TaskEngine(self.catalog.workspace(active["run_id"]), clock=self.clock)
                 result = engine.cancel_open_tasks(reason=message, at=cancelled_at)
                 if self.claims.is_dir():
                     for claim_path in self.claims.glob("claim-*.json"):
@@ -480,7 +480,7 @@ class AutomationEngine:
                 active = self._active_cycle(review)
                 if not active:
                     continue
-                engine = TaskEngine(self.catalog.workspace(active["run_id"]))
+                engine = TaskEngine(self.catalog.workspace(active["run_id"]), clock=self.clock)
                 expired += self._expire_leases(engine, path, review)
                 status = engine.status()
                 if status["state"] == "ready":
@@ -538,7 +538,7 @@ class AutomationEngine:
             if not eligible:
                 return {"role": role, "state": "idle"}
             selected = eligible[0]
-            engine = TaskEngine(self.catalog.workspace(selected["run_id"]))
+            engine = TaskEngine(self.catalog.workspace(selected["run_id"]), clock=self.clock)
             claim_id = "claim-" + uuid4().hex
             token = secrets.token_urlsafe(32)
             expires = self.clock() + timedelta(minutes=LEASE_MINUTES)
@@ -624,7 +624,7 @@ class AutomationEngine:
             ):
                 raise ValidationError("claim belongs to a different Hermes session")
             expires = _at(self.clock() + timedelta(minutes=LEASE_MINUTES))
-            engine = TaskEngine(self.catalog.workspace(claim["run_id"]))
+            engine = TaskEngine(self.catalog.workspace(claim["run_id"]), clock=self.clock)
             result = engine.renew_lease(
                 claim["task_id"], claim_id, expires_at=expires, at=_at(self.clock())
             )
@@ -652,7 +652,7 @@ class AutomationEngine:
             active = self._active_cycle(entry)
             if not active or active["status"] != "active" or entry["state"] == "paused":
                 continue
-            engine = TaskEngine(self.catalog.workspace(active["run_id"]))
+            engine = TaskEngine(self.catalog.workspace(active["run_id"]), clock=self.clock)
             for task in engine.status()["active"]:
                 if task["role"] != role:
                     continue
@@ -682,7 +682,7 @@ class AutomationEngine:
                 or claim.get("actor_session_id") != actor.session_id
             ):
                 raise ValidationError("claim belongs to a different Hermes session")
-            engine = TaskEngine(self.catalog.workspace(claim["run_id"]))
+            engine = TaskEngine(self.catalog.workspace(claim["run_id"]), clock=self.clock)
             result = engine.release_lease(
                 claim["task_id"], claim_id, reason=reason, at=_at(self.clock())
             )
@@ -713,7 +713,7 @@ class AutomationEngine:
             review_path, review = self._load_review(claim["review"], with_path=True)
             with self._review_lock(review_path):
                 review = self._load_review(claim["review"])
-                engine = TaskEngine(self.catalog.workspace(claim["run_id"]))
+                engine = TaskEngine(self.catalog.workspace(claim["run_id"]), clock=self.clock)
                 result = engine.fail_lease(
                     claim["task_id"],
                     claim_id,
@@ -783,7 +783,7 @@ class AutomationEngine:
             active = self._active_cycle(entry)
             if not active or active["status"] != "active" or entry["state"] == "paused":
                 continue
-            engine = TaskEngine(self.catalog.workspace(active["run_id"]))
+            engine = TaskEngine(self.catalog.workspace(active["run_id"]), clock=self.clock)
             status = engine.status()
             for task in status["active"]:
                 if task["role"] != role:

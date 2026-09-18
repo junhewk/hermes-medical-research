@@ -582,7 +582,9 @@ async def _work_one(
     clock: Callable[[], datetime],
 ) -> dict[str, Any]:
     """One claimed Task: pick the lane, run it, and let the ledger decide the outcome."""
-    engine = TaskEngine(RunCatalog(store).workspace(claim["run_id"]))
+    # The same clock the queue leased with, so a submission is judged against the deadline that
+    # was actually written rather than against the wall clock.
+    engine = TaskEngine(RunCatalog(store).workspace(claim["run_id"]), clock=clock)
     kind = claim.get("kind", "")
     task = engine.task_automation(claim["task_id"])
     packet = _read_json(Path(claim["packet_path"])) if claim.get("packet_path") else {}
