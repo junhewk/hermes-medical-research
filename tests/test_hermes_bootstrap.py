@@ -406,13 +406,13 @@ def test_a_retired_profile_hermes_still_owns_is_reported_without_blocking(tmp_pa
     from hermes_medical_research.quick_commands import install
 
     install(store=store, apply=True, hermes_home=home)
-    leftover = home / "profiles" / "mdr-selector"
+    leftover = home / "profiles" / "hmr-searcher"
     (leftover / "logs").mkdir(parents=True)
     (leftover / "state.db").write_text("hermes state")
 
     report = doctor(hermes_home=home, store=store)
 
-    assert report["retired_profiles"]["present"] == ["mdr-selector"]
+    assert report["retired_profiles"]["present"] == ["hmr-searcher"]
     assert report["retired_profiles"]["managed"] == []
     assert "delete it by hand" in report["retired_profiles"]["problems"][0]
     assert report["ready"] is True

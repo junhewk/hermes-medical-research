@@ -75,16 +75,6 @@ ROLE_PROFILES = {
     "synthesizer": "hmr-synthesizer",
     "auditor": "hmr-auditor",
 }
-# 0.5.x named every profile ``mdr-*``. Receipts in existing Runs carry those strings, so they still
-# resolve to their role; nothing writes them again.
-LEGACY_ROLE_PROFILES = {role: f"mdr-{name}" for role, name in (
-    ("coordinator", "coordinator"),
-    ("searcher", "searcher"),
-    ("selector", "selector"),
-    ("extractor", "extractor"),
-    ("synthesizer", "synthesizer"),
-    ("auditor", "auditor"),
-)}
 COMMAND_ROLES = {
     "search": "searcher",
     "select": "selector",
@@ -110,8 +100,7 @@ KIND_COMMANDS = {kind: ROLE_COMMANDS[role] for kind, role in KIND_ROLES.items()}
 
 def data_home(environ: dict[str, str] | None = None) -> Path:
     values = environ if environ is not None else os.environ
-    # MDR_HOME is the 0.5.x spelling, honored so existing operator scripts keep their store.
-    configured = values.get("HMR_HOME") or values.get("MDR_HOME")
+    configured = values.get("HMR_HOME")
     if configured:
         root = Path(configured).expanduser()
     else:
@@ -171,7 +160,7 @@ class Actor:
             (
                 role_name
                 for role_name, role_profile in ROLE_PROFILES.items()
-                if normalized in {role_name, role_profile, LEGACY_ROLE_PROFILES[role_name]}
+                if normalized in {role_name, role_profile}
             ),
             "",
         )

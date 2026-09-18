@@ -79,9 +79,11 @@
   entry the profile really selects. `hmr hermes doctor` reports each constrained profile's kind,
   schema digest, response format, and provider entry, and flags one that has any toolset.
 - Renamed the CLI, the managed profiles, the managed manifests, and the store environment variable
-  from `mdr` to `hmr`, because `mdr` is the separate medical-deep-research line. `MDR_HOME` is still
-  honored and `mdr-*` actor profiles in existing receipts still resolve to their role, so old runs
-  stay readable.
+  from `mdr` to `hmr`, because `mdr` is the separate medical-deep-research line. The 0.5.x spellings
+  are gone rather than bridged: `MDR_HOME` is no longer read, `mdr-*` actor profiles in old receipts
+  no longer resolve to a role, and `mdr-managed.json`, `mdr-routines.json` and the `mdr-*` profile
+  directories are no longer recognised or cleaned up. 0.6.0 is the first published release, so no
+  installation outside the author's own host ever carried those names.
 - Renamed the skills to `hmr-select`, `hmr-extract`, `hmr-synthesize`, and `hmr-audit`. They were
   `medical-*` because they predate the package: the first was written for the 0.4.0 Claude Code
   plugin line, and the `mdr` to `hmr` rename passed them over since they never carried `mdr`. Every

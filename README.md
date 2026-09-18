@@ -40,8 +40,6 @@ own profile instructions and performs no specialist work.
 
 The default artifact root is `$XDG_DATA_HOME/hermes-medical-research`, falling back to
 `~/.local/share/hermes-medical-research`. Set `HMR_HOME` to an absolute path for an isolated store.
-`MDR_HOME` is the 0.5.x spelling of the same variable. It is still read when `HMR_HOME` is unset, so
-existing operator scripts keep their store. Nothing writes that spelling again.
 
 ## Lanes
 
@@ -107,8 +105,8 @@ with a schema on it, which is cheaper than a tool call the host proxies behind i
 
 Bootstrap creates profiles through Hermes's public profile command. It copies only the current model,
 provider, and timezone selection. It refuses to overwrite an unmanaged profile or a managed file
-edited after installation. `hmr-searcher` and `mdr-searcher` are removed when present, because the
-search step runs no session. Bot Mode discovers profiles automatically from each connected gateway;
+edited after installation. `hmr-searcher` is removed when present, because the search step runs no
+session. Bot Mode discovers profiles automatically from each connected gateway;
 use **Reconnect gateway** to refresh a roster that was connected during installation.
 
 A per-kind model or lane choice is the operator's, and it is applied before the schema is pinned, so

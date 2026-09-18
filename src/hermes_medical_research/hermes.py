@@ -121,23 +121,10 @@ PROFILES: dict[str, ProfileSpec] = {
 CALL_PROFILES = {spec.kind: name for name, spec in PROFILES.items() if spec.kind}
 SESSION_PROFILES = {spec.role: name for name, spec in PROFILES.items()
                     if spec.kind is None and spec.role}
-# 0.5.x installed a Searcher profile for a role that now runs no session at all, and named every
-# profile under the old namespace.  Both are removed by the profile command.
-RETIRED_PROFILES = (
-    "hmr-searcher",
-    "mdr-coordinator",
-    "mdr-searcher",
-    "mdr-selector",
-    "mdr-extractor",
-    "mdr-synthesizer",
-    "mdr-auditor",
-)
+# 0.5.x installed a Searcher profile for a role that now runs no session at all.
+RETIRED_PROFILES = ("hmr-searcher",)
 MANAGED = "hmr-managed.json"
 ROUTINES_MANAGED = "hmr-routines.json"
-# 0.5.x wrote the same manifests under the old namespace.  Both are read so a host installed by
-# 0.5.x can be migrated and cleaned up; only the new names are ever written.
-LEGACY_MANAGED = "mdr-managed.json"
-LEGACY_ROUTINES_MANAGED = "mdr-routines.json"
 ASSIGNMENT_FILE = "hmr-steps.json"
 MCP_SERVER_NAME = "hmr-tasks"
 # One session may take many slow model turns; the runner renews its claim while it works.
@@ -503,7 +490,7 @@ def profile_for_kind(kind: str, assignment: dict[str, Any] | None = None) -> str
 
 
 def _read_manifest(root: Path) -> dict[str, Any] | None:
-    for name in (MANAGED, LEGACY_MANAGED):
+    for name in (MANAGED,):
         path = root / name
         if not path.is_file():
             continue
@@ -729,7 +716,6 @@ def _remove_profile(root: Path) -> dict[str, Any]:
     for relative in manifest.get("files", {}):
         (root / relative).unlink(missing_ok=True)
     (root / MANAGED).unlink(missing_ok=True)
-    (root / LEGACY_MANAGED).unlink(missing_ok=True)
     for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
         if not any(directory.iterdir()):
             directory.rmdir()
@@ -944,7 +930,7 @@ def _job_static(job: dict[str, Any]) -> dict[str, Any]:
 
 def _routine_manifest(home: Path) -> dict[str, Any] | None:
     path = next(
-        (home / name for name in (ROUTINES_MANAGED, LEGACY_ROUTINES_MANAGED)
+        (home / name for name in (ROUTINES_MANAGED,)
          if (home / name).is_file()),
         home / ROUTINES_MANAGED,
     )
@@ -1245,5 +1231,4 @@ def routines(
             path.unlink()
     if not remaining:
         (home / ROUTINES_MANAGED).unlink(missing_ok=True)
-        (home / LEGACY_ROUTINES_MANAGED).unlink(missing_ok=True)
     return {**plan, "applied": True, "removed": sorted(removed), "remaining": sorted(remaining)}
