@@ -503,4 +503,7 @@ async def test_a_session_is_told_its_submit_tool_only_when_one_exists(tmp_path, 
         "hermes", tmp_path / "h", {**claim, "kind": "assessment"}, actor, "extractor"
     )
     assert "submit_tool" not in written[1]
+    assert written[1]["submit_tools"] == [
+        "record_study_appraisal", "record_outcome_extracted", "record_outcome_missing"
+    ]
     del store

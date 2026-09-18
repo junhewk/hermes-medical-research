@@ -966,13 +966,17 @@ def invoke_task_session(
         "proposal_path": claim["proposal_path"],
         **{key: claim[key] for key in commands if key in claim},
     }
-    from .mcp_server import KIND_TOOLS
+    from .mcp_server import ASSESSMENT_TOOLS, KIND_TOOLS
 
-    submit_tool = KIND_TOOLS.get(claim.get("kind", ""))
+    kind = claim.get("kind", "")
+    submit_tool = KIND_TOOLS.get(kind)
     if submit_tool:
         # Name the typed tool only when one exists for this kind, so the skill's rule to prefer it
         # never points at a tool this session was not given.
         instruction["submit_tool"] = submit_tool
+    elif kind == "assessment":
+        # An assessment is recorded one outcome at a time, so it has three tools and no file edit.
+        instruction["submit_tools"] = list(ASSESSMENT_TOOLS)
     skill = PROFILES[SESSION_PROFILES[role]].skills[0]
     profile = f"hmr-{role}"
     with tempfile.NamedTemporaryFile(
