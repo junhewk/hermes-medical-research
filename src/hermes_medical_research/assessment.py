@@ -56,10 +56,15 @@ def _rows(proposal: dict[str, Any], stage: str) -> list[dict[str, Any]]:
 
 
 def _checklist(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The packet's per-outcome entries, keyed by the protocol outcome they name."""
     entries = packet.get("outcome_checklist")
     if not isinstance(entries, list) or not entries:
         raise ValidationError("this task has no outcome checklist; it is not a per-outcome run")
-    return {str(entry.get("outcome")): entry for entry in entries if entry.get("outcome")}
+    return {
+        str(entry["protocol_outcome"]): entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("protocol_outcome")
+    }
 
 
 def _entry(packet: dict[str, Any], name: str) -> dict[str, Any]:
@@ -132,10 +137,11 @@ def _apply_extracted(
     name = result["protocol_outcome"]
     entry = _entry(packet, name)
     rows = _rows(proposal, "extractions")
-    extraction_id = entry.get("extraction_id")
+    # The checklist names the scaffold rows the task minted for this outcome.
+    scaffolds = [str(value) for value in entry.get("extraction_ids") or []]
     row = next(
         (item for item in rows
-         if item.get("protocol_outcome") == name or item["extraction_id"] == extraction_id),
+         if item.get("protocol_outcome") == name or item["extraction_id"] in scaffolds),
         None,
     )
     if row is None:

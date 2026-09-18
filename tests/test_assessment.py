@@ -12,9 +12,12 @@ OUTCOMES = ("Knowledge score", "Learner satisfaction")
 
 def packet() -> dict:
     return {
+        # The shape the task actually mints: see TaskEngine._outcome_checklist.
         "outcome_checklist": [
-            {"outcome": "Knowledge score", "index": 1, "extraction_id": "result-r-1-o1"},
-            {"outcome": "Learner satisfaction", "index": 2, "extraction_id": "result-r-1-o2"},
+            {"index": 1, "protocol_outcome": "Knowledge score", "selector_flagged": True,
+             "extraction_ids": ["result-r-1-o1"], "likely_locations": []},
+            {"index": 2, "protocol_outcome": "Learner satisfaction", "selector_flagged": False,
+             "extraction_ids": ["result-r-1-o2"], "likely_locations": []},
         ],
     }
 
@@ -225,3 +228,12 @@ def test_a_task_without_a_checklist_is_refused():
         assessment.record("outcome_extracted", extracted_answer(), proposal(), {})
 
     assert "no outcome checklist" in str(error.value)
+
+
+def test_a_checklist_entry_is_matched_by_its_protocol_outcome_name():
+    """The packet keys entries by ``protocol_outcome``; an older guess at ``outcome`` matched none."""
+    staged, _ = assessment.record("outcome_extracted", extracted_answer(), proposal(), packet())
+
+    row = staged["stages"]["extractions"]["records"][0]
+    assert row["extraction_id"] == "result-r-1-o1"
+    assert row["result"].startswith("Mean score")
