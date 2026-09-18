@@ -14,6 +14,7 @@ from hermes_medical_research import quick_commands
 from hermes_medical_research.answers import MAX_TOKENS, response_format, schema_digest
 from hermes_medical_research.hermes import (
     MCP_SERVER_NAME,
+    SESSION_MAX_TOKENS,
     PROFILES,
     RETIRED_PROFILES,
     _hmr_path,
@@ -127,6 +128,9 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
         }
         if spec.max_turns:
             expected["agent"] = {"max_turns": spec.max_turns}
+        if spec.role and not spec.answer_schema:
+            # A session records through typed tools, so one answer is bounded.
+            expected["model"] = {"default": "test-model", "max_tokens": SESSION_MAX_TOKENS}
         if spec.role and not spec.kind:
             expected["mcp_servers"] = {
                 MCP_SERVER_NAME: {
@@ -257,7 +261,7 @@ def test_a_constrained_profile_carries_its_answer_schema_and_no_tools(tmp_path, 
     assert MCP_SERVER_NAME in session["mcp_servers"]
     assert session["providers"] == {"selected": {"base_url": "http://localhost:8091"}}
     assert session["tools"] == {"enabled_toolsets": ["terminal", "file", "skills"]}
-    assert "max_tokens" not in session["model"]
+    assert session["model"]["max_tokens"] == SESSION_MAX_TOKENS
 
     entry = next(
         item
@@ -328,7 +332,9 @@ def test_assignment_overrides_only_the_model_and_provider(tmp_path, monkeypatch)
 
     # A session profile answers no constrained kind, so no assignment can reach it.
     session = yaml.safe_load((home / "profiles" / "hmr-selector" / "config.yaml").read_text())
-    assert session["model"] == {"default": "base-model", "provider": "selected"}
+    assert session["model"] == {
+        "default": "base-model", "provider": "selected", "max_tokens": SESSION_MAX_TOKENS
+    }
 
 
 def test_bootstrap_remove_deletes_only_the_files_it_installed(tmp_path, monkeypatch):

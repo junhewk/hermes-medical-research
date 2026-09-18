@@ -48,6 +48,9 @@ class ProfileSpec:
 
 
 SESSION_TOOLSETS = ("terminal", "file", "skills")
+# A session records its work through typed tools, so no answer needs to be long.  Left unbounded,
+# one assessment spent about ten minutes generating a 26 KB proposal rewrite on the host.
+SESSION_MAX_TOKENS = 4096
 # Per-session model-turn ceilings for one claimed Task.  An assessment reads each protocol
 # outcome's locations; an audit group checks several targets.  A constrained call needs two: the
 # tool call and the turn that sees its result.
@@ -331,6 +334,19 @@ def _carries_schema(settings: dict[str, Any], kind: str) -> bool:
     )
 
 
+def _with_answer_ceiling(settings: dict[str, Any], ceiling: int) -> dict[str, Any]:
+    """Bound one answer, so a session cannot spend minutes rewriting a file it should patch."""
+    updated = deepcopy(settings)
+    model = updated.get("model")
+    if isinstance(model, dict):
+        updated["model"] = {**model, "max_tokens": ceiling}
+    else:
+        updated["model"] = {"default": model, "max_tokens": ceiling} if model else {
+            "max_tokens": ceiling
+        }
+    return updated
+
+
 def _mcp_entry(store: Path, role: str, kind: str | None, executable: str) -> dict[str, Any]:
     args = ["mcp", "serve", "--store", str(store), "--role", role]
     if kind:
@@ -358,6 +374,8 @@ def _desired_files(
     settings = _with_assigned_model(settings, spec, assignment)
     if spec.answer_schema:
         settings = _with_response_format(settings, spec.answer_schema)
+    elif spec.role:
+        settings = _with_answer_ceiling(settings, SESSION_MAX_TOKENS)
     config: dict[str, Any] = {
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),

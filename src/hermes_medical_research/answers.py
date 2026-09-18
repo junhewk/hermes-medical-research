@@ -12,7 +12,8 @@ Schemas buy *shape* only.  Every value, identifier, digest and cross-field rule 
 schemas are deliberately protocol-independent, because a profile's ``extra_body`` is fixed at
 bootstrap time and cannot know a Review's outcomes or record ids.
 
-Keyword subset: ``type``, ``properties``, ``required``, ``additionalProperties``, ``enum``,
+Types: ``object``, ``array``, ``string``, ``boolean``, ``integer`` and ``number``.  Keyword subset:
+``type``, ``properties``, ``required``, ``additionalProperties``, ``enum``,
 ``items``, ``minItems``, ``maxItems``, ``minLength`` and ``maxLength``.  That is what llama.cpp's
 converter handles predictably, and what :func:`check_shape` implements, so prose, grammar and the
 local check cannot drift apart.
@@ -25,7 +26,7 @@ from copy import deepcopy
 from hashlib import sha256
 from typing import Any
 
-from .evidence import COMPARATORS
+from .evidence import BASES, COMPARATORS
 from .search.models import FRAMEWORKS, SOURCES
 from .validation import GRADE_DOMAINS, RELATIONSHIPS, ValidationError
 
@@ -134,6 +135,100 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 CALL_KINDS = tuple(RESULT_SCHEMAS)
+
+# -- assessment, decided one protocol outcome at a time -----------------------------------------
+#
+# An assessment used to be one hand-edited file. On the host that cost about ten minutes of
+# generation for a 26 KB rewrite, and the first submission was refused for a single missing
+# rationale. These shapes let a session record one outcome per call instead, so a rejection costs
+# one small answer rather than the whole file.
+
+_LOCATION = _object(
+    ["document_id", "locator"],
+    {"document_id": {"type": "string", "minLength": 1},
+     "locator": {"type": "string", "minLength": 1}},
+)
+_EFFECT = _object(
+    ["measure", "basis", "units", "interval_type"],
+    {
+        "measure": {"type": "string", "minLength": 1, "maxLength": 120},
+        "basis": {"type": "string", "enum": sorted(BASES)},
+        "value": {"type": "number"},
+        "ci_low": {"type": "number"},
+        "ci_high": {"type": "number"},
+        "units": {"type": "string", "minLength": 1, "maxLength": 60},
+        "interval_type": {"type": "string", "enum": ["confidence", "credible", "none"]},
+        "interval_level": {"type": "number"},
+        "missing_reason": {"type": "string", "maxLength": 300},
+    },
+)
+_DOMAIN = _object(
+    ["name", "status", "judgment", "rationale"],
+    {
+        "name": {"type": "string", "minLength": 1, "maxLength": 60},
+        "status": {"type": "string", "enum": ["pending", "assessed", "unavailable"]},
+        "judgment": {"type": "string", "minLength": 1, "maxLength": 60},
+        "rationale": _REASON,
+        "assessment_basis": {"type": "string", "maxLength": 300},
+        "missing_reason": {"type": "string",
+                           "enum": ["access_unavailable", "not_reported", "insufficient_detail"]},
+        "inspected_locations": {"type": "array", "maxItems": 12, "items": _LOCATION},
+    },
+)
+
+ASSESSMENT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "study_appraisal": _object(
+        ["overall_judgment", "overall", "rationale", "domains"],
+        {
+            "overall_judgment": {
+                "type": "string",
+                "enum": ["low", "some_concerns", "high", "unclear", "not_assessable",
+                         "descriptive"],
+            },
+            "overall": _REASON,
+            "rationale": _SENTENCE,
+            "domains": {"type": "array", "minItems": 1, "maxItems": 12, "items": _DOMAIN},
+        },
+    ),
+    "outcome_extracted": _object(
+        ["protocol_outcome", "population", "comparison", "outcome", "timepoint",
+         "comparator_type", "outcome_type", "result", "effect", "favors",
+         "direction_rationale", "source_location", "support_rationale"],
+        {
+            "protocol_outcome": {"type": "string", "minLength": 1, "maxLength": 200},
+            "population": {"type": "string", "minLength": 1, "maxLength": 200},
+            "comparison": {"type": "string", "minLength": 1, "maxLength": 200},
+            "outcome": {"type": "string", "minLength": 1, "maxLength": 200},
+            "timepoint": {"type": "string", "minLength": 1, "maxLength": 120},
+            "comparator_type": {"type": "string", "enum": sorted(COMPARATORS)},
+            "outcome_type": {"type": "string", "enum": ["benefit", "harm", "context"]},
+            "sample_size": {"type": "integer"},
+            "result": _SENTENCE,
+            "effect": _EFFECT,
+            "favors": {"type": "string",
+                       "enum": ["intervention", "comparator", "neither", "uncertain",
+                                "not-applicable"]},
+            "direction_rationale": _REASON,
+            "source_location": _object(
+                ["document_id", "locator", "quote"],
+                {"document_id": {"type": "string", "minLength": 1},
+                 "locator": {"type": "string", "minLength": 1},
+                 "quote": {"type": "string", "minLength": 1, "maxLength": 600}},
+            ),
+            "support_rationale": _REASON,
+        },
+    ),
+    "outcome_missing": _object(
+        ["protocol_outcome", "status", "rationale", "inspected_locations"],
+        {
+            "protocol_outcome": {"type": "string", "minLength": 1, "maxLength": 200},
+            "status": {"type": "string", "enum": ["not_reported", "not_applicable"]},
+            "rationale": _REASON,
+            "inspected_locations": {"type": "array", "maxItems": 12, "items": _LOCATION},
+        },
+    ),
+}
+
 
 # Intake is not a Task kind: it turns the operator's plain words into a request the CLI validates
 # before any Review exists.  It has an answer schema all the same, so the same machinery applies.
@@ -337,6 +432,13 @@ def check_shape(value: Any, schema: dict[str, Any], path: str = "result") -> Non
     if expected == "boolean":
         if not isinstance(value, bool):
             raise ValidationError(f"{path} must be true or false")
+        return
+    if expected in {"integer", "number"}:
+        # ``bool`` is an ``int`` in Python, and true is not a count.
+        if isinstance(value, bool) or not isinstance(
+            value, int if expected == "integer" else (int, float)
+        ):
+            raise ValidationError(f"{path} must be a {expected}")
         return
     if not isinstance(value, str):
         raise ValidationError(f"{path} must be a string")

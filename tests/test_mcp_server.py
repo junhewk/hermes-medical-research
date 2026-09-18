@@ -207,7 +207,21 @@ def test_an_unknown_method_is_a_json_rpc_error(tmp_path):
 
 def test_a_server_cannot_be_built_for_a_kind_without_a_shape(tmp_path):
     with pytest.raises(ValidationError):
-        mcp_server.ToolServer(tmp_path, "extractor", ("assessment",))
+        mcp_server.ToolServer(tmp_path, "auditor", ("audit",))
+
+
+def test_the_extractor_serves_study_linking_and_the_three_assessment_tools(tmp_path):
+    server = mcp_server.ToolServer(tmp_path, "extractor")
+
+    assert server.kinds == ("studies", "assessment")
+    assert [tool["name"] for tool in mcp_server.tool_definitions(server.kinds)] == [
+        "submit_study_link",
+        "record_study_appraisal",
+        "record_outcome_extracted",
+        "record_outcome_missing",
+    ]
+    for tool in mcp_server.tool_definitions(server.kinds):
+        answers.check_keywords(tool["inputSchema"]["properties"]["result"])
 
 
 @pytest.mark.asyncio

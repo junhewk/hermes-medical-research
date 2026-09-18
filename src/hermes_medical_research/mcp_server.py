@@ -51,28 +51,57 @@ TOOL_KINDS = {
 }
 KIND_TOOLS = {kind: name for name, kind in TOOL_KINDS.items()}
 
+# Assessment is decided one protocol outcome at a time, so it has three tools rather than one, and
+# the submission happens when the last outcome is decided.
+ASSESSMENT_TOOLS = {
+    "record_study_appraisal": "study_appraisal",
+    "record_outcome_extracted": "outcome_extracted",
+    "record_outcome_missing": "outcome_missing",
+}
+
 TOOL_DESCRIPTIONS = {
     "submit_screening": "Record the eligibility decision for the record in this task.",
     "submit_coverage": "Record whether this record goes on to detailed assessment.",
     "submit_study_link": "Record this record's study kind and whether it joins a linked study.",
     "submit_finding": "Record the finding for this task's protocol outcome.",
+    "record_study_appraisal": (
+        "Record this study's risk-of-bias appraisal once, before the outcomes that copy it."
+    ),
+    "record_outcome_extracted": (
+        "Record one protocol outcome this record reports, with its estimate and the quote that "
+        "supports it."
+    ),
+    "record_outcome_missing": (
+        "Record one protocol outcome this record does not report, with the locations you inspected."
+    ),
 }
 
 
+def _definition(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": TOOL_DESCRIPTIONS[name],
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["result"],
+            "properties": {"result": schema},
+        },
+    }
+
+
 def tool_definitions(kinds: tuple[str, ...]) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": KIND_TOOLS[kind],
-            "description": TOOL_DESCRIPTIONS[KIND_TOOLS[kind]],
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["result"],
-                "properties": {"result": RESULT_SCHEMAS[kind]},
-            },
-        }
+    tools = [
+        _definition(KIND_TOOLS[kind], RESULT_SCHEMAS[kind])
         for kind in kinds
+        if kind in KIND_TOOLS
     ]
+    if "assessment" in kinds:
+        tools += [
+            _definition(name, answers.ASSESSMENT_SCHEMAS[shape])
+            for name, shape in ASSESSMENT_TOOLS.items()
+        ]
+    return tools
 
 
 class NoCurrentItem(ValidationError):
@@ -85,8 +114,9 @@ class ToolServer:
     def __init__(self, store: Path, role: str, kinds: tuple[str, ...] | None = None) -> None:
         self.store = store.resolve()
         self.role = role
-        self.kinds = tuple(kinds or [k for k in answers.CALL_KINDS if KIND_ROLES[k] == role])
-        unknown = [kind for kind in self.kinds if kind not in RESULT_SCHEMAS]
+        served = [*answers.CALL_KINDS, "assessment"]
+        self.kinds = tuple(kinds or [k for k in served if KIND_ROLES[k] == role])
+        unknown = [kind for kind in self.kinds if kind not in served]
         if unknown:
             raise ValidationError(f"no constrained answer shape for {unknown[0]}")
 
@@ -111,11 +141,15 @@ class ToolServer:
 
     # -- tool calls ---------------------------------------------------------------------------
     def call(self, name: str, arguments: dict[str, Any]) -> str:
+        if "result" not in (arguments or {}):
+            raise ValidationError("call this tool with a single `result` object")
+        if name in ASSESSMENT_TOOLS:
+            if "assessment" not in self.kinds:
+                raise ValidationError(f"unknown tool: {name}")
+            return self._record_assessment(name, arguments["result"])
         kind = TOOL_KINDS.get(name)
         if kind is None or kind not in self.kinds:
             raise ValidationError(f"unknown tool: {name}")
-        if "result" not in (arguments or {}):
-            raise ValidationError("call this tool with a single `result` object")
         item = self.current(kind)
         engine = TaskEngine(RunCatalog(self.store).workspace(item["run_id"]))
         proposal_path = Path(item["proposal_path"])
@@ -146,6 +180,46 @@ class ToolServer:
                 + ". Correct those fields and call the tool again."
             )
         return json.dumps({"accepted": True, "recorded": kind}, sort_keys=True)
+
+    def _record_assessment(self, name: str, result: Any) -> str:
+        """Stage one outcome of an assessment, and submit when the last one is decided."""
+        from . import assessment
+
+        item = self.current("assessment")
+        proposal_path = Path(item["proposal_path"])
+        packet = json.loads(Path(item["packet_path"]).read_text())
+        staged, remaining = assessment.record(
+            ASSESSMENT_TOOLS[name], result, json.loads(proposal_path.read_text()), packet
+        )
+        proposal_path.write_text(json.dumps(staged, ensure_ascii=False, indent=2) + "\n")
+        if remaining:
+            return json.dumps(
+                {"recorded": ASSESSMENT_TOOLS[name], "outcomes_remaining": remaining},
+                sort_keys=True,
+            )
+        engine = TaskEngine(RunCatalog(self.store).workspace(item["run_id"]))
+        actor = Actor(
+            profile=item.get("actor_profile") or ROLE_PROFILES[self.role],
+            session_id=item["session_id"],
+            role=self.role,
+        )
+        outcome = _blocking(
+            engine.submit(
+                KIND_COMMANDS["assessment"],
+                item["task_id"],
+                proposal_path,
+                actor,
+                claim_token=item["claim_token"],
+            )
+        )
+        if outcome.get("accepted") is False:
+            errors = outcome.get("errors") or []
+            raise ValidationError(
+                "every outcome is decided but the submission was rejected: "
+                + "; ".join(str(error) for error in errors[:6])
+                + ". Record the affected outcome again with the correction."
+            )
+        return json.dumps({"accepted": True, "recorded": "assessment"}, sort_keys=True)
 
     # -- JSON-RPC -----------------------------------------------------------------------------
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
