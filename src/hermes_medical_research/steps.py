@@ -6,8 +6,8 @@ for it.  Inside a step every item is still one claim, one lease and one ``TaskEn
 the surface that produces the answer changes:
 
 ``call``
-    One fresh Hermes session per item whose profile exposes exactly that kind's submit tool with
-    ``tool_choice: required``, so the answer arrives as a grammar-constrained tool call.
+    One fresh tool-free Hermes session per item whose profile carries that kind's answer schema, so
+    the answer arrives shape-constrained and this runner writes only the fields it owns.
 ``agent``
     One fresh Hermes session per item with the role's skill and tools, for work that must read
     arbitrary full text.  Corrections always take this lane: a correction re-mints the same packet,

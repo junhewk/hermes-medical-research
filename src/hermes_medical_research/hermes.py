@@ -26,11 +26,11 @@ from hermes_medical_research.search.models import ValidationError
 class ProfileSpec:
     """One managed Hermes profile.
 
-    ``kind`` names the Task kind whose submit tool this profile carries.  Such a profile is
-    tool-free apart from that one MCP tool and pins ``tool_choice: required``, which is what makes
-    the model server compile a grammar for the tool's ``result`` object from the first token.
-    ``skills`` and shell toolsets belong to the session profiles instead, which must read arbitrary
-    full text.
+    ``kind`` names the Task kind this profile answers in one constrained call.  Such a profile has
+    no tools at all and carries that kind's answer schema in its provider ``extra_body``, which is
+    what makes the model server compile a grammar for the answer.  Skills, shell toolsets and the
+    typed submit tools belong to the session profiles instead, which must read arbitrary full text
+    and therefore cannot carry a schema.
     """
 
     description: str
@@ -80,25 +80,25 @@ PROFILES: dict[str, ProfileSpec] = {
         role="auditor",
     ),
     "hmr-screen": ProfileSpec(
-        "Answers one screening packet with one constrained tool call.",
+        "Answers one screening packet with one constrained call.",
         max_turns=2,
         kind="screening",
         role="selector",
     ),
     "hmr-cover": ProfileSpec(
-        "Answers one assessment-coverage packet with one constrained tool call.",
+        "Answers one assessment-coverage packet with one constrained call.",
         max_turns=2,
         kind="coverage",
         role="selector",
     ),
     "hmr-link": ProfileSpec(
-        "Answers one study-linking packet with one constrained tool call.",
+        "Answers one study-linking packet with one constrained call.",
         max_turns=2,
         kind="studies",
         role="extractor",
     ),
     "hmr-finding": ProfileSpec(
-        "Writes one protocol outcome's finding with one constrained tool call.",
+        "Writes one protocol outcome's finding with one constrained call.",
         max_turns=2,
         kind="synthesis",
         role="synthesizer",
@@ -300,8 +300,8 @@ def _desired_files(
     assignment: dict[str, Any] | None = None,
 ) -> dict[str, bytes]:
     spec = PROFILES[name]
-    # Order matters: the forced tool call is pinned on the provider entry the profile ends up
-    # selecting, so the operator's model assignment has to be applied first.
+    # Order matters: the schema is pinned on the provider entry the profile ends up selecting, so
+    # the operator's model assignment has to be applied first.
     settings = _with_assigned_model(settings, spec, assignment)
     if spec.kind:
         settings = _with_response_format(settings, spec.kind)
@@ -726,7 +726,7 @@ def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dic
 
 
 def _schema_report(root: Path, kind: str, problems: list[str]) -> dict[str, Any]:
-    """Compare the installed profile's forced-tool settings against this release's schema."""
+    """Compare the installed profile's answer schema against this release's."""
     from . import answers
 
     config_path = root / "config.yaml"
@@ -913,12 +913,11 @@ def invoke_call_session(
     *,
     usage_file: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one fresh tool-free Hermes session that must answer with one constrained tool call.
+    """Run one fresh tool-free Hermes session that must answer in this kind's schema.
 
-    Reasoning is off on purpose: llama.cpp ignores a response schema while thinking is enabled, and
-    a thinking model also spends most of its tokens before the tool call.  The session carries no
-    skill and no shell toolset, so the profile's one MCP submit tool is its whole tool surface, and
-    the answer reaches the store through that tool rather than through this process.
+    Reasoning is off on purpose: llama.cpp ignores a response schema while thinking is enabled.
+    The session carries no skill, no shell toolset and no tools of any kind, which is the only
+    configuration in which the schema applies, and its answer is the text this returns.
     """
     argv = [
         executable,
