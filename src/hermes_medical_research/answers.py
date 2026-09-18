@@ -162,6 +162,12 @@ _EFFECT = _object(
         "missing_reason": {"type": "string", "maxLength": 300},
     },
 )
+_QUOTED_LOCATION = _object(
+    ["document_id", "locator", "quote"],
+    {"document_id": {"type": "string", "minLength": 1},
+     "locator": {"type": "string", "minLength": 1},
+     "quote": {"type": "string", "minLength": 1, "maxLength": 400}},
+)
 _DOMAIN = _object(
     ["name", "status", "judgment", "rationale"],
     {
@@ -169,6 +175,9 @@ _DOMAIN = _object(
         "status": {"type": "string", "enum": ["pending", "assessed", "unavailable"]},
         "judgment": {"type": "string", "minLength": 1, "maxLength": 60},
         "rationale": _REASON,
+        # An assessed domain must cite where it read the judgment; an unavailable one says instead
+        # what it inspected and why nothing was there.
+        "source_locations": {"type": "array", "maxItems": 8, "items": _QUOTED_LOCATION},
         "assessment_basis": {"type": "string", "maxLength": 300},
         "missing_reason": {"type": "string",
                            "enum": ["access_unavailable", "not_reported", "insufficient_detail"]},

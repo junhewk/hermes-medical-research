@@ -67,9 +67,13 @@ def appraisal_answer(**overrides) -> dict:
         "rationale": "Randomization is described but concealment is not.",
         "domains": [
             {"name": "randomization", "status": "assessed", "judgment": "some_concerns",
-             "rationale": "Sequence generation is described; concealment is not."},
+             "rationale": "Sequence generation is described; concealment is not.",
+             "source_locations": [{"document_id": "r-1:fulltext", "locator": "methods",
+                                   "quote": "Participants were randomly assigned."}]},
             {"name": "deviations", "status": "assessed", "judgment": "low",
-             "rationale": "Analysis followed the assigned groups."},
+             "rationale": "Analysis followed the assigned groups.",
+             "source_locations": [{"document_id": "r-1:fulltext", "locator": "methods",
+                                   "quote": "Analysis was by assigned group."}]},
         ],
     }
     answer.update(overrides)
@@ -112,7 +116,9 @@ def test_the_appraisal_must_be_filled_before_anything_is_submitted():
 def test_completion_is_derived_rather_than_asserted():
     answer = appraisal_answer(domains=[
         {"name": "randomization", "status": "assessed", "judgment": "low",
-         "rationale": "Computer generated."},
+         "rationale": "Computer generated.",
+         "source_locations": [{"document_id": "r-1:fulltext", "locator": "methods",
+                               "quote": "A computer generated the sequence."}]},
         {"name": "deviations", "status": "unavailable", "judgment": "low",
          "rationale": "Methods do not say.", "missing_reason": "not_reported",
          "assessment_basis": "Read the methods section.",
@@ -133,13 +139,17 @@ def test_every_domain_needs_a_status_and_no_invented_domain_is_accepted():
     with pytest.raises(ValidationError) as error:
         assessment.record("study_appraisal", appraisal_answer(domains=[
             {"name": "randomization", "status": "assessed", "judgment": "low",
-             "rationale": "Computer generated."},
+             "rationale": "Computer generated.",
+             "source_locations": [{"document_id": "r-1:fulltext", "locator": "methods",
+                                   "quote": "A computer generated the sequence."}]},
         ]), proposal(), packet())
     assert "every domain needs a status" in str(error.value)
 
     with pytest.raises(ValidationError) as error:
         assessment.record("study_appraisal", appraisal_answer(domains=[
-            {"name": "invented", "status": "assessed", "judgment": "low", "rationale": "x"},
+            {"name": "invented", "status": "assessed", "judgment": "low", "rationale": "x",
+             "source_locations": [{"document_id": "r-1:fulltext", "locator": "methods",
+                                   "quote": "Something."}]},
         ]), proposal(), packet())
     assert "not a domain of this appraisal method" in str(error.value)
 

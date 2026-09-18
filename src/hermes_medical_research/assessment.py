@@ -110,7 +110,11 @@ def _apply_study_appraisal(proposal: dict[str, Any], result: dict[str, Any]) -> 
         domain["inspected_locations"] = [
             dict(location) for location in item.get("inspected_locations") or []
         ]
-        domain["source_locations"] = domain.get("source_locations") or []
+        # An assessed domain needs the locations it read; the validator refuses a judgment without
+        # them, so they are recorded exactly as answered.
+        domain["source_locations"] = [
+            dict(location) for location in item.get("source_locations") or []
+        ]
     statuses = {domain["status"] for domain in domains.values()}
     # Completion follows from the domains, so the model never states it and cannot get it wrong.
     template["completion"] = (
