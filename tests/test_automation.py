@@ -1,4 +1,4 @@
-"""Cron automation keeps human Review state separate from bounded Task state."""
+"""Durable automation keeps human Review state separate from bounded Task state."""
 
 from __future__ import annotations
 
@@ -11,12 +11,9 @@ from pathlib import Path
 import pytest
 from test_research import completed_search
 
+from hermes_medical_research import steps
 from hermes_medical_research.automation import AutomationEngine
-from hermes_medical_research.hermes import (
-    _routine_specs,
-    drain,
-    routines,
-)
+from hermes_medical_research.hermes import write_assignment
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, TaskEngine
 
@@ -48,9 +45,6 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
     )
     assert created["active_cycle"] == 1
     assert (await automation.tick())["routed"] == 1
-    first_probe = automation.probe("searcher")
-    assert first_probe["state"] == "ready"
-    assert automation.probe("searcher") == first_probe
 
     actor = Actor("hmr-searcher", "cron-session", "searcher")
     claim = automation.claim("search", actor)
@@ -182,7 +176,8 @@ async def test_three_attempts_use_bounded_backoff_then_block(tmp_path: Path):
     first = automation.claim("search", actor)
     failed = automation.fail(first["claim_id"], actor, code="fixture", message="one")
     assert failed["attempt"] == 1 and not failed["blocked"]
-    assert automation.probe("searcher")["state"] == "idle"
+    assert automation.claim("search", actor)["state"] == "idle"
+    assert automation.next_available_at("searcher") is not None
     current[0] += timedelta(minutes=5)
 
     second = automation.claim("search", actor)
@@ -198,26 +193,7 @@ async def test_three_attempts_use_bounded_backoff_then_block(tmp_path: Path):
     assert automation.notification_probe()["state"] == "ready"
 
 
-def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
-    result = routines(hermes_home=tmp_path / "hermes", store=tmp_path / "store")
-    assert not result["applied"]
-    assert len(result["jobs"]) == 6
-    assert {job["name"] for job in result["jobs"]} == {
-        "hmr-work-tick",
-        "hmr-work-searcher",
-        "hmr-work-selector",
-        "hmr-work-extractor",
-        "hmr-work-synthesizer",
-        "hmr-work-auditor",
-    }
-    for job in result["jobs"]:
-        assert job["no_agent"] and job["prompt"] == "" and job["skills"] == []
-        assert job["script"] == f"{job['name']}.sh"
-        assert "monitor_script" not in job
-    assert not (tmp_path / "hermes").exists()
-
-
-def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path, monkeypatch):
+def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path):
     automation = AutomationEngine(tmp_path / "store")
     created = automation.create_review(
         "serial-selection",
@@ -230,6 +206,9 @@ def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path,
     search, _ = completed_search(workspace, tmp_path / "search", count=12)
     workspace.attach(search.path)
     asyncio.run(automation.tick())
+    # Screening is answered by a constrained call by default; this is the session lane, so the
+    # operator's per-kind assignment pins it.
+    write_assignment(tmp_path / "hermes", lanes={"screening": "agent"})
     sessions: list[str] = []
 
     def accept_one(_executable, _home, claim, actor, role):
@@ -255,25 +234,24 @@ def test_serial_selector_uses_one_fresh_host_session_per_article(tmp_path: Path,
         sessions.append(actor.session_id)
         return subprocess.CompletedProcess([], 0, "accepted", "")
 
-    monkeypatch.setattr(
-        "hermes_medical_research.hermes.shutil.which",
-        lambda name: "/opt/hermes" if name == "hermes" else None,
-    )
     result = asyncio.run(
-        drain(
-            role="selector",
+        steps.run_step(
+            "select",
             store=tmp_path / "store",
+            review="serial-selection",
             hermes_home=tmp_path / "hermes",
             invoke=accept_one,
         )
     )
 
-    assert result == {"state": "drained", "role": "selector", "processed": 12, "failed": []}
+    assert result["state"] == "drained"
+    assert result["processed"] == 12 and result["failed"] == 0
+    assert result["lanes"] == {"agent": 12}
     assert len(sessions) == len(set(sessions)) == 12
     assert len(workspace.rows("screening")) == 12
 
 
-def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, monkeypatch):
+def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path):
     automation = AutomationEngine(tmp_path / "store")
     created = automation.create_review(
         "failed-selection",
@@ -286,6 +264,7 @@ def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, m
     search, _ = completed_search(workspace, tmp_path / "search", count=1)
     workspace.attach(search.path)
     asyncio.run(automation.tick())
+    write_assignment(tmp_path / "hermes", lanes={"screening": "agent"})
 
     def fail_one(_executable, _home, claim, actor, _role):
         automation.fail(
@@ -296,21 +275,20 @@ def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, m
         )
         return subprocess.CompletedProcess([], 0, "failed", "")
 
-    monkeypatch.setattr(
-        "hermes_medical_research.hermes.shutil.which",
-        lambda name: "/opt/hermes" if name == "hermes" else None,
-    )
     result = asyncio.run(
-        drain(
-            role="selector",
+        steps.run_step(
+            "select",
             store=tmp_path / "store",
+            review="failed-selection",
             hermes_home=tmp_path / "hermes",
             invoke=fail_one,
+            # The failed Task backs off for five minutes; this step reports instead of waiting.
+            max_wait=0,
         )
     )
     assert result["state"] == "drained"
-    assert result["processed"] == 0
-    assert [item["state"] for item in result["failed"]] == ["pending"]
+    assert result["processed"] == 0 and result["failed"] == 1
+    assert [item["code"] for item in result["failures"]] == ["screening_not_recorded"]
 
     task = next(
         task
@@ -318,50 +296,10 @@ def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, m
         if task["role"] == "selector"
     )
     assert task["state"] == "pending"
+    # The host already failed its own claim, so the runner's fail was refused rather than
+    # spending a second of the three bounded attempts.
     assert task["automation_attempts"] == 1
-    assert len(task["automation_failures"]) == 1
-
-
-def test_routine_scripts_pin_the_hmr_executable(tmp_path: Path, monkeypatch):
-    executable = tmp_path / "bin" / "hmr"
-    executable.parent.mkdir()
-    executable.touch()
-    monkeypatch.setattr(
-        "hermes_medical_research.hermes.shutil.which",
-        lambda name: (
-            str(executable)
-            if name == "hmr"
-            else "/opt/hermes/bin/hermes"
-            if name == "hermes"
-            else None
-        ),
-    )
-
-    _, scripts = _routine_specs(tmp_path / "store", tmp_path / "hermes")
-
-    assert scripts
-    assert all(f"exec {executable} ".encode() in content for content in scripts.values())
-    for role in ("searcher", "selector", "extractor", "synthesizer", "auditor"):
-        script = scripts[f"hmr-{role}/scripts/hmr-work-{role}.sh"]
-        assert f"hermes drain --role {role} ".encode() in script
-        assert b"--hermes-executable /opt/hermes/bin/hermes" in script
-
-
-def test_living_review_adds_real_cadence_routine(tmp_path: Path):
-    store = tmp_path / "store"
-    coordinator = tmp_path / "hermes" / "profiles" / "hmr-coordinator"
-    coordinator.mkdir(parents=True)
-    (coordinator / "config.yaml").write_text("timezone: Asia/Seoul\n")
-    AutomationEngine(store).create_review(
-        "living-exercise",
-        protocol(),
-        schedule="0 3 * * 1",
-        timezone="Asia/Seoul",
-    )
-    result = routines(hermes_home=tmp_path / "hermes", store=store)
-    scheduled = next(job for job in result["jobs"] if job["name"] == "hmr-review-living-exercise")
-    assert scheduled["schedule"] == "0 3 * * 1"
-    assert scheduled["no_agent"]
+    assert [failure["code"] for failure in task["automation_failures"]] == ["fixture_failure"]
 
 
 @pytest.mark.asyncio

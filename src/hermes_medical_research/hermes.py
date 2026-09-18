@@ -6,50 +6,114 @@ import asyncio
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import yaml
-from filelock import FileLock
-from filelock import Timeout as FileLockTimeout
 
 from hermes_medical_research import __version__
 from hermes_medical_research.search.models import ValidationError
 
-PROFILE_SKILLS = {
-    "hmr-coordinator": (),
-    "hmr-searcher": ("medical-search",),
-    "hmr-selector": ("medical-select",),
-    "hmr-extractor": ("medical-extract",),
-    "hmr-synthesizer": ("medical-synthesize",),
-    "hmr-auditor": ("medical-synthesize",),
+
+@dataclass(frozen=True)
+class ProfileSpec:
+    """One managed Hermes profile.
+
+    ``kind`` names the Task kind whose submit tool this profile carries.  Such a profile is
+    tool-free apart from that one MCP tool and pins ``tool_choice: required``, which is what makes
+    the model server compile a grammar for the tool's ``result`` object from the first token.
+    ``skills`` and shell toolsets belong to the session profiles instead, which must read arbitrary
+    full text.
+    """
+
+    description: str
+    skills: tuple[str, ...] = ()
+    toolsets: tuple[str, ...] = ()
+    max_turns: int | None = None
+    kind: str | None = None
+    role: str | None = None
+
+
+SESSION_TOOLSETS = ("terminal", "file", "skills")
+# Per-session model-turn ceilings for one claimed Task.  An assessment reads each protocol
+# outcome's locations; an audit group checks several targets.  A constrained call needs two: the
+# tool call and the turn that sees its result.
+PROFILES: dict[str, ProfileSpec] = {
+    "hmr-coordinator": ProfileSpec(
+        "Human-facing intake; never performs specialist work.",
+        toolsets=SESSION_TOOLSETS,
+        role="coordinator",
+    ),
+    "hmr-selector": ProfileSpec(
+        "Screens and selects one supplied medical record at a time.",
+        skills=("medical-select",),
+        toolsets=SESSION_TOOLSETS,
+        max_turns=16,
+        role="selector",
+    ),
+    "hmr-extractor": ProfileSpec(
+        "Acquires full text, links studies, extracts results, and appraises them.",
+        skills=("medical-extract",),
+        toolsets=SESSION_TOOLSETS,
+        max_turns=60,
+        role="extractor",
+    ),
+    "hmr-synthesizer": ProfileSpec(
+        "Synthesizes one protocol outcome at a time.",
+        skills=("medical-synthesize",),
+        toolsets=SESSION_TOOLSETS,
+        max_turns=40,
+        role="synthesizer",
+    ),
+    "hmr-auditor": ProfileSpec(
+        "Independently audits frozen evidence and report assertions.",
+        skills=("medical-synthesize",),
+        toolsets=SESSION_TOOLSETS,
+        max_turns=48,
+        role="auditor",
+    ),
+    "hmr-screen": ProfileSpec(
+        "Answers one screening packet with one constrained tool call.",
+        max_turns=2,
+        kind="screening",
+        role="selector",
+    ),
+    "hmr-cover": ProfileSpec(
+        "Answers one assessment-coverage packet with one constrained tool call.",
+        max_turns=2,
+        kind="coverage",
+        role="selector",
+    ),
+    "hmr-link": ProfileSpec(
+        "Answers one study-linking packet with one constrained tool call.",
+        max_turns=2,
+        kind="studies",
+        role="extractor",
+    ),
+    "hmr-finding": ProfileSpec(
+        "Writes one protocol outcome's finding with one constrained tool call.",
+        max_turns=2,
+        kind="synthesis",
+        role="synthesizer",
+    ),
 }
-DESCRIPTIONS = {
-    "hmr-coordinator": "Routes opaque medical-research task IDs; never performs specialist work.",
-    "hmr-searcher": "Builds and runs bounded, reproducible medical searches.",
-    "hmr-selector": "Screens and selects one supplied medical record at a time.",
-    "hmr-extractor": "Acquires full text, links studies, extracts results, and appraises them.",
-    "hmr-synthesizer": "Synthesizes one protocol outcome at a time.",
-    "hmr-auditor": "Independently audits frozen evidence and report assertions.",
-}
+CALL_PROFILES = {spec.kind: name for name, spec in PROFILES.items() if spec.kind}
+SESSION_PROFILES = {spec.role: name for name, spec in PROFILES.items()
+                    if spec.kind is None and spec.role}
+# 0.5.x installed a Searcher profile for a role that now runs no session at all.
+RETIRED_PROFILES = ("hmr-searcher", "mdr-searcher")
 MANAGED = "hmr-managed.json"
 ROUTINES_MANAGED = "hmr-routines.json"
-TOOLSETS = ["terminal", "file", "skills"]
+ASSIGNMENT_FILE = "hmr-steps.json"
+MCP_SERVER_NAME = "hmr-tasks"
 WORKER_ROLES = ("searcher", "selector", "extractor", "synthesizer", "auditor")
-ROLE_SKILLS = {
-    "searcher": "medical-search",
-    "selector": "medical-select",
-    "extractor": "medical-extract",
-    "synthesizer": "medical-synthesize",
-    "auditor": "medical-synthesize",
-}
 ROLE_COMMANDS = {
     "searcher": "search",
     "selector": "select",
@@ -57,19 +121,10 @@ ROLE_COMMANDS = {
     "synthesizer": "synthesize",
     "auditor": "audit",
 }
-# Per-session model-turn ceilings for one claimed Task.  An assessment reads each protocol
-# outcome's locations and edits one proposal; an audit group checks several targets.
-PROFILE_MAX_TURNS = {
-    "hmr-searcher": 8,
-    "hmr-selector": 16,
-    "hmr-extractor": 60,
-    "hmr-synthesizer": 40,
-    "hmr-auditor": 48,
-}
-WORKER_SCRIPT_TIMEOUT_SECONDS = 24 * 60 * 60
-HOST_ATTEMPTS = 3
 # One session may take many slow model turns; the runner renews its claim while it works.
 HOST_TIMEOUT_SECONDS = 75 * 60
+# A constrained call is one short turn; 7 s measured, with headroom for a cold prefix.
+CALL_TIMEOUT_SECONDS = 5 * 60
 LEASE_RENEW_SECONDS = 10 * 60
 # Transient claim failures (for example a busy Run lock) are retried before the runner gives up.
 CLAIM_RETRIES = 5
@@ -176,43 +231,194 @@ def _source_settings(source_profile: Path | None, home: Path) -> dict[str, Any]:
     return selected
 
 
-def _desired_files(name: str, settings: dict[str, Any]) -> dict[str, bytes]:
+def _provider_name(settings: dict[str, Any]) -> str | None:
     model = settings.get("model")
+    if isinstance(model, dict) and isinstance(model.get("provider"), str):
+        return model["provider"]
+    provider = settings.get("provider")
+    return provider if isinstance(provider, str) else None
+
+
+def _with_forced_tool_call(settings: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Pin ``tool_choice: required`` on the provider entry this profile actually selects.
+
+    A tool grammar is lazy under ``auto``: it binds nothing until the model opens a tool call, and
+    a model that answers in prose never opens one.  ``required`` makes the call mandatory and the
+    grammar active from the first token.  Hermes merges a provider's ``extra_body`` into every
+    chat-completions request, and the entry named by ``model.provider`` is the one it resolves, so
+    both spellings of that entry carry it.
+    """
+    from . import answers
+
+    extra = {"tool_choice": "required"}
+    updated = deepcopy(settings)
+    name = _provider_name(settings)
+    providers = updated.get("providers")
+    if name and isinstance(providers, dict) and isinstance(providers.get(name), dict):
+        providers[name] = {**providers[name], "extra_body": extra}
+    custom = updated.get("custom_providers")
+    if isinstance(custom, list):
+        updated["custom_providers"] = [
+            {**entry, "extra_body": extra} if isinstance(entry, dict) else entry
+            for entry in custom
+        ]
+    model = updated.get("model")
     if isinstance(model, dict):
-        cron_model = model.get("default")
-        cron_provider = model.get("provider")
-    else:
-        cron_model = model
-        cron_provider = settings.get("provider")
-    cron = {
-        key: value
-        for key, value in (
-            ("model", cron_model),
-            ("model_provider", cron_provider),
-        )
-        if isinstance(value, str) and value.strip()
+        # A constrained tool call is short; a small ceiling bounds a pathological string argument.
+        updated["model"] = {**model, "max_tokens": answers.MAX_TOKENS[kind]}
+    return updated
+
+
+def _mcp_entry(store: Path, role: str, kind: str | None, executable: str) -> dict[str, Any]:
+    args = ["mcp", "serve", "--store", str(store), "--role", role]
+    if kind:
+        args += ["--kind", kind]
+    return {
+        MCP_SERVER_NAME: {
+            "command": executable,
+            "args": args,
+            "enabled": True,
+            "timeout": 300,
+        }
     }
-    if name != "hmr-coordinator":
-        # Each worker Routine is a serial runner that may drain its queue for hours.
-        cron["script_timeout_seconds"] = WORKER_SCRIPT_TIMEOUT_SECONDS
-    config = {
+
+
+def _desired_files(
+    name: str,
+    settings: dict[str, Any],
+    *,
+    store: Path | None = None,
+    assignment: dict[str, Any] | None = None,
+) -> dict[str, bytes]:
+    spec = PROFILES[name]
+    # Order matters: the forced tool call is pinned on the provider entry the profile ends up
+    # selecting, so the operator's model assignment has to be applied first.
+    settings = _with_assigned_model(settings, spec, assignment)
+    if spec.kind:
+        settings = _with_forced_tool_call(settings, spec.kind)
+    config: dict[str, Any] = {
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),
-        **({"cron": cron} if cron else {}),
-        **(
-            {"agent": {"max_turns": PROFILE_MAX_TURNS[name]}}
-            if name in PROFILE_MAX_TURNS
-            else {}
-        ),
-        "tools": {"enabled_toolsets": TOOLSETS},
+        **({"agent": {"max_turns": spec.max_turns}} if spec.max_turns else {}),
+        "tools": {"enabled_toolsets": list(spec.toolsets)},
     }
+    if spec.kind:
+        # The submit tool is the profile's whole tool surface, and the server resolves its own
+        # claim, so nothing task-specific is ever written into a config file.
+        config["mcp_servers"] = _mcp_entry(
+            store if store is not None else _default_store(),
+            spec.role or "",
+            spec.kind,
+            _hmr_path(),
+        )
     files = {
         "SOUL.md": _resource(f"profiles/{name}.md"),
         "config.yaml": yaml.safe_dump(config, sort_keys=False).encode(),
     }
-    for skill in PROFILE_SKILLS[name]:
+    for skill in spec.skills:
         files[f"skills/{skill}/SKILL.md"] = _resource(f"skills/{skill}/SKILL.md")
     return files
+
+
+def _with_assigned_model(
+    settings: dict[str, Any], spec: ProfileSpec, assignment: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Apply the operator's per-step model choice, if they made one for this profile's kind."""
+    chosen = ((assignment or {}).get("kinds") or {}).get(spec.kind or "", {})
+    model_name, provider = chosen.get("model"), chosen.get("provider")
+    if not model_name:
+        return settings
+    updated = deepcopy(settings)
+    model = updated.get("model")
+    if isinstance(model, dict):
+        model["default"] = model_name
+        if provider:
+            model["provider"] = provider
+    else:
+        updated["model"] = {"default": model_name, **({"provider": provider} if provider else {})}
+    return updated
+
+
+def _default_store() -> Path:
+    from .tasks import data_home
+
+    return data_home()
+
+
+def _hmr_path() -> str:
+    return shutil.which("hmr") or "hmr"
+
+
+def profile_home(value: Path | None = None) -> Path:
+    """The Hermes home a step runner and the profile writer share."""
+    return _home(value)
+
+
+def hermes_executable() -> str:
+    return shutil.which("hermes") or "hermes"
+
+
+def assignment_path(home: Path | None = None) -> Path:
+    return _home(home) / ASSIGNMENT_FILE
+
+
+def step_assignment(home: Path | None = None) -> dict[str, Any]:
+    """The operator's per-kind lane, profile and model choices; ``{}`` when never set."""
+    try:
+        data = json.loads(assignment_path(home).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_assignment(
+    home: Path | None = None,
+    *,
+    models: dict[str, str] | None = None,
+    lanes: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Record a per-kind model (``MODEL`` or ``MODEL@PROVIDER``) or lane choice."""
+    from . import answers
+
+    path = assignment_path(home)
+    current = step_assignment(home)
+    kinds = dict(current.get("kinds") or {})
+    for kind, value in (models or {}).items():
+        if kind not in answers.CALL_KINDS:
+            raise ValidationError(
+                f"{kind} has no constrained answer shape; kinds are "
+                f"{', '.join(answers.CALL_KINDS)}"
+            )
+        model_name, _, provider = value.partition("@")
+        entry = dict(kinds.get(kind) or {})
+        entry["model"] = model_name.strip()
+        if provider.strip():
+            entry["provider"] = provider.strip()
+        entry.setdefault("profile", CALL_PROFILES[kind])
+        kinds[kind] = entry
+    for kind, lane in (lanes or {}).items():
+        if kind not in answers.CALL_KINDS:
+            raise ValidationError(f"{kind} is always answered by a session; it has no lane choice")
+        if lane not in {"call", "agent"}:
+            raise ValidationError("lane must be call or agent")
+        entry = dict(kinds.get(kind) or {})
+        entry["lane"] = lane
+        entry.setdefault("profile", CALL_PROFILES[kind])
+        kinds[kind] = entry
+    payload = {
+        "schema_version": "1",
+        "package": "hermes-medical-research",
+        "version": __version__,
+        "kinds": kinds,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def profile_for_kind(kind: str, assignment: dict[str, Any] | None = None) -> str:
+    chosen = ((assignment or {}).get("kinds") or {}).get(kind, {}).get("profile")
+    return str(chosen) if chosen else CALL_PROFILES[kind]
 
 
 def _read_manifest(root: Path) -> dict[str, Any] | None:
@@ -246,7 +452,7 @@ def _check_ownership(root: Path, desired: dict[str, bytes]) -> None:
         for relative in manifest["files"]
         if relative.startswith("skills/")
     }
-    unexpected_skills = installed_skills - set(PROFILE_SKILLS[root.name]) - managed_skills
+    unexpected_skills = installed_skills - set(PROFILES[root.name].skills) - managed_skills
     if unexpected_skills:
         raise ValidationError(
             "managed profile contains unmanaged skills: "
@@ -260,36 +466,62 @@ def bootstrap_profiles(
     hermes_home: Path | None = None,
     source_profile: Path | None = None,
     profile: str | None = None,
+    store: Path | None = None,
+    remove: bool = False,
 ) -> dict[str, Any]:
-    """Plan or apply the six isolated, CLI-only Hermes profiles."""
+    """Plan, apply, or remove the managed Hermes profiles.
+
+    Five carry a role's skill and shell tools for work that reads full text; four carry one
+    constrained submit tool and nothing else.  Model settings are still the operator's: only a
+    per-step assignment recorded through ``write_assignment`` overrides them.
+    """
     home = _home(hermes_home)
     executable = shutil.which("hermes")
     settings = _source_settings(source_profile, home)
+    artifact_store = (store or _default_store()).expanduser().resolve()
+    assignment = step_assignment(home)
     plan = []
     desired_by_profile: dict[str, dict[str, bytes]] = {}
-    names = [profile] if profile else list(PROFILE_SKILLS)
-    if any(name not in PROFILE_SKILLS for name in names):
+    names = [profile] if profile else list(PROFILES)
+    if any(name not in PROFILES for name in names):
         raise ValidationError("unknown managed Hermes profile")
     for name in names:
         root = _profile_root(home, name)
-        desired = _desired_files(name, settings)
+        desired = _desired_files(name, settings, store=artifact_store,
+                                 assignment=assignment)
         desired_by_profile[name] = desired
         _check_ownership(root, desired)
         plan.append(
             {
                 "profile": name,
                 "root": str(root),
-                "skills": list(PROFILE_SKILLS[name]),
+                "skills": list(PROFILES[name].skills),
+                "kind": PROFILES[name].kind,
                 "files": sorted(desired),
             }
         )
+    retired = [
+        {"profile": name, "root": str(_profile_root(home, name))}
+        for name in RETIRED_PROFILES
+        if _profile_root(home, name).exists()
+    ]
     if not apply:
         return {
             "applied": False,
             "hermes": executable,
             "hermes_version": _version(executable),
             "hermes_home": str(home),
+            "store": str(artifact_store),
             "profiles": plan,
+            "retired_profiles": retired,
+            "removing": remove,
+        }
+    if remove:
+        return {
+            "applied": True,
+            "hermes_home": str(home),
+            "removed": [_remove_profile(_profile_root(home, item["profile"])) for item in
+                        [*plan, *retired]],
         }
     if executable is None:
         raise ValidationError("Hermes CLI is not installed or is not on PATH")
@@ -321,7 +553,7 @@ def bootstrap_profiles(
                     name,
                     "--no-skills",
                     "--description",
-                    DESCRIPTIONS[name],
+                    PROFILES[name].description,
                     "--no-alias",
                 ],
                 check=False,
@@ -362,19 +594,44 @@ def bootstrap_profiles(
         "hermes_version": _version(executable),
         "hermes_home": str(home),
         "profiles": plan,
+        "store": str(artifact_store),
         "bot_mode_discovery": "automatic",
-        "workflow": "cron-routines",
+        "workflow": "user-invoked-steps",
+        "retired_profiles": [_remove_profile(Path(item["root"])) for item in retired],
     }
 
 
-def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
+def _remove_profile(root: Path) -> dict[str, Any]:
+    """Delete exactly the files this package installed, and nothing an operator added."""
+    manifest = _read_manifest(root)
+    if manifest is None:
+        return {"profile": root.name, "removed": False,
+                "reason": "profile is not managed by hmr"}
+    for relative in manifest.get("files", {}):
+        (root / relative).unlink(missing_ok=True)
+    (root / MANAGED).unlink(missing_ok=True)
+    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
+        if not any(directory.iterdir()):
+            directory.rmdir()
+    leftover = sorted(path.name for path in root.iterdir()) if root.exists() else []
+    if not leftover and root.exists():
+        root.rmdir()
+    return {"profile": root.name, "removed": not leftover, "kept": leftover}
+
+
+def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dict[str, Any]:
     home = _home(hermes_home)
     executable = shutil.which("hermes")
+    assignment = step_assignment(home)
     profiles = []
     ready = executable is not None
-    for name in PROFILE_SKILLS:
+    for name in PROFILES:
         root = _profile_root(home, name)
-        desired = _desired_files(name, _source_settings(None, home))
+        desired = _desired_files(
+            name, _source_settings(None, home),
+            store=(store or _default_store()).expanduser().resolve(),
+            assignment=assignment,
+        )
         problems: list[str] = []
         try:
             _check_ownership(root, desired)
@@ -390,11 +647,17 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
         for relative in desired:
             if not (root / relative).is_file():
                 problems.append(f"missing {relative}")
+        entry: dict[str, Any] = {"profile": name, "ready": not problems, "problems": problems}
+        if PROFILES[name].kind:
+            entry["schema"] = _schema_report(root, PROFILES[name].kind, problems)
         if problems:
             ready = False
-        profiles.append({"profile": name, "ready": not problems, "problems": problems})
-    routine_state = _routine_health(home)
-    paused_routines = routine_status(home)["paused"] if routine_state["ready"] else []
+        entry["ready"] = not problems
+        profiles.append(entry)
+    legacy = _legacy_routines(home)
+    for name in RETIRED_PROFILES:
+        if _profile_root(home, name).exists():
+            ready = False
     main_config = _source_settings(None, home)
     if not main_config:
         # Isolated qualification homes commonly contain only managed profiles,
@@ -413,47 +676,105 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
         isinstance(gateway, dict) and gateway.get("multiplex_profiles") is True
     )
     hmr_executable = shutil.which("hmr")
-    cron_doctors = []
-    if executable:
-        for name in PROFILE_SKILLS:
-            completed = subprocess.run(
-                [executable, "-p", name, "cron", "doctor"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env={**os.environ, "HERMES_HOME": str(home)},
-            )
-            cron_doctors.append(
-                {
-                    "profile": name,
-                    "ready": completed.returncode == 0,
-                    "detail": (completed.stderr or completed.stdout).strip(),
-                }
-            )
-    cron_ready = bool(cron_doctors) and all(item["ready"] for item in cron_doctors)
+    from .quick_commands import status as quick_command_status
+
+    commands = quick_command_status(hermes_home=home)
+    assignment_report = _assignment_report(assignment)
     return {
         "ready": (
             ready
-            and routine_state["ready"]
-            and multiplex
             and hmr_executable is not None
-            and cron_ready
+            and commands["installed"]
+            and not legacy["installed"]
+            and not assignment_report["problems"]
         ),
         "hermes": executable,
         "hermes_version": _version(executable),
         "hermes_home": str(home),
         "bot_mode_discovery": "automatic",
+        "workflow": "user-invoked-steps",
         "profiles": profiles,
-        "routines": routine_state,
-        "paused_routines": paused_routines,
+        "retired_profiles": [
+            name for name in RETIRED_PROFILES if _profile_root(home, name).exists()
+        ],
+        "legacy_routines": legacy,
+        "quick_commands": commands,
+        "assignments": assignment_report,
         "hmr": hmr_executable,
+        # A per-profile gateway pin mattered when each profile ran its own cron job; a step starts
+        # its own session, so this is reported and no longer gates readiness.
         "gateway_multiplex_profiles": multiplex,
-        "cron_schedulers": cron_doctors,
         "provider_selection": {
             "configured": bool(main_config.get("model") or main_config.get("provider")),
             "timezone": main_config.get("timezone") or _system_timezone(),
         },
+    }
+
+
+def _schema_report(root: Path, kind: str, problems: list[str]) -> dict[str, Any]:
+    """Compare the installed profile's forced-tool settings against this release's schema."""
+    from . import answers
+
+    config_path = root / "config.yaml"
+    installed: dict[str, Any] = {}
+    if config_path.is_file():
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        installed = loaded if isinstance(loaded, dict) else {}
+    provider = _provider_name(installed)
+    entry = ((installed.get("providers") or {}).get(provider or "") or {})
+    forced = (entry.get("extra_body") or {}).get("tool_choice")
+    servers = installed.get("mcp_servers") or {}
+    if forced != "required":
+        problems.append("provider entry does not pin tool_choice: required")
+    if MCP_SERVER_NAME not in servers:
+        problems.append(f"profile does not host the {MCP_SERVER_NAME} tool server")
+    return {
+        "kind": kind,
+        "tool": f"submit_{kind}",
+        "schema_digest": answers.schema_digest(kind),
+        "tool_choice": forced,
+        "mcp_server": MCP_SERVER_NAME in servers,
+        "provider_entry": f"providers.{provider}" if provider else None,
+    }
+
+
+def _assignment_report(assignment: dict[str, Any]) -> dict[str, Any]:
+    """Check the operator's per-step choices against the kinds and profiles that exist."""
+    from . import answers
+
+    problems: list[str] = []
+    kinds = assignment.get("kinds") or {}
+    for kind, entry in kinds.items():
+        if kind not in answers.CALL_KINDS:
+            problems.append(f"{kind} has no constrained answer shape")
+            continue
+        lane = entry.get("lane")
+        if lane not in (None, "call", "agent"):
+            problems.append(f"{kind} lane must be call or agent")
+        profile = entry.get("profile")
+        if profile and profile not in PROFILES:
+            problems.append(f"{kind} names unknown profile {profile}")
+        elif profile and PROFILES[profile].kind != kind and lane != "agent":
+            problems.append(f"{profile} does not carry the {kind} submit tool")
+    return {"path": ASSIGNMENT_FILE, "kinds": kinds, "problems": problems}
+
+
+def _legacy_routines(home: Path) -> dict[str, Any]:
+    """Report a 0.5.x cron fleet that is still installed; steps and cron must not both claim."""
+    manifest = _routine_manifest(home)
+    jobs = [
+        f"{item['profile']}/{item['name']}"
+        for item in (manifest or {}).get("jobs", [])
+        if any(job.get("name") == item["name"]
+               for job in _jobs(_profile_root(home, item["profile"])))
+    ]
+    return {
+        "installed": bool(jobs),
+        "jobs": sorted(jobs),
+        "problems": (
+            ["legacy cron routines are still installed; run "
+             "`hmr hermes routines --remove --apply`"] if jobs else []
+        ),
     }
 
 
@@ -524,223 +845,7 @@ def _routine_health(home: Path) -> dict[str, Any]:
     return {"ready": not problems, "problems": problems, "jobs": manifest.get("jobs", [])}
 
 
-def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
-    from .automation import AutomationEngine
-
-    quoted_store = shlex.quote(str(store))
-    quoted_hmr = shlex.quote(shutil.which("hmr") or "hmr")
-    quoted_hermes = shlex.quote(shutil.which("hermes") or "hermes")
-    scripts: dict[str, bytes] = {}
-    jobs: list[dict[str, Any]] = []
-    tick_script = "hmr-work-tick.sh"
-    scripts[f"hmr-coordinator/scripts/{tick_script}"] = (
-        "#!/bin/sh\n"
-        f"exec {quoted_hmr} --store {quoted_store} --actor hmr-coordinator work cron-tick\n"
-    ).encode()
-    jobs.append(
-        {
-            "profile": "hmr-coordinator",
-            "name": "hmr-work-tick",
-            "schedule": "* * * * *",
-            "prompt": "",
-            "script": tick_script,
-            "no_agent": True,
-            "deliver": "bot-chat",
-            "skills": [],
-            "paused": False,
-        }
-    )
-    for role in WORKER_ROLES:
-        profile = f"hmr-{role}"
-        script = f"hmr-work-{role}.sh"
-        scripts[f"{profile}/scripts/{script}"] = (
-            "#!/bin/sh\n"
-            f"exec {quoted_hmr} --store {quoted_store} hermes drain --role {role} "
-            f"--hermes-home {shlex.quote(str(home))} "
-            f"--hermes-executable {quoted_hermes}\n"
-        ).encode()
-        jobs.append(
-            {
-                "profile": profile,
-                "name": f"hmr-work-{role}",
-                "schedule": "* * * * *",
-                "prompt": "",
-                "script": script,
-                "no_agent": True,
-                "deliver": None,
-                "failure_deliver": "bot-chat:hmr-coordinator",
-                "skills": [],
-                "paused": False,
-            }
-        )
-    automation = AutomationEngine(store)
-    coordinator_config = _profile_root(home, "hmr-coordinator") / "config.yaml"
-    config = (
-        yaml.safe_load(coordinator_config.read_text(encoding="utf-8")) or {}
-        if coordinator_config.is_file()
-        else {}
-    )
-    coordinator_timezone = config.get("timezone")
-    for view in automation.list_reviews()["reviews"]:
-        schedule = view["schedule"]
-        if schedule["expression"] == "once":
-            continue
-        if not isinstance(coordinator_timezone, str) or not coordinator_timezone:
-            raise ValidationError("Coordinator profile needs a configured IANA timezone")
-        if schedule["timezone"] != coordinator_timezone:
-            raise ValidationError(
-                f"Review {view['name']} timezone {schedule['timezone']} differs from "
-                f"Coordinator timezone {coordinator_timezone}"
-            )
-        script = f"hmr-review-{view['name']}.sh"
-        scripts[f"hmr-coordinator/scripts/{script}"] = (
-            "#!/bin/sh\n"
-            f"exec {quoted_hmr} --store {quoted_store} review run-now "
-            f"{shlex.quote(view['name'])} "
-            "--scheduled\n"
-        ).encode()
-        jobs.append(
-            {
-                "profile": "hmr-coordinator",
-                "name": f"hmr-review-{view['name']}",
-                "schedule": schedule["expression"],
-                "prompt": "",
-                "script": script,
-                "no_agent": True,
-                "deliver": None,
-                "skills": [],
-                # The script asks the core whether the Review is paused.  Hermes's own
-                # pause bit remains an operator-owned override and is never rewritten.
-                "paused": False,
-            }
-        )
-    return jobs, scripts
-
-
-def _create_routine(executable: str, home: Path, spec: dict[str, Any]) -> None:
-    command = [
-        executable,
-        "-p",
-        spec["profile"],
-        "cron",
-        "create",
-        spec["schedule"],
-        spec["prompt"],
-        "--name",
-        spec["name"],
-    ]
-    if spec.get("no_agent"):
-        command.extend(["--script", spec["script"], "--no-agent"])
-    else:
-        command.extend(["--monitor-script", spec["monitor_script"]])
-        for skill in spec["skills"]:
-            command.extend(["--skill", skill])
-    if spec.get("deliver"):
-        command.extend(["--deliver", spec["deliver"]])
-    if spec.get("failure_deliver"):
-        command.extend(["--failure-deliver", spec["failure_deliver"]])
-    if spec.get("paused"):
-        command.extend(["--paused", "--paused-reason", "Review is paused in hmr"])
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "HERMES_HOME": str(home)},
-    )
-    if completed.returncode:
-        raise ValidationError(
-            f"Hermes could not create routine {spec['name']}: "
-            f"{(completed.stderr or completed.stdout).strip()}"
-        )
-    if not spec.get("no_agent"):
-        matches = [
-            job
-            for job in _jobs(_profile_root(home, spec["profile"]))
-            if job.get("name") == spec["name"]
-        ]
-        if len(matches) != 1 or not matches[0].get("id"):
-            raise ValidationError(
-                f"Hermes created an ambiguous routine: "
-                f"{spec['profile']}/{spec['name']}"
-            )
-        # Profile creation can leave Hermes's cached creation snapshot behind
-        # the config that bootstrap just installed.  Public resnap adopts the
-        # current provider/model resolution while keeping the job unpinned.
-        resnapped = subprocess.run(
-            [
-                executable,
-                "-p",
-                spec["profile"],
-                "cron",
-                "resnap",
-                str(matches[0]["id"]),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "HERMES_HOME": str(home)},
-        )
-        if resnapped.returncode:
-            raise ValidationError(
-                f"Hermes could not resnap routine {spec['name']}: "
-                f"{(resnapped.stderr or resnapped.stdout).strip()}"
-            )
-
-
-def _edit_routine(
-    executable: str, home: Path, spec: dict[str, Any], existing: dict[str, Any]
-) -> None:
-    """Update an owned job through Hermes while leaving model pins and pause state alone."""
-    job_id = existing.get("id")
-    if not job_id:
-        raise ValidationError(f"managed routine has no Hermes job id: {spec['name']}")
-    command = [
-        executable,
-        "-p",
-        spec["profile"],
-        "cron",
-        "edit",
-        str(job_id),
-        "--name",
-        spec["name"],
-        "--schedule",
-        spec["schedule"],
-        "--prompt",
-        spec["prompt"],
-    ]
-    if spec["skills"]:
-        for skill in spec["skills"]:
-            command.extend(["--skill", skill])
-    else:
-        command.append("--clear-skills")
-    if spec.get("no_agent"):
-        command.extend(
-            ["--script", spec["script"], "--no-agent", "--monitor-script", ""]
-        )
-    else:
-        command.extend(["--agent", "--monitor-script", spec["monitor_script"]])
-    if spec.get("deliver") is not None:
-        command.extend(["--deliver", spec["deliver"]])
-    if spec.get("failure_deliver") is not None:
-        command.extend(["--failure-deliver", spec["failure_deliver"]])
-    if spec.get("workdir") is not None:
-        command.extend(["--workdir", spec["workdir"]])
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "HERMES_HOME": str(home)},
-    )
-    if completed.returncode:
-        raise ValidationError(
-            f"Hermes could not update routine {spec['name']}: "
-            f"{(completed.stderr or completed.stdout).strip()}"
-        )
-
-
-def _invoke_claim(
+def invoke_task_session(
     executable: str,
     home: Path,
     claim: dict[str, Any],
@@ -769,7 +874,7 @@ def _invoke_claim(
         "proposal_path": claim["proposal_path"],
         **{key: claim[key] for key in commands if key in claim},
     }
-    skill = ROLE_SKILLS[role]
+    skill = PROFILES[SESSION_PROFILES[role]].skills[0]
     profile = f"hmr-{role}"
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -807,151 +912,57 @@ def _invoke_claim(
         instruction_path.unlink(missing_ok=True)
 
 
-async def drain(
+def invoke_call_session(
+    executable: str,
+    home: Path,
+    profile: str,
+    prompt: str,
+    kind: str,
     *,
-    role: str,
-    store: Path,
-    hermes_home: Path | None = None,
-    hermes_executable: Path | None = None,
-    invoke: Callable[[str, Path, dict[str, Any], Any, str], subprocess.CompletedProcess[str]]
-    | None = None,
-) -> dict[str, Any]:
-    """Run one fresh host session per claimed Task until the role's queue is empty.
+    usage_file: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one fresh tool-free Hermes session that must answer with one constrained tool call.
 
-    A Task that its host session cannot finish is failed through the durable queue, with
-    backoff, and the runner moves on instead of stalling every later Task.  Full-text
-    acquisition has no semantic choice, so the runner submits its fixed proposal itself.
+    Reasoning is off on purpose: llama.cpp ignores a response schema while thinking is enabled, and
+    a thinking model also spends most of its tokens before the tool call.  The session carries no
+    skill and no shell toolset, so the profile's one MCP submit tool is its whole tool surface, and
+    the answer reaches the store through that tool rather than through this process.
     """
-    from .automation import AutomationEngine
-    from .tasks import Actor, TaskEngine
-
-    if role not in ROLE_SKILLS:
-        raise ValidationError(f"unknown worker role: {role}")
-    root = store.expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    home = _home(hermes_home)
-    executable = (
-        shutil.which(str(hermes_executable.expanduser()))
-        if hermes_executable is not None
-        else shutil.which("hermes")
+    argv = [
+        executable,
+        "-p", profile,
+        "--ignore-rules",
+        "--reasoning", "none",
+        *(["--usage-file", str(usage_file)] if usage_file else []),
+        "-z", prompt,
+    ]
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"HERMES_SESSION_ID", "HERMES_SESSION_PROFILE"}}
+    env["HERMES_HOME"] = str(home)
+    return subprocess.run(
+        argv,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=CALL_TIMEOUT_SECONDS,
+        env=env,
     )
-    if executable is None:
-        raise ValidationError("Hermes CLI is not installed or is not on PATH")
-    call = invoke or _invoke_claim
-    lock = FileLock(str(root / f".drain-{role}.lock"))
-    try:
-        lock.acquire(timeout=0)
-    except FileLockTimeout:
-        return {"state": "already_running", "role": role, "processed": 0, "failed": []}
-    processed = 0
-    failed: list[dict[str, Any]] = []
-    profile = f"hmr-{role}"
-    try:
-        automation = AutomationEngine(root)
-        claim_errors = 0
-        while True:
-            actor = Actor(profile, f"serial-{role}-{uuid4().hex}", role)
-            try:
-                claim = automation.claim(ROLE_COMMANDS[role], actor)
-            except (FileLockTimeout, ValidationError):
-                claim_errors += 1
-                if claim_errors > CLAIM_RETRIES:
-                    raise
-                await asyncio.sleep(CLAIM_RETRY_SECONDS)
-                continue
-            claim_errors = 0
-            if claim.get("state") == "idle":
-                return {
-                    "state": "drained",
-                    "role": role,
-                    "processed": processed,
-                    "failed": failed,
-                }
-            engine = TaskEngine(automation.catalog.workspace(claim["run_id"]))
-            packet = json.loads(Path(claim["packet_path"]).read_text(encoding="utf-8"))
-            outcome: str | None = None
-            last_error = f"{role} host session did not finish its assigned task."
-            if role == "selector" and len(packet.get("target_ids", [])) != 1:
-                last_error = "Selector task must contain exactly one article."
-            elif claim.get("kind") == "fulltext":
-                try:
-                    await engine.submit(
-                        "extract",
-                        claim["task_id"],
-                        Path(claim["proposal_path"]),
-                        actor,
-                        claim_token=claim["claim_token"],
-                    )
-                except (ValidationError, OSError, json.JSONDecodeError) as exc:
-                    last_error = f"deterministic full-text submission failed: {exc}"[:500]
-                state = engine.task_automation(claim["task_id"])["state"]
-                outcome = None if state == "in_progress" else state
-            else:
-                for _ in range(HOST_ATTEMPTS):
-                    try:
-                        completed = await _run_renewing(
-                            automation, claim, actor, call, executable, home, role
-                        )
-                        detail = (completed.stderr or completed.stdout or "").strip()
-                    except subprocess.TimeoutExpired:
-                        detail = f"host session exceeded {HOST_TIMEOUT_SECONDS} seconds"
-                    except ValidationError as exc:
-                        detail = f"claim could not be renewed: {exc}"
-                        last_error = detail
-                        break
-                    state = engine.task_automation(claim["task_id"])["state"]
-                    if state != "in_progress":
-                        outcome = state
-                        break
-                    last_error = detail[-500:] or last_error
-            if outcome == "accepted":
-                processed += 1
-                continue
-            record: dict[str, Any] = {
-                "run_id": claim["run_id"],
-                "task_id": claim["task_id"],
-                "kind": claim.get("kind"),
-            }
-            if outcome is None:
-                code = f"{role}_host_failed"
-                try:
-                    result = automation.fail(
-                        claim["claim_id"], actor, code=code, message=last_error
-                    )
-                    record.update(code=code, blocked=result["blocked"])
-                except (FileLockTimeout, ValidationError) as exc:
-                    record.update(code=code, fail_not_recorded=str(exc))
-            else:
-                # The host session itself ran the fail command, or the Task was superseded.
-                record["state"] = outcome
-            failed.append(record)
-    finally:
-        lock.release()
 
 
-async def _run_renewing(
+async def run_with_renewal(
     automation: Any,
     claim: dict[str, Any],
     actor: Any,
-    call: Callable[..., subprocess.CompletedProcess[str]],
-    executable: str,
-    home: Path,
-    role: str,
+    *,
+    runner: Callable[[dict[str, Any], Any], subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
     """Run one host session in a worker thread, renewing its claim until the session exits."""
-    session = asyncio.ensure_future(
-        asyncio.to_thread(call, executable, home, claim, actor, role)
-    )
+    session = asyncio.ensure_future(asyncio.to_thread(runner, claim, actor))
     while True:
         done, _ = await asyncio.wait({session}, timeout=LEASE_RENEW_SECONDS)
         if done:
             return session.result()
         automation.renew(claim["claim_id"], actor)
-
-
-async def drain_selector(**kwargs: Any) -> dict[str, Any]:
-    """Compatibility entry point for Routine scripts written before 0.5.8."""
-    return await drain(role="selector", **kwargs)
 
 
 def routine_status(hermes_home: Path | None = None) -> dict[str, Any]:
@@ -1020,128 +1031,84 @@ def set_routines_paused(paused: bool, *, hermes_home: Path | None = None) -> dic
 def routines(
     *,
     apply: bool = False,
+    remove: bool = False,
     hermes_home: Path | None = None,
     store: Path | None = None,
 ) -> dict[str, Any]:
-    """Plan or install the managed cron fleet through Hermes's public CLI."""
-    home = _home(hermes_home)
-    from .tasks import data_home
+    """Report and remove the 0.5.x managed cron fleet.
 
-    artifact_store = (store or data_home()).expanduser().resolve()
-    jobs, scripts = _routine_specs(artifact_store, home)
+    Cron holds no workflow authority any more: steps are user-invoked, so a Routine that claims work
+    on a timer would race the operator's own step runner. This entry point exists to take the fleet
+    off a host that already has it, and to keep reporting whatever is left until it is gone.
+    """
+    del store  # the fleet is identified by its manifest, not by a store path
+    home = _home(hermes_home)
+    manifest = _routine_manifest(home)
+    installed = [
+        {
+            "profile": item["profile"],
+            "name": item["name"],
+            "id": item.get("id"),
+            "present": any(
+                job.get("name") == item["name"]
+                for job in _jobs(_profile_root(home, item["profile"]))
+            ),
+        }
+        for item in (manifest or {}).get("jobs", [])
+    ]
     plan = {
         "applied": False,
         "hermes_home": str(home),
-        "store": str(artifact_store),
-        "jobs": jobs,
-        "scripts": sorted(scripts),
+        "workflow": "user-invoked-steps",
+        "legacy_jobs": installed,
+        "scripts": sorted((manifest or {}).get("scripts", {})),
+        "next": (
+            "run `hmr hermes routines --remove --apply` to delete them"
+            if installed or (manifest or {}).get("scripts")
+            else "nothing to remove"
+        ),
     }
     if not apply:
         return plan
+    if not remove:
+        raise ValidationError(
+            "cron routines are retired; pass --remove --apply to delete the managed fleet"
+        )
     executable = shutil.which("hermes")
     if executable is None:
         raise ValidationError("Hermes CLI is not installed or is not on PATH")
-    previous = _routine_manifest(home)
-    if previous:
-        for key, checksum in previous["scripts"].items():
-            profile, relative = key.split("/", 1)
-            path = _profile_root(home, profile) / relative
-            observed = _sha256(path.read_bytes()) if path.is_file() else None
-            desired = _sha256(scripts[key]) if key in scripts else None
-            if observed not in {checksum, desired}:
-                raise ValidationError(f"managed routine script was edited outside hmr: {path}")
-        for key in set(previous["scripts"]) - set(scripts):
-            profile, relative = key.split("/", 1)
-            (_profile_root(home, profile) / relative).unlink(missing_ok=True)
-    managed_names = {
-        (item["profile"], item["name"]) for item in (previous or {}).get("jobs", [])
-    }
-    previous_jobs = {
-        (item["profile"], item["name"]): item
-        for item in (previous or {}).get("jobs", [])
-    }
-    desired_names = {(item["profile"], item["name"]) for item in jobs}
-    removed = managed_names - desired_names
-    if removed:
-        raise ValidationError(
-            "managed routine removal requires explicit operator cleanup: "
-            + ", ".join(f"{profile}/{name}" for profile, name in sorted(removed))
+    if manifest is None:
+        return {**plan, "applied": True, "removed": [], "remaining": []}
+    # Pause first, so a partial removal can never leave a job that still claims work.
+    set_routines_paused(True, hermes_home=home)
+    removed: list[str] = []
+    remaining: list[str] = []
+    for item in manifest.get("jobs", []):
+        profile, name = item["profile"], item["name"]
+        matches = [job for job in _jobs(_profile_root(home, profile)) if job.get("name") == name]
+        if not matches:
+            removed.append(f"{profile}/{name}")
+            continue
+        if len(matches) > 1:
+            remaining.append(f"{profile}/{name}")
+            continue
+        recorded = item.get("observed")
+        if recorded and _job_static(matches[0]) != recorded:
+            remaining.append(f"{profile}/{name}")
+            continue
+        result = subprocess.run(
+            [executable, "-p", profile, "cron", "delete", str(matches[0].get("id"))],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "HERMES_HOME": str(home)},
         )
-    for key, content in scripts.items():
+        (removed if result.returncode == 0 else remaining).append(f"{profile}/{name}")
+    for key, checksum in manifest.get("scripts", {}).items():
         profile, relative = key.split("/", 1)
-        destination = _profile_root(home, profile) / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-        destination.chmod(0o700)
-    progress = {
-        key: value for key, value in previous_jobs.items() if key in desired_names
-    }
-    manifest = {
-        "schema_version": "1",
-        "package": "hermes-medical-research",
-        "version": __version__,
-        "store": str(artifact_store),
-        "scripts": {key: _sha256(content) for key, content in scripts.items()},
-        "jobs": list(progress.values()),
-    }
-    (home / ROUTINES_MANAGED).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    for spec in jobs:
-        key = (spec["profile"], spec["name"])
-        desired_digest = _sha256(
-            json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
-        )
-        existing = [
-            job
-            for job in _jobs(_profile_root(home, spec["profile"]))
-            if job.get("name") == spec["name"]
-        ]
-        owned = key in managed_names
-        if len(existing) > 1 or existing and not owned:
-            raise ValidationError(
-                f"refusing to replace unmanaged or ambiguous cron job: "
-                f"{spec['profile']}/{spec['name']}"
-            )
-        if existing and owned:
-            observed = previous_jobs[key].get("observed")
-            if observed is not None and _job_static(existing[0]) != observed:
-                raise ValidationError(
-                    f"managed cron job was edited outside hmr: "
-                    f"{spec['profile']}/{spec['name']}"
-                )
-            if previous_jobs[key].get("spec_digest") != desired_digest:
-                _edit_routine(executable, home, spec, existing[0])
-                existing = [
-                    job
-                    for job in _jobs(_profile_root(home, spec["profile"]))
-                    if job.get("name") == spec["name"]
-                ]
-                if len(existing) != 1:
-                    raise ValidationError(
-                        f"Hermes updated an ambiguous routine: "
-                        f"{spec['profile']}/{spec['name']}"
-                    )
-        if not existing:
-            _create_routine(executable, home, spec)
-            existing = [
-                job
-                for job in _jobs(_profile_root(home, spec["profile"]))
-                if job.get("name") == spec["name"]
-            ]
-            if len(existing) != 1:
-                raise ValidationError(
-                    f"Hermes reported success but routine was not recorded: "
-                    f"{spec['profile']}/{spec['name']}"
-                )
-        progress[key] = {
-            "profile": spec["profile"],
-            "name": spec["name"],
-            "spec_digest": desired_digest,
-            "observed": _job_static(existing[0]),
-        }
-        manifest["jobs"] = [progress[item] for item in sorted(progress)]
-        (home / ROUTINES_MANAGED).write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-    return {**plan, "applied": True, "health": _routine_health(home)}
+        path = _profile_root(home, profile) / relative
+        if path.is_file() and _sha256(path.read_bytes()) == checksum:
+            path.unlink()
+    if not remaining:
+        (home / ROUTINES_MANAGED).unlink(missing_ok=True)
+    return {**plan, "applied": True, "removed": sorted(removed), "remaining": sorted(remaining)}

@@ -1,8 +1,9 @@
-"""Multi-bot orchestration: continuation, pause, retry, host failures, and audit reuse."""
+"""Step orchestration: continuation, pause, retry, host failures, and audit reuse."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -13,9 +14,14 @@ from test_automation import protocol
 from test_evidence_workflow import modern_workspace, record_reviews
 from test_research import completed_search
 
-from hermes_medical_research import audit
+from hermes_medical_research import audit, steps
 from hermes_medical_research.automation import AutomationEngine
-from hermes_medical_research.hermes import drain, routine_status, set_routines_paused
+from hermes_medical_research.hermes import (
+    routine_status,
+    routines,
+    set_routines_paused,
+    write_assignment,
+)
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import MAX_CORRECTIONS_PER_GROUP, Actor, TaskEngine
 from hermes_medical_research.workflow import check
@@ -62,7 +68,7 @@ async def test_acceptance_continues_into_the_next_role_without_a_tick(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_paused_review_is_unclaimable_and_never_marked_abandoned(tmp_path):
+async def test_paused_review_is_unclaimable_and_a_long_wait_never_blocks_the_cycle(tmp_path):
     current = [datetime.now(UTC) + timedelta(seconds=2)]
     automation, workspace = review_with_records(
         tmp_path, "paused", 1, clock=lambda: current[0]
@@ -71,8 +77,10 @@ async def test_paused_review_is_unclaimable_and_never_marked_abandoned(tmp_path)
     automation.set_paused("paused", True)
     actor = Actor("hmr-selector", "paused-session", "selector")
     assert automation.claim("select", actor)["state"] == "idle"
-    assert automation.probe("selector")["state"] == "idle"
+    assert automation.next_available_at("selector", "paused") is None
 
+    # Nothing claims work on a timer any more, so a Task nobody has started is not abandoned
+    # however long it waits: only a lease that expires or three failures can block the Cycle.
     current[0] += timedelta(hours=3)
     await automation.tick()
     assert automation.review_status("paused")["latest_cycle_state"] == "active"
@@ -135,6 +143,7 @@ async def test_unfinished_host_session_is_failed_without_stopping_the_runner(
 ):
     automation, workspace = review_with_records(tmp_path, "host-failure", 2)
     await automation.tick()
+    write_assignment(tmp_path / "h", lanes={"screening": "agent"})
     calls: list[str] = []
 
     def unfinished(_executable, _home, claim, _actor, role):
@@ -143,23 +152,25 @@ async def test_unfinished_host_session_is_failed_without_stopping_the_runner(
         return subprocess.CompletedProcess([], 0, "", "turn limit reached")
 
     _hermes(monkeypatch)
-    result = await drain(
-        role="selector",
+    result = await steps.run_step(
+        "select",
         store=tmp_path / "store",
+        review="host-failure",
         hermes_home=tmp_path / "h",
         invoke=unfinished,
+        # The failed Task backs off for five minutes; this step reports instead of waiting.
+        max_wait=0,
     )
 
     assert result["state"] == "drained"
-    assert result["failed"] == [
-        {
-            "run_id": workspace.load()["run_id"],
-            "task_id": calls[0],
-            "kind": "screening",
-            "code": "selector_host_failed",
-            "blocked": False,
-        }
-    ]
+    assert result["processed"] == 0 and result["failed"] == 1
+    failure = result["failures"][0]
+    assert failure["task_id"] == calls[0]
+    assert failure["kind"] == "screening"
+    assert failure["lane"] == "agent"
+    assert failure["code"] == "screening_not_recorded"
+    assert failure["message"] == "turn limit reached"
+    # Three fresh sessions for the one Task, then the durable failure path.
     assert len(calls) == 3
     task = workspace.load()["task_engine"]["tasks"][calls[0]]
     assert task["state"] == "pending" and task["automation_failures"][0]["message"] == (
@@ -208,26 +219,37 @@ async def test_fulltext_tasks_are_submitted_without_a_model_session(tmp_path, mo
 
     monkeypatch.setattr("hermes_medical_research.tasks.fetch_fulltexts", unavailable)
     _hermes(monkeypatch)
-    result = await drain(
-        role="extractor", store=tmp_path / "store", hermes_home=tmp_path / "h", invoke=no_session
+    write_assignment(tmp_path / "h", lanes={"studies": "agent"})
+    result = await steps.run_step(
+        "extract",
+        store=tmp_path / "store",
+        review="fulltext-runner",
+        hermes_home=tmp_path / "h",
+        invoke=no_session,
+        max_wait=0,
     )
     assert result["processed"] == 1
+    assert result["lanes"] == {"none": 1, "agent": 1}
     assert workspace.load()["fulltext_attempts"][record_id]["status"] == "unavailable"
     # The runner continued straight into the study-link task, which does need a session.
     assert sessions == ["studies", "studies", "studies"]
-    assert [item["kind"] for item in result["failed"]] == ["studies"]
+    assert [item["kind"] for item in result["failures"]] == ["studies"]
 
 
-def test_drain_rejects_unknown_roles_and_reports_concurrent_runners(tmp_path, monkeypatch):
-    _hermes(monkeypatch)
-    with pytest.raises(ValidationError, match="unknown worker role"):
-        asyncio.run(drain(role="coordinator", store=tmp_path / "store"))
+def test_run_step_rejects_unknown_steps_and_reports_concurrent_runners(tmp_path):
+    with pytest.raises(ValidationError, match="unknown step"):
+        asyncio.run(steps.run_step("coordinate", store=tmp_path / "store", review="busy"))
     from filelock import FileLock
 
-    (tmp_path / "store").mkdir()
-    with FileLock(str(tmp_path / "store" / ".drain-auditor.lock")):
-        result = asyncio.run(drain(role="auditor", store=tmp_path / "store"))
-        assert result["state"] == "already_running"
+    review_with_records(tmp_path, "busy", 1)
+    steps.steps_root(tmp_path / "store").mkdir(parents=True, exist_ok=True)
+    with FileLock(str(steps.lock_path(tmp_path / "store", "audit"))):
+        result = asyncio.run(
+            steps.run_step("audit", store=tmp_path / "store", review="busy")
+        )
+    assert result["state"] == "refused"
+    assert "audit.lock" in result["message"]
+    assert steps.read_status(tmp_path / "store", "busy", "audit")["state"] == "refused"
 
 
 def test_routine_pause_controls_use_public_cron_commands(tmp_path, monkeypatch):
@@ -405,7 +427,7 @@ async def test_runner_renews_the_claim_while_a_slow_session_works(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_run_renewing_extends_the_lease_until_the_session_exits(tmp_path, monkeypatch):
+async def test_run_with_renewal_extends_the_lease_until_the_session_exits(monkeypatch):
     import threading
 
     from hermes_medical_research import hermes
@@ -419,13 +441,13 @@ async def test_run_renewing_extends_the_lease_until_the_session_exits(tmp_path, 
             if len(renewals) == 2:
                 release.set()
 
-    def slow_session(*_args):
+    def slow_session(_claim, _actor):
         release.wait(5)
         return subprocess.CompletedProcess([], 0, "done", "")
 
     monkeypatch.setattr(hermes, "LEASE_RENEW_SECONDS", 0.01)
-    completed = await hermes._run_renewing(
-        FakeAutomation(), {"claim_id": "claim-x"}, None, slow_session, "h", tmp_path, "selector"
+    completed = await hermes.run_with_renewal(
+        FakeAutomation(), {"claim_id": "claim-x"}, None, runner=slow_session
     )
     assert completed.stdout == "done"
     assert renewals[:2] == ["claim-x", "claim-x"]
@@ -451,42 +473,74 @@ def test_screening_reuse_ignores_citation_counts_and_source_rank():
     assert _source_digest(record) != _source_digest({**record, "abstract": "Changed text"})
 
 
-@pytest.mark.asyncio
-async def test_runner_retries_a_busy_lock_instead_of_crashing(tmp_path, monkeypatch):
-    from filelock import Timeout
-
-    from hermes_medical_research import hermes
-
-    automation, workspace = review_with_records(tmp_path, "busy-lock", 1)
-    await automation.tick()
-    original = AutomationEngine.claim
-    calls = {"count": 0}
-
-    def flaky_claim(self, command, actor):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise Timeout(str(workspace.path / ".research.lock"))
-        return original(self, command, actor)
-
-    def accept(_executable, _home, claim, actor, _role):
-        path = Path(claim["proposal_path"])
-        proposal = json.loads(path.read_text())
-        proposal["stages"]["screening"]["records"][0].update(
-            decision="exclude", reason="Fails the synthetic eligibility criteria."
+def test_routines_remove_deletes_only_the_jobs_its_manifest_records(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    cron = home / "profiles" / "hmr-selector" / "cron"
+    cron.mkdir(parents=True)
+    (cron / "jobs.json").write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {"id": "managed-1", "name": "hmr-work-selector", "enabled": True},
+                    {"id": "operator-1", "name": "my-own-job", "enabled": True},
+                ]
+            }
         )
-        path.write_text(json.dumps(proposal))
-        asyncio.run(
-            TaskEngine(workspace).submit(
-                "select", claim["task_id"], path, actor, claim_token=claim["claim_token"]
-            )
-        )
-        return subprocess.CompletedProcess([], 0, "", "")
-
-    monkeypatch.setattr(AutomationEngine, "claim", flaky_claim)
-    monkeypatch.setattr(hermes, "CLAIM_RETRY_SECONDS", 0)
-    _hermes(monkeypatch)
-    result = await drain(
-        role="selector", store=tmp_path / "store", hermes_home=tmp_path / "h", invoke=accept
     )
-    assert result["processed"] == 1
-    assert calls["count"] >= 2
+    script = home / "profiles" / "hmr-selector" / "scripts" / "hmr-work-selector.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\nexec hmr hermes drain --role selector\n")
+    unmanaged_script = script.with_name("operator.sh")
+    unmanaged_script.write_text("#!/bin/sh\necho mine\n")
+    (home / "hmr-routines.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "hmr-selector/scripts/hmr-work-selector.sh": hashlib.sha256(
+                        script.read_bytes()
+                    ).hexdigest()
+                },
+                "jobs": [
+                    {"profile": "hmr-selector", "name": "hmr-work-selector", "id": "managed-1"}
+                ],
+            }
+        )
+    )
+
+    plan = routines(hermes_home=home)
+    assert not plan["applied"]
+    assert plan["workflow"] == "user-invoked-steps"
+    assert plan["legacy_jobs"] == [
+        {"profile": "hmr-selector", "name": "hmr-work-selector", "id": "managed-1",
+         "present": True}
+    ]
+    assert plan["scripts"] == ["hmr-selector/scripts/hmr-work-selector.sh"]
+    assert "--remove --apply" in plan["next"]
+    with pytest.raises(ValidationError, match="retired"):
+        routines(apply=True, hermes_home=home)
+
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    _hermes(monkeypatch)
+    monkeypatch.setattr("hermes_medical_research.hermes.subprocess.run", fake_run)
+    result = routines(apply=True, remove=True, hermes_home=home)
+
+    assert result["applied"]
+    assert result["removed"] == ["hmr-selector/hmr-work-selector"]
+    assert result["remaining"] == []
+    # The fleet is paused before anything is deleted, and only the manifest's own job is touched.
+    assert calls == [
+        ["/opt/hermes", "-p", "hmr-selector", "cron", "pause", "managed-1"],
+        ["/opt/hermes", "-p", "hmr-selector", "cron", "delete", "managed-1"],
+    ]
+    assert not script.exists()
+    assert unmanaged_script.read_text() == "#!/bin/sh\necho mine\n"
+    assert not (home / "hmr-routines.json").exists()
+    assert [job["id"] for job in json.loads((cron / "jobs.json").read_text())["jobs"]] == [
+        "managed-1",
+        "operator-1",
+    ]

@@ -128,12 +128,9 @@ def parser() -> argparse.ArgumentParser:
     retry.add_argument("name")
     retry.add_argument("--reason", required=True)
 
-    work = commands.add_parser("work", help="Drive the durable cron work queue")
+    work = commands.add_parser("work", help="Operator diagnostics for the durable work queue")
     work_commands = work.add_subparsers(dest="action", required=True)
-    probe = work_commands.add_parser("probe")
-    probe.add_argument("role", choices=tuple(COMMAND_ROLES.values()))
-    work_commands.add_parser("tick")
-    work_commands.add_parser("cron-tick", help=argparse.SUPPRESS)
+    work_commands.add_parser("tick", help=argparse.SUPPRESS)
     fail = work_commands.add_parser("fail")
     fail.add_argument("claim_id")
     fail.add_argument("--code", required=True)
@@ -146,39 +143,83 @@ def parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--apply", action="store_true")
     bootstrap.add_argument("--hermes-home", type=Path)
     bootstrap.add_argument("--source-profile", type=Path)
-    bootstrap.add_argument(
-        "--profile",
-        choices=(
-            "hmr-coordinator",
-            "hmr-searcher",
-            "hmr-selector",
-            "hmr-extractor",
-            "hmr-synthesizer",
-            "hmr-auditor",
-        ),
+    from .hermes import PROFILES
+
+    bootstrap.add_argument("--profile", choices=tuple(PROFILES))
+    bootstrap.add_argument("--remove", action="store_true")
+    bootstrap.add_argument("--set-model", action="append", metavar="KIND=MODEL[@PROVIDER]")
+    bootstrap.add_argument("--set-lane", action="append", metavar="KIND=call|agent")
+    bootstrap.add_argument("--show", action="store_true")
+    profiles_alias = hermes_commands.add_parser(
+        "profiles", help="Create, check, remove, and assign models to the managed profiles"
     )
+    for argument in bootstrap._actions[1:]:
+        profiles_alias._add_action(argument)
     doctor_command = hermes_commands.add_parser("doctor")
     doctor_command.add_argument("--hermes-home", type=Path)
-    routine_command = hermes_commands.add_parser("routines")
+    quick = hermes_commands.add_parser(
+        "commands", help="Install the step slash commands as Hermes quick commands"
+    )
+    quick_mode = quick.add_mutually_exclusive_group()
+    quick_mode.add_argument("--apply", action="store_true")
+    quick_mode.add_argument("--status", action="store_true")
+    quick.add_argument("--remove", action="store_true")
+    quick.add_argument("--review")
+    quick.add_argument("--hermes-home", type=Path)
+    routine_command = hermes_commands.add_parser(
+        "routines", help="Report and remove the retired 0.5.x cron fleet"
+    )
+    routine_command.add_argument("--apply", action="store_true")
+    routine_command.add_argument("--remove", action="store_true")
     routine_mode = routine_command.add_mutually_exclusive_group()
-    routine_mode.add_argument("--apply", action="store_true")
     routine_mode.add_argument("--status", action="store_true")
     routine_mode.add_argument("--pause-all", action="store_true")
     routine_mode.add_argument("--resume-all", action="store_true")
     routine_command.add_argument("--hermes-home", type=Path)
-    drain_command = hermes_commands.add_parser(
-        "drain", help="Serially run one fresh Hermes session per claimed task for one role"
+
+    mcp = commands.add_parser("mcp", help="Serve the task tools a Hermes session calls")
+    mcp_commands = mcp.add_subparsers(dest="action", required=True)
+    serve = mcp_commands.add_parser("serve")
+    serve.add_argument("--role", required=True, choices=tuple(COMMAND_ROLES.values()))
+    serve.add_argument("--kind", action="append")
+
+    from .steps import STEPS
+
+    step = commands.add_parser("step", help="Run one pipeline step yourself")
+    step_commands = step.add_subparsers(dest="action", required=True)
+    use = step_commands.add_parser("use", help="Point argument-less steps at one Review")
+    use.add_argument("name", nargs="?")
+    use.add_argument("--clear", action="store_true")
+    for name in ("status", "next", "finalize"):
+        view = step_commands.add_parser(name)
+        view.add_argument("--review")
+    stop = step_commands.add_parser("stop")
+    stop.add_argument("--review")
+    stop.add_argument("--step", choices=tuple(STEPS))
+    retry = step_commands.add_parser("retry")
+    retry.add_argument("--review")
+    retry.add_argument("--reason", default="operator retried the blocked cycle from a step")
+    prompt = step_commands.add_parser(
+        "prompt", help="Print the prompt a constrained call would send, without sending it"
     )
-    drain_command.add_argument(
-        "--role",
-        required=True,
-        choices=("searcher", "selector", "extractor", "synthesizer", "auditor"),
-    )
-    drain_command.add_argument("--hermes-home", type=Path)
-    drain_command.add_argument("--hermes-executable", type=Path)
-    legacy_drain = hermes_commands.add_parser("drain-selector", help=argparse.SUPPRESS)
-    legacy_drain.add_argument("--hermes-home", type=Path)
-    legacy_drain.add_argument("--hermes-executable", type=Path)
+    prompt.add_argument("step", choices=tuple(STEPS))
+    prompt.add_argument("--review")
+    for name in STEPS:
+        runner = step_commands.add_parser(name)
+        runner.add_argument("--review")
+        runner.add_argument("--limit", type=int)
+        runner.add_argument("--max-wait", type=float, default=40.0)
+        runner.add_argument("--foreground", action="store_true")
+        runner.add_argument("--hermes-home", type=Path)
+        runner.add_argument("--hermes-executable", type=Path)
+    worker = step_commands.add_parser("run", help=argparse.SUPPRESS)
+    worker.add_argument("step", choices=tuple(STEPS))
+    worker.add_argument("--review")
+    worker.add_argument("--job")
+    worker.add_argument("--limit", type=int)
+    worker.add_argument("--max-wait", type=float, default=40.0)
+    worker.add_argument("--hermes-home", type=Path)
+    worker.add_argument("--hermes-executable", type=Path)
     return root
 
 
@@ -309,15 +350,11 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         from .automation import AutomationEngine
 
         automation = AutomationEngine(args.store)
-        if args.action == "probe":
-            return automation.probe(args.role)
         if args.action == "notifications":
             return automation.notification_probe()
         actor = _actor(args)
-        if args.action in {"tick", "cron-tick"}:
+        if args.action == "tick":
             actor.require("coordinator")
-            if args.action == "cron-tick":
-                return {"_raw": await automation.cron_tick()}
             return await automation.tick()
         return automation.fail(args.claim_id, actor, code=args.code, message=args.message)
 
@@ -415,46 +452,137 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "finalize":
         return await _engine(catalog, args.run_id).finalize(_actor(args), offline=args.offline)
 
+    if args.command == "mcp":
+        from .mcp_server import serve
+
+        return {"_raw": str(serve(catalog.root, args.role, kinds=tuple(args.kind or ()) or None))}
+
+    if args.command == "step":
+        return await _step(args, catalog)
+
     from .hermes import (
         bootstrap_profiles,
         doctor,
-        drain,
         routine_status,
         routines,
         set_routines_paused,
     )
 
-    if args.action == "bootstrap":
+    if args.action in {"bootstrap", "profiles"}:
+        from .hermes import step_assignment, write_assignment
+
+        if args.set_model or args.set_lane:
+            write_assignment(
+                args.hermes_home,
+                models=dict(_pairs(args.set_model)),
+                lanes=dict(_pairs(args.set_lane)),
+            )
+        if args.show:
+            return step_assignment(args.hermes_home)
         return bootstrap_profiles(
             apply=args.apply,
             hermes_home=args.hermes_home,
             source_profile=args.source_profile,
             profile=args.profile,
+            store=catalog.root,
+            remove=args.remove,
         )
     if args.action == "doctor":
-        return doctor(hermes_home=args.hermes_home)
-    if args.action in {"drain", "drain-selector"}:
-        result = await drain(
-            role=getattr(args, "role", "selector"),
+        return doctor(hermes_home=args.hermes_home, store=catalog.root)
+    if args.action == "commands":
+        from .quick_commands import install
+        from .quick_commands import status as quick_status
+
+        if args.status:
+            return quick_status(hermes_home=args.hermes_home, store=catalog.root,
+                                review=args.review)
+        return install(
             store=catalog.root,
+            apply=args.apply,
+            remove=args.remove,
             hermes_home=args.hermes_home,
-            hermes_executable=args.hermes_executable,
+            review=args.review,
         )
-        # Idle minutes stay silent so script-only Routines do not deliver empty reports.
-        if result["state"] in {"drained", "already_running"} and not (
-            result["processed"] or result["failed"]
-        ):
-            return {"_raw": ""}
-        return result
     if args.status:
         return routine_status(args.hermes_home)
     if args.pause_all or args.resume_all:
         return set_routines_paused(args.pause_all, hermes_home=args.hermes_home)
     return routines(
         apply=args.apply,
+        remove=args.remove,
         hermes_home=args.hermes_home,
-        store=args.store,
     )
+
+
+def _pairs(values: list[str] | None) -> list[tuple[str, str]]:
+    """``KIND=VALUE`` arguments, rejected early so a typo never reaches a config file."""
+    pairs = []
+    for item in values or []:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip() or not value.strip():
+            raise ValidationError(f"expected KIND=VALUE, got {item!r}")
+        pairs.append((key.strip(), value.strip()))
+    return pairs
+
+
+async def _step(args: argparse.Namespace, catalog: RunCatalog) -> Any:
+    from . import steps
+
+    store = catalog.root
+    if args.action == "use":
+        if args.clear:
+            return steps.set_active_review(store, None)
+        if not args.name:
+            raise ValidationError("name a Review, or pass --clear")
+        return steps.set_active_review(store, args.name)
+    if args.action == "status":
+        return {"_raw": steps.render_status(steps.status_view(store, args.review))}
+    if args.action == "next":
+        view = steps.status_view(store, args.review)
+        return {"_raw": steps.render_next(view)}
+    if args.action == "stop":
+        return steps.request_stop(store, review=args.review, step=args.step)
+    if args.action == "retry":
+        from .automation import AutomationEngine
+
+        name = steps.active_review(store, args.review)
+        return AutomationEngine(store).retry_review(
+            name, Actor("hmr-coordinator", f"step-retry-{os.getpid()}", "coordinator"),
+            reason=args.reason,
+        )
+    if args.action == "finalize":
+        return await steps.finalize(store, review=args.review)
+    if args.action == "prompt":
+        return {"_raw": steps.render_prompt(store, args.step, review=args.review)}
+    if args.action == "run":
+        return await steps.run_step(
+            args.step,
+            store=store,
+            review=args.review,
+            hermes_home=args.hermes_home,
+            hermes_executable=args.hermes_executable,
+            job_id=args.job,
+            limit=args.limit,
+            max_wait=args.max_wait,
+        )
+    if args.foreground:
+        return await steps.run_step(
+            args.action,
+            store=store,
+            review=args.review,
+            hermes_home=args.hermes_home,
+            hermes_executable=args.hermes_executable,
+            limit=args.limit,
+            max_wait=args.max_wait,
+        )
+    return {"_raw": steps.render_started(steps.start(
+        args.action,
+        store=store,
+        review=args.review,
+        hermes_home=args.hermes_home,
+        limit=args.limit,
+        max_wait=args.max_wait,
+    ))}
 
 
 GLOBAL_OPTIONS = ("--actor", "--session-id", "--claim-token", "--store")

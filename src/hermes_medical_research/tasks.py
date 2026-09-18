@@ -102,6 +102,10 @@ KIND_ROLES = {
     "audit": "auditor",
 }
 
+ROLE_COMMANDS = {role: command for command, role in COMMAND_ROLES.items()}
+# The CLI command that owns each Task kind, which is also the name of its step.
+KIND_COMMANDS = {kind: ROLE_COMMANDS[role] for kind, role in KIND_ROLES.items()}
+
 
 def data_home(environ: dict[str, str] | None = None) -> Path:
     values = environ if environ is not None else os.environ
@@ -1238,6 +1242,16 @@ class TaskEngine:
             "packet_data": {
                 "source": source,
                 "existing_study_ids": [row["study_id"] for row in existing],
+                # The linked groups themselves, so a merge decision needs no source lookup and can
+                # be answered in one constrained call.
+                "existing_studies": [
+                    {
+                        "study_id": row["study_id"],
+                        "record_ids": list(row["record_ids"]),
+                        "kind": row.get("kind", ""),
+                    }
+                    for row in existing
+                ],
             },
             "allowed_source_ids": [
                 *[row["document_id"] for row in source["documents"]],
@@ -1419,6 +1433,9 @@ class TaskEngine:
             packet_data = {
                 "outcome": outcome,
                 "field_rules": synthesis_field_rules(),
+                # 600 means nothing was shortened, so the packet is self-contained and the finding
+                # can be answered in one constrained call; a lower limit needs source reads.
+                "text_limit": text_limit,
                 "extractions": [_synthesis_row(row, text_limit) for row in related],
                 "unreported_dispositions": [
                     {
@@ -2116,11 +2133,18 @@ class TaskEngine:
             raise ValidationError("unknown task")
         return {
             "task_id": task_id,
+            "role": task["role"],
+            "kind": task["kind"],
+            "target_ids": list(task["target_ids"]),
             "state": task["state"],
             "created_at": task["created_at"],
             "available_at": task.get("available_at"),
             "automation_attempts": task.get("automation_attempts", 0),
             "lease": deepcopy(task.get("lease")),
+            # A step reads these to pick the answering surface and to show what it would send.
+            "correction_for": list(task.get("correction_for") or ()) or None,
+            "packet_path": str(self.workspace.path / task["packet_file"]),
+            "proposal_path": str(self.workspace.path / task["proposal_file"]),
         }
 
     def cancel_open_tasks(self, *, reason: str, at: str) -> dict[str, Any]:
@@ -2353,28 +2377,32 @@ class TaskEngine:
             "retry_at": retry_at,
         }
 
-    def block_unclaimed(self, task_id: str, *, at: str) -> dict[str, Any]:
-        """Fail closed after all monitor wake generations went unclaimed."""
-        _safe_id(task_id, TASK_ID_PREFIX)
+    def release_lease(
+        self, task_id: str, claim_id: str, *, reason: str, at: str
+    ) -> dict[str, Any]:
+        """Clear an interrupted claim's lease and reopen the Task without consuming an attempt."""
         with self.workspace.lock:
             manifest = self.workspace.load()
             ledger = self._ledger(manifest)
             task = ledger["tasks"].get(task_id)
-            if not task or task.get("state") != "pending" or task.get("lease"):
-                raise ValidationError("task is not an unclaimed pending task")
-            task["state"] = "blocked"
-            task["blocked_at"] = at
-            task["blocked_code"] = "worker_unavailable"
+            if not task:
+                raise ValidationError("unknown task")
+            lease = task.get("lease") or {}
+            if lease.get("claim_id") != claim_id:
+                raise ValidationError("claim does not hold this task")
+            if task["state"] not in {"pending", "in_progress"}:
+                raise ValidationError("only an unfinished task can be released")
+            task.pop("lease", None)
+            task["state"] = "pending"
+            task["automation_attempts"] = max(0, int(task.get("automation_attempts", 1)) - 1)
+            task.setdefault("releases", []).append(
+                {"claim_id": claim_id, "reason": reason, "at": at}
+            )
             ledger["events"].append(
-                {
-                    "event": "task.blocked",
-                    "task_id": task_id,
-                    "code": "worker_unavailable",
-                    "at": at,
-                }
+                {"event": "task.released", "task_id": task_id, "reason": reason, "at": at}
             )
             self.workspace.save(manifest)
-        return {"task_id": task_id, "blocked": True, "code": "worker_unavailable"}
+        return {"task_id": task_id, "state": "pending", "released": True, "reason": reason}
 
     def _require_submitter(
         self,

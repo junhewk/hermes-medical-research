@@ -43,7 +43,6 @@ REVIEW_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 LEASE_MINUTES = 60
 RETRY_MINUTES = (5, 30)
 MAX_ATTEMPTS = 3
-ABANDONED_MINUTES = 95
 ROLES = tuple(COMMAND_ROLES.values())
 
 
@@ -483,7 +482,6 @@ class AutomationEngine:
                     continue
                 engine = TaskEngine(self.catalog.workspace(active["run_id"]))
                 expired += self._expire_leases(engine, path, review)
-                self._block_abandoned(engine, path, review)
                 status = engine.status()
                 if status["state"] == "ready":
                     result = await engine.finalize(
@@ -530,33 +528,13 @@ class AutomationEngine:
         }
         return result
 
-    def probe(self, role: str) -> dict[str, Any]:
-        role = role.casefold().replace("hmr-", "")
-        if role not in ROLES:
-            raise ValidationError(f"unknown specialist role: {role}")
-        ready = self._eligible(role, mutate=False)
-        signature = [
-            {
-                "run_id": item["run_id"],
-                "task_id": item["task_id"],
-                "wake": item["wake"],
-            }
-            for item in ready
-        ]
-        result = {
-            "schema_version": AUTOMATION_SCHEMA_VERSION,
-            "role": role,
-            "state": "ready" if signature else "idle",
-            "generation": digest(signature),
-            "count": len(signature),
-        }
-        return result
-
-    def claim(self, command: str, actor: Actor) -> dict[str, Any]:
+    def claim(
+        self, command: str, actor: Actor, *, review: str | None = None
+    ) -> dict[str, Any]:
         role = COMMAND_ROLES[command]
         actor.require(role)
         with self.lock:
-            eligible = self._eligible(role, mutate=True)
+            eligible = self._eligible(role, mutate=True, review=review)
             if not eligible:
                 return {"role": role, "state": "idle"}
             selected = eligible[0]
@@ -654,6 +632,74 @@ class AutomationEngine:
             _write_json(path, claim)
         return result
 
+    def next_available_at(self, role: str, review: str | None = None) -> str | None:
+        """When this role's earliest backed-off Task becomes claimable, or None if there is none.
+
+        A user-invoked step needs this because a failed Task is unavailable for five minutes and the
+        router mints one Task at a time, so an idle claim does not mean the stage is finished. Cron
+        never needed it: it simply ran again a minute later.
+        """
+        current = self.clock()
+        waiting: list[str] = []
+        if not self.reviews.is_dir():
+            return None
+        for review_dir in sorted(self.reviews.iterdir()):
+            if not (review_dir / "review.json").is_file():
+                continue
+            if review is not None and review_dir.name != review:
+                continue
+            entry = self._load_review(review_dir.name)
+            active = self._active_cycle(entry)
+            if not active or active["status"] != "active" or entry["state"] == "paused":
+                continue
+            engine = TaskEngine(self.catalog.workspace(active["run_id"]))
+            for task in engine.status()["active"]:
+                if task["role"] != role:
+                    continue
+                detail = engine.task_automation(task["task_id"])
+                if detail["state"] != "pending" or detail.get("lease"):
+                    continue
+                available = detail.get("available_at")
+                if available and _parse(available) > current:
+                    waiting.append(available)
+        return min(waiting) if waiting else None
+
+    def release(self, claim_id: str, actor: Actor, *, reason: str) -> dict[str, Any]:
+        """Return an interrupted claim's Task to pending without spending one of its attempts.
+
+        A killed step runner would otherwise strand the lease for the rest of its hour, and the
+        stage would look idle because a leased Task is not claimable. This is not a semantic
+        failure, so it must not count against the three bounded attempts. The caller must hold the
+        step lock, which proves no live runner owns the claim.
+        """
+        path = self.claims / f"{claim_id}.json"
+        with self.lock:
+            claim = _read_json(path)
+            if claim.get("claim_id") != claim_id or claim.get("state") != "active":
+                raise ValidationError("claim is not active")
+            if (
+                claim.get("actor_profile") != actor.profile
+                or claim.get("actor_session_id") != actor.session_id
+            ):
+                raise ValidationError("claim belongs to a different Hermes session")
+            engine = TaskEngine(self.catalog.workspace(claim["run_id"]))
+            result = engine.release_lease(
+                claim["task_id"], claim_id, reason=reason, at=_at(self.clock())
+            )
+            claim.update(state="released", released_at=_at(self.clock()), reason=reason)
+            _write_json(path, claim)
+            review_path, review = self._load_review(claim["review"], with_path=True)
+            with self._review_lock(review_path):
+                review = self._load_review(claim["review"])
+                self._event(
+                    review_path,
+                    review,
+                    "task.released",
+                    {"task_id": claim["task_id"], "claim_id": claim_id, "reason": reason},
+                )
+                self._save_review(review_path, review)
+        return result
+
     def fail(self, claim_id: str, actor: Actor, *, code: str, message: str) -> dict[str, Any]:
         path = self.claims / f"{claim_id}.json"
         with self.lock:
@@ -743,7 +789,14 @@ class AutomationEngine:
                 )
         return ""
 
-    def _eligible(self, role: str, *, mutate: bool) -> list[dict[str, Any]]:
+    def _eligible(
+        self, role: str, *, mutate: bool, review: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Claimable Tasks for one role, newest last.
+
+        ``review`` restricts the search to one Review, which is what a user-invoked step needs:
+        ``/hmr-selector`` must never accept work into a Review the operator is not driving.
+        """
         current = self.clock()
         values: list[dict[str, Any]] = []
         if not self.reviews.is_dir():
@@ -751,9 +804,11 @@ class AutomationEngine:
         for review_dir in sorted(self.reviews.iterdir()):
             if not (review_dir / "review.json").is_file():
                 continue
-            review = self._load_review(review_dir.name)
-            active = self._active_cycle(review)
-            if not active or active["status"] != "active" or review["state"] == "paused":
+            if review is not None and review_dir.name != review:
+                continue
+            entry = self._load_review(review_dir.name)
+            active = self._active_cycle(entry)
+            if not active or active["status"] != "active" or entry["state"] == "paused":
                 continue
             engine = TaskEngine(self.catalog.workspace(active["run_id"]))
             status = engine.status()
@@ -770,7 +825,7 @@ class AutomationEngine:
                 wake = 0 if age < 300 else 1 if age < 2100 else 2
                 values.append(
                     {
-                        "review": review["name"],
+                        "review": entry["name"],
                         "cycle_id": active["cycle_id"],
                         "run_id": active["run_id"],
                         "task_id": task["task_id"],
@@ -809,31 +864,6 @@ class AutomationEngine:
             )
             expired += 1
         return expired
-
-    def _block_abandoned(
-        self, engine: TaskEngine, review_path: Path, review: dict[str, Any]
-    ) -> bool:
-        if review["state"] == "paused":
-            return False
-        resumed = _parse(review["resumed_at"]) if review.get("resumed_at") else None
-        for task in engine.status()["active"]:
-            detail = engine.task_automation(task["task_id"])
-            if detail["state"] != "pending" or detail.get("lease"):
-                continue
-            available = _parse(detail.get("available_at") or detail["created_at"])
-            if resumed and resumed > available:
-                available = resumed
-            if self.clock() - available < timedelta(minutes=ABANDONED_MINUTES):
-                continue
-            result = engine.block_unclaimed(task["task_id"], at=_at(self.clock()))
-            self._event(
-                review_path,
-                review,
-                "task.blocked",
-                {"task_id": task["task_id"], "code": result["code"]},
-            )
-            return True
-        return False
 
     def _new_cycle(
         self, path: Path, review: dict[str, Any], *, reason: str
