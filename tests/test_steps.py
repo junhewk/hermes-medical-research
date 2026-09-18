@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -477,3 +478,29 @@ async def test_waiting_never_blocks_a_cycle(tmp_path):
 
     assert automation.review_status(name)["cycles"][0]["status"] == "active"
     assert TaskEngine(workspace).status()["active"][0]["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_session_is_told_its_submit_tool_only_when_one_exists(tmp_path, monkeypatch):
+    """The skills prefer the typed tool, so the instruction file must not promise a missing one."""
+    store, _automation, _workspace, claim = await claimed_screening(tmp_path)
+    written: list[dict] = []
+
+    def record(argv, **kwargs):
+        # The prompt names the instruction file; the session never gets it as an argument.
+        match = re.search(r"(/\S+\.json)", argv[-1])
+        assert match, argv[-1]
+        written.append(json.loads(Path(match.group(1)).read_text()))
+        return DONE
+
+    monkeypatch.setattr(subprocess, "run", record)
+    actor = Actor("hmr-selector", "instruction", "selector")
+
+    hermes.invoke_task_session("hermes", tmp_path / "h", claim, actor, "selector")
+    assert written[0]["submit_tool"] == "submit_screening"
+
+    hermes.invoke_task_session(
+        "hermes", tmp_path / "h", {**claim, "kind": "assessment"}, actor, "extractor"
+    )
+    assert "submit_tool" not in written[1]
+    del store
