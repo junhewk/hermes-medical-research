@@ -544,3 +544,48 @@ def test_routines_remove_deletes_only_the_jobs_its_manifest_records(tmp_path, mo
         "managed-1",
         "operator-1",
     ]
+
+
+def test_a_findings_evidence_is_shown_once_not_inside_two_assertions(tmp_path):
+    """One finding's evidence list used to sit inside both its harms and certainty assertions.
+
+    An auditor has to echo an assertion back verbatim, so the list was paid for twice in the packet
+    and twice again in the answer. On the first real review that put one group at 34105 bytes
+    against the 32768-byte bound, and no split could have helped: a finding audit's record must
+    answer every review check at once.
+    """
+    workspace = modern_workspace(tmp_path)
+    _, groups = audit.audit_groups(workspace)
+    finding_groups = [group for group in groups if group["kind"] == "finding"]
+    assert finding_groups, "the fixture should synthesize at least one finding"
+
+    for group in finding_groups:
+        assertions = {target["check"]: target["assertion"] for target in group["targets"]}
+        assert "evidence" not in assertions["harms"]
+        assert "evidence" not in assertions["certainty"]
+        # Shown once for both checks, so the auditor can still judge them against it.
+        assert group["evidence"] == next(
+            row["evidence"]
+            for row in workspace.read("synthesis")["findings"]
+            if row["finding_id"] == group["entity_id"]
+        )
+
+
+def test_an_oversized_packet_names_the_field_that_overflowed(tmp_path):
+    workspace = modern_workspace(tmp_path)
+    engine = TaskEngine(workspace)
+    manifest = workspace.load()
+    spec = {
+        "kind": "audit",
+        "target_ids": ["t-1"],
+        "instructions": "Check it.",
+        "proposal": {"schema_version": "2"},
+        "packet_data": {"audit_group": {"filler": "x" * 40 * 1024}, "small": "y"},
+        "allowed_source_ids": [],
+    }
+    with pytest.raises(ValidationError) as error:
+        engine._create_task(manifest, engine._ledger(manifest), spec)
+
+    message = str(error.value)
+    assert "audit task packet is" in message
+    assert "audit_group is the largest field" in message

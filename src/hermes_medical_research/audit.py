@@ -252,15 +252,17 @@ def build_review_targets(
                 )
                 if key in finding
             },
-            "harms": {
-                "conclusion": finding.get("conclusion"),
-                "evidence": finding.get("evidence"),
-            },
+            # The evidence list is deliberately absent here even though harms and certainty are both
+            # judged against it.  An assertion has to be echoed back verbatim by the auditor, so a
+            # list embedded in two of them is paid for twice in the packet and twice again in the
+            # answer: on the first real review one finding's two assertions carried the same 11 KB,
+            # which alone put the group over the 32 KB packet bound.  The group carries it once, and
+            # each target's review digest still covers the whole finding, so nothing is unfrozen.
+            "harms": {"conclusion": finding.get("conclusion")},
             "overlap": finding.get("overlap"),
             "certainty": {
                 "certainty": finding.get("certainty"),
                 "published_certainty": finding.get("published_certainty", []),
-                "evidence": finding.get("evidence"),
             },
         }
         extraction_ids = {
@@ -459,6 +461,8 @@ def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
                 "entity_id": finding_id,
                 "targets": targets,
                 "membership_targets": memberships,
+                # Judged against by the harms and certainty targets, and shown once for both.
+                "evidence": finding.get("evidence") or [],
                 "allowed_document_ids": allowed_document_ids,
                 "group_digest": digest(
                     {

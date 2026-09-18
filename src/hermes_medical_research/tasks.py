@@ -1643,8 +1643,19 @@ class TaskEngine:
         }
         raw = json.dumps(packet, ensure_ascii=False, sort_keys=True).encode()
         if len(raw) > TASK_PACKET_LIMIT:
+            # Name the field that overflowed.  "Split its target group" was the whole of this
+            # message once, and it sent a reader looking for a split that a finding audit cannot
+            # make: its record must answer every review check at once.  The cause is almost always
+            # one oversized field, so say which.
+            biggest = max(
+                spec["packet_data"].items(),
+                key=lambda item: len(json.dumps(item[1], ensure_ascii=False).encode()),
+                default=("packet", None),
+            )
             raise ValidationError(
-                f"bounded task packet exceeds {TASK_PACKET_LIMIT} bytes; split its target group"
+                f"{spec['kind']} task packet is {len(raw)} bytes against a {TASK_PACKET_LIMIT} "
+                f"byte bound; {biggest[0]} is the largest field at "
+                f"{len(json.dumps(biggest[1], ensure_ascii=False).encode())} bytes"
             )
         self.workspace.store.write_json(proposal_file, proposal)
         self.workspace.store.write_json(packet_file, packet)
