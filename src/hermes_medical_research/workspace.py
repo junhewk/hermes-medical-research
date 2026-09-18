@@ -88,6 +88,80 @@ def positive_limit(value: Any, name: str, *, allow_all: bool = False) -> int | s
     return value
 
 
+def normalize_protocol(
+    payload: dict[str, Any],
+    *,
+    mode: str,
+    records: int | str | None,
+    fulltexts: int | str | None,
+    language: str,
+    evidence_version: str = "2",
+) -> dict[str, Any]:
+    """Validate a schema-3 request and return the protocol a Run would store.
+
+    ``Workspace.init`` calls this and so does intake, which must show the operator the protocol a
+    Review will actually carry, with the same digest, rather than a second reading of the request.
+    """
+    question = Question.from_dict(payload)
+    # New research uses explicit schema-3 search blocks; standalone legacy searches stay v2.
+    normalized = question.to_dict()
+    normalized["schema_version"] = "3"
+    question = Question.from_dict(normalized)
+    eligibility = payload.get("eligibility")
+    if not isinstance(eligibility, dict) or not eligibility.get("include"):
+        raise ValidationError(
+            "research input needs eligibility.include and eligibility.exclude lists"
+        )
+    for key in ("include", "exclude"):
+        if not isinstance(eligibility.get(key), list):
+            raise ValidationError(f"eligibility.{key} must be a list")
+        for item in eligibility[key]:
+            require_text(item, f"eligibility.{key}")
+    outcomes = payload.get("outcomes", [])
+    if not isinstance(outcomes, list) or (not outcomes and question.framework != "PCC"):
+        raise ValidationError("clinical research needs an explicit outcomes list")
+    if not outcomes and question.framework == "PCC" and evidence_version == "2":
+        outcomes = ["Evidence map"]
+    for item in outcomes:
+        require_text(item, "outcome")
+    rationale = require_text(payload.get("search_rationale"), "search_rationale")
+    if mode == "review-prep" and (records is None or fulltexts is None):
+        raise ValidationError(
+            "review-prep requires explicit records and full-text limits (or all)"
+        )
+    records = positive_limit(
+        records if records is not None else 100,
+        "records_per_source",
+        allow_all=mode == "review-prep",
+    )
+    fulltexts = positive_limit(
+        fulltexts if fulltexts is not None else 30, "fulltexts", allow_all=mode == "review-prep"
+    )
+    sources = question.sources or [*CORE_SOURCES, "europe-pmc"]
+    if not question.sources and question.framework != "PCC":
+        sources.append("clinicaltrials")
+    if not question.sources and Credentials.from_env().scopus_api_key:
+        sources.append("scopus")
+    question.sources = [s for s in sources if s not in question.exclude_sources]
+    if not question.sources:
+        raise ValidationError("research must select at least one source")
+    if mode == "report" and not set(question.sources).intersection(BIOMEDICAL_INDEX_SOURCES):
+        raise ValidationError("report mode requires PubMed or Europe PMC")
+    language = require_text(language, "language")
+    protocol = {
+        "question": question.to_dict(),
+        "mode": mode,
+        "language": language,
+        "eligibility": eligibility,
+        "outcomes": outcomes,
+        "search_rationale": rationale,
+        "records_per_source": records,
+        "fulltexts": fulltexts,
+        "appraisal_status": "provisional-agent-assessment",
+    }
+    return protocol
+
+
 class Workspace:
     def __init__(self, path: Path):
         self.path = path.resolve()
@@ -146,63 +220,15 @@ class Workspace:
     ) -> dict[str, Any]:
         if (self.path / "research.json").exists() or (self.path / "manifest.json").exists():
             raise ValidationError("output already contains a run; use research status to resume")
-        question = Question.from_dict(payload)
-        # New research uses explicit schema-3 search blocks; standalone legacy searches stay v2.
-        normalized = question.to_dict()
-        normalized["schema_version"] = "3"
-        question = Question.from_dict(normalized)
-        eligibility = payload.get("eligibility")
-        if not isinstance(eligibility, dict) or not eligibility.get("include"):
-            raise ValidationError(
-                "research input needs eligibility.include and eligibility.exclude lists"
-            )
-        for key in ("include", "exclude"):
-            if not isinstance(eligibility.get(key), list):
-                raise ValidationError(f"eligibility.{key} must be a list")
-            for item in eligibility[key]:
-                require_text(item, f"eligibility.{key}")
-        outcomes = payload.get("outcomes", [])
-        if not isinstance(outcomes, list) or (not outcomes and question.framework != "PCC"):
-            raise ValidationError("clinical research needs an explicit outcomes list")
-        if not outcomes and question.framework == "PCC" and evidence_version == "2":
-            outcomes = ["Evidence map"]
-        for item in outcomes:
-            require_text(item, "outcome")
-        rationale = require_text(payload.get("search_rationale"), "search_rationale")
-        if mode == "review-prep" and (records is None or fulltexts is None):
-            raise ValidationError(
-                "review-prep requires explicit records and full-text limits (or all)"
-            )
-        records = positive_limit(
-            records if records is not None else 100,
-            "records_per_source",
-            allow_all=mode == "review-prep",
+        protocol = normalize_protocol(
+            payload,
+            mode=mode,
+            records=records,
+            fulltexts=fulltexts,
+            language=language,
+            evidence_version=evidence_version,
         )
-        fulltexts = positive_limit(
-            fulltexts if fulltexts is not None else 30, "fulltexts", allow_all=mode == "review-prep"
-        )
-        sources = question.sources or [*CORE_SOURCES, "europe-pmc"]
-        if not question.sources and question.framework != "PCC":
-            sources.append("clinicaltrials")
-        if not question.sources and Credentials.from_env().scopus_api_key:
-            sources.append("scopus")
-        question.sources = [s for s in sources if s not in question.exclude_sources]
-        if not question.sources:
-            raise ValidationError("research must select at least one source")
-        if mode == "report" and not set(question.sources).intersection(BIOMEDICAL_INDEX_SOURCES):
-            raise ValidationError("report mode requires PubMed or Europe PMC")
-        language = require_text(language, "language")
-        protocol = {
-            "question": question.to_dict(),
-            "mode": mode,
-            "language": language,
-            "eligibility": eligibility,
-            "outcomes": outcomes,
-            "search_rationale": rationale,
-            "records_per_source": records,
-            "fulltexts": fulltexts,
-            "appraisal_status": "provisional-agent-assessment",
-        }
+        question = Question.from_dict(protocol["question"])
         data = {
             "schema_version": "1",
             "tool_version": __version__,
