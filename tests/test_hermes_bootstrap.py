@@ -14,9 +14,9 @@ from hermes_medical_research import quick_commands
 from hermes_medical_research.answers import MAX_TOKENS, response_format, schema_digest
 from hermes_medical_research.hermes import (
     MCP_SERVER_NAME,
-    SESSION_MAX_TOKENS,
     PROFILES,
     RETIRED_PROFILES,
+    SESSION_MAX_TOKENS,
     _hmr_path,
     _system_timezone,
     bootstrap_profiles,
