@@ -231,7 +231,10 @@ def test_a_task_without_a_checklist_is_refused():
 
 
 def test_a_checklist_entry_is_matched_by_its_protocol_outcome_name():
-    """The packet keys entries by ``protocol_outcome``; an older guess at ``outcome`` matched none."""
+    """The packet keys entries by ``protocol_outcome``.
+
+    An earlier guess at ``outcome`` matched nothing, so every outcome looked unknown on the host.
+    """
     staged, _ = assessment.record("outcome_extracted", extracted_answer(), proposal(), packet())
 
     row = staged["stages"]["extractions"]["records"][0]
