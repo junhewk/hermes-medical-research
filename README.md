@@ -33,8 +33,8 @@ hmr --version
 | MCP submit tools | Carry one typed payload from a session into the normal submit path |
 | Artifact store | Carries immutable results between roles; sessions exchange only `run_id` and `task_id` |
 
-Three checked-in skills serve the five session profiles. `medical-select` belongs to the Selector,
-`medical-extract` to the Extractor, and `medical-synthesize` to the Synthesizer and the independent
+Three checked-in skills serve the five session profiles. `hmr-select` belongs to the Selector,
+`hmr-extract` to the Extractor, and `hmr-synthesize` to the Synthesizer and the independent
 Auditor. The four constrained profiles carry no skill and no shell toolset. The Coordinator uses its
 own profile instructions and performs no specialist work.
 

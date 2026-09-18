@@ -1,5 +1,5 @@
 ---
-name: medical-select
+name: hmr-select
 description: Screen or select one supplied medical record for an evidence review, using only its bounded task packet and commands.
 metadata:
   hermes:

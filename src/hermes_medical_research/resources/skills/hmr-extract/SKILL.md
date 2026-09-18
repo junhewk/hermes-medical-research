@@ -1,5 +1,5 @@
 ---
-name: medical-extract
+name: hmr-extract
 description: Acquire full text, link studies, extract one record's results, and appraise them, using only the bounded task packet and commands.
 metadata:
   hermes:

@@ -85,7 +85,7 @@ def test_bootstrap_copies_only_the_selected_provider_definition(tmp_path):
     assert selector["files"] == [
         "SOUL.md",
         "config.yaml",
-        "skills/medical-select/SKILL.md",
+        "skills/hmr-select/SKILL.md",
     ]
     from hermes_medical_research.hermes import _source_settings
 

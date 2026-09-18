@@ -1,5 +1,5 @@
 ---
-name: medical-audit
+name: hmr-audit
 description: Independently check one frozen evidence group through hmr, citing an exact quote for every verdict.
 metadata:
   hermes:

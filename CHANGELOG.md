@@ -33,7 +33,7 @@
   one, and it also reached for skill tools. Hermes sends only the tools it already knows about, so a
   tool schema cannot be handed over per invocation, and a session that must read full text cannot
   carry a schema at all, because the gateway refuses tools plus a response format with HTTP 400. The
-  five session profiles therefore host the server, and `medical-extract` and `medical-synthesize`
+  five session profiles therefore host the server, and `hmr-extract` and `hmr-synthesize`
   now say to call the submit tool when the instruction file names one, which costs fewer turns than
   editing a proposal and shelling out.
 - Gave the session lane its reads as tools too: `packet_read`, `source_list`, `source_find`, and
@@ -74,6 +74,23 @@
   from `mdr` to `hmr`, because `mdr` is the separate medical-deep-research line. `MDR_HOME` is still
   honored and `mdr-*` actor profiles in existing receipts still resolve to their role, so old runs
   stay readable.
+- Renamed the skills to `hmr-select`, `hmr-extract`, `hmr-synthesize`, and `hmr-audit`. They were
+  `medical-*` because they predate the package: the first was written for the 0.4.0 Claude Code
+  plugin line, and the `mdr` to `hmr` rename passed them over since they never carried `mdr`. Every
+  other managed artifact carries the prefix, and a drifting skill is easier to place when its name
+  says who installed it.
+- Gave the auditor its own `hmr-audit` skill. It had been sharing the synthesizer's, whose audit
+  half was four sentences and said nothing about the rules a submission enforces; on the first real
+  audit the session spent 53 minutes reading the store and never submitted a group. The new skill
+  says the proposal is a filled template, names the four fields a session may edit and the identity
+  fields it must never retype, and states the revise and citation rules.
+- Wrote the synthesis validator's real rejection rules into `hmr-synthesize`: the 600-character
+  `conclusion` cap, the required `limitations` array, `use: indirect` under a mixed comparator,
+  source-grounded mappings for `overlap.status: mapped`, and `not-assessable` certainty when the
+  contributing appraisal is limited. A synthesizer session had discovered these by being rejected
+  and then appended them to its own installed skill file, which the digest manifest caught as
+  drift. The rules belong in the reviewed skill; the skill now also says that a skill file is
+  read-only to the session even when the filesystem permits a write.
 - Changed three queue rules the step model forces. A step waits out the 5-minute and 30-minute retry
   backoff instead of mistaking a backed-off Task for an empty queue. Abandonment blocking after 95
   minutes is deleted, because an unclaimed Task between two slash commands is now normal. An

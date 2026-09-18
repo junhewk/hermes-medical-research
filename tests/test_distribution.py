@@ -39,10 +39,10 @@ def test_distribution_has_one_executable_and_new_identity():
 def test_exactly_four_small_hermes_skills_are_checked_in():
     skills = sorted((ROOT / "skills").glob("*/SKILL.md"))
     assert [path.parent.name for path in skills] == [
-        "medical-audit",
-        "medical-extract",
-        "medical-select",
-        "medical-synthesize",
+        "hmr-audit",
+        "hmr-extract",
+        "hmr-select",
+        "hmr-synthesize",
     ]
     for path in skills:
         text = path.read_text()
@@ -99,10 +99,10 @@ def test_each_session_role_carries_the_skill_for_its_own_work():
 
     assert {role: PROFILES[name].skills for role, name in SESSION_PROFILES.items()} == {
         "coordinator": (),
-        "selector": ("medical-select",),
-        "extractor": ("medical-extract",),
-        "synthesizer": ("medical-synthesize",),
-        "auditor": ("medical-audit",),
+        "selector": ("hmr-select",),
+        "extractor": ("hmr-extract",),
+        "synthesizer": ("hmr-synthesize",),
+        "auditor": ("hmr-audit",),
     }
     # A session role's skill is the one the runner names in its prompt, so a shared skill would
     # send one role instructions written for another.
