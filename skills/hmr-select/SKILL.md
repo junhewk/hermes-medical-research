@@ -29,3 +29,6 @@ claim token.
 
 For operator diagnostics only, an explicitly supplied `run_id` and `task_id` may be opened with
 `hmr select next RUN_ID TASK_ID` when the Run is not step-managed.
+
+This skill file is read-only to you even when the filesystem permits a write: what you learn belongs
+in your answer, not in these instructions.

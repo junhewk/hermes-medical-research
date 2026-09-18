@@ -21,6 +21,9 @@ When it lists no `read_tools`, use only the instruction file's own `source_find`
 
 Never run Python, heredocs, scripts, or a code cell, and never edit a skill.
 
+This skill file is read-only to you even when the filesystem permits a write: what you learn belongs
+in your answer, not in these instructions.
+
 ## Assessment: record one outcome at a time
 
 Call `record_study_appraisal` once with the study's risk of bias, then one call per protocol outcome
