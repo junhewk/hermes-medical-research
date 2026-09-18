@@ -385,7 +385,31 @@ def test_retired_searcher_profile_is_reported_and_removed(tmp_path, monkeypatch)
         {"profile": "hmr-searcher", "removed": True, "kept": []}
     ]
     assert not searcher.exists()
-    assert doctor(hermes_home=home, store=store)["retired_profiles"] == []
+    report = doctor(hermes_home=home, store=store)["retired_profiles"]
+    assert report == {"managed": [], "present": [], "problems": []}
+
+
+def test_a_retired_profile_hermes_still_owns_is_reported_without_blocking(tmp_path, monkeypatch):
+    """Hermes keeps its own state in a profile directory, and this package must not delete it."""
+    fake_hermes(tmp_path, monkeypatch)
+    home = tmp_path / "hermes"
+    store = tmp_path / "store"
+    source = tmp_path / "source.yaml"
+    source.write_text(SELECTED_SOURCE)
+    bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
+    from hermes_medical_research.quick_commands import install
+
+    install(store=store, apply=True, hermes_home=home)
+    leftover = home / "profiles" / "mdr-selector"
+    (leftover / "logs").mkdir(parents=True)
+    (leftover / "state.db").write_text("hermes state")
+
+    report = doctor(hermes_home=home, store=store)
+
+    assert report["retired_profiles"]["present"] == ["mdr-selector"]
+    assert report["retired_profiles"]["managed"] == []
+    assert "delete it by hand" in report["retired_profiles"]["problems"][0]
+    assert report["ready"] is True
 
 
 def test_doctor_reports_a_legacy_fleet_and_missing_quick_commands_as_not_ready(

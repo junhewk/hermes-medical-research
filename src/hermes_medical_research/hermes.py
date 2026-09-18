@@ -189,6 +189,11 @@ def _source_settings(source_profile: Path | None, home: Path) -> dict[str, Any]:
     elif candidate.is_dir():
         candidate = candidate / "config.yaml"
     if not candidate.is_file():
+        if source_profile is not None:
+            raise ValidationError(
+                f"source Hermes config not found: {candidate}; name a profile or home whose "
+                "config.yaml holds the model and provider settings to copy"
+            )
         return {}
     try:
         value = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
@@ -276,6 +281,38 @@ def _with_response_format(settings: dict[str, Any], kind: str) -> dict[str, Any]
         # A constrained tool call is short; a small ceiling bounds a pathological string argument.
         updated["model"] = {**model, "max_tokens": answers.MAX_TOKENS[kind]}
     return updated
+
+
+def schema_warning(name: str, settings: dict[str, Any]) -> str | None:
+    """Say so when a constrained profile's schema has no provider entry to ride on.
+
+    The copied settings can name a provider that only the Hermes home defines. Then nothing here
+    can attach the schema, the answers come back unconstrained, and the only sign would be prose
+    where JSON was expected, so both bootstrap and doctor report it.
+    """
+    spec = PROFILES[name]
+    if not spec.kind or _carries_schema(settings, spec.kind):
+        return None
+    return (
+        f"{name} has no provider entry to carry its answer schema; the settings name provider "
+        f"{_provider_name(settings)!r}. Bootstrap with --source-profile pointing at a config "
+        "whose providers map defines it, or answers will not be constrained."
+    )
+
+
+def _carries_schema(settings: dict[str, Any], kind: str) -> bool:
+    """Whether the schema actually landed on a provider entry the request will use."""
+    from . import answers
+
+    wanted = {"response_format": answers.response_format(kind)}
+    name = _provider_name(settings)
+    entry = ((settings.get("providers") or {}).get(name or "") or {})
+    if entry.get("extra_body") == wanted:
+        return True
+    return any(
+        isinstance(item, dict) and item.get("extra_body") == wanted
+        for item in (settings.get("custom_providers") or [])
+    )
 
 
 def _mcp_entry(store: Path, role: str, kind: str | None, executable: str) -> dict[str, Any]:
@@ -518,6 +555,17 @@ def bootstrap_profiles(
         for name in RETIRED_PROFILES
         if _profile_root(home, name).exists()
     ]
+    warnings = [
+        warning
+        for name in names
+        if (warning := schema_warning(
+            name,
+            _with_response_format(
+                _with_assigned_model(settings, PROFILES[name], assignment),
+                PROFILES[name].kind,
+            ) if PROFILES[name].kind else settings,
+        ))
+    ]
     if not apply:
         return {
             "applied": False,
@@ -527,6 +575,7 @@ def bootstrap_profiles(
             "store": str(artifact_store),
             "profiles": plan,
             "retired_profiles": retired,
+            "warnings": warnings,
             "removing": remove,
         }
     if remove:
@@ -610,6 +659,7 @@ def bootstrap_profiles(
         "store": str(artifact_store),
         "bot_mode_discovery": "automatic",
         "workflow": "user-invoked-steps",
+        "warnings": warnings,
         "retired_profiles": [_remove_profile(Path(item["root"])) for item in retired],
     }
 
@@ -669,9 +719,17 @@ def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dic
         entry["ready"] = not problems
         profiles.append(entry)
     legacy = _legacy_routines(home)
-    for name in RETIRED_PROFILES:
-        if _profile_root(home, name).exists():
-            ready = False
+    # A retired profile directory keeps Hermes's own state, which this package must not delete, so
+    # only one that still holds managed files blocks readiness.
+    retired_managed = [
+        name for name in RETIRED_PROFILES
+        if _read_manifest(_profile_root(home, name)) is not None
+    ]
+    retired_present = [
+        name for name in RETIRED_PROFILES if _profile_root(home, name).exists()
+    ]
+    if retired_managed:
+        ready = False
     main_config = _source_settings(None, home)
     if not main_config:
         # Isolated qualification homes commonly contain only managed profiles,
@@ -708,9 +766,17 @@ def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dic
         "bot_mode_discovery": "automatic",
         "workflow": "user-invoked-steps",
         "profiles": profiles,
-        "retired_profiles": [
-            name for name in RETIRED_PROFILES if _profile_root(home, name).exists()
-        ],
+        "retired_profiles": {
+            "managed": retired_managed,
+            "present": retired_present,
+            "problems": (
+                [f"{name} still holds managed files; run `hmr hermes profiles --remove --apply`"
+                 for name in retired_managed]
+                or ([f"{name} is an empty 0.5.x profile directory Hermes still owns; delete it by "
+                     "hand when convenient" for name in retired_present] if retired_present
+                    else [])
+            ),
+        },
         "legacy_routines": legacy,
         "quick_commands": commands,
         "assignments": assignment_report,
