@@ -61,7 +61,7 @@ def test_bootstrap_copies_only_the_selected_provider_definition(tmp_path):
         hermes_home=tmp_path / "home", source_profile=source
     )
     selector = next(
-        item for item in result["profiles"] if item["profile"] == "mdr-selector"
+        item for item in result["profiles"] if item["profile"] == "hmr-selector"
     )
     assert selector["files"] == [
         "SOUL.md",
@@ -109,12 +109,12 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
             },
             "tools": {"enabled_toolsets": ["terminal", "file", "skills"]},
         }
-        if name != "mdr-coordinator":
+        if name != "hmr-coordinator":
             expected["agent"] = {"max_turns": PROFILE_MAX_TURNS[name]}
             expected["cron"]["script_timeout_seconds"] = 86400
         assert config == expected
         assert not set(config) & {"unrelated"}
-        assert json.loads((root / "mdr-managed.json").read_text())["profile"] == name
+        assert json.loads((root / "hmr-managed.json").read_text())["profile"] == name
         assert {
             path.parent.name for path in (root / "skills").glob("*/SKILL.md")
         } == set(skills)
@@ -149,7 +149,7 @@ def test_bootstrap_never_replaces_an_existing_home_config(tmp_path, monkeypatch)
 def test_bootstrap_refuses_unmanaged_and_edited_profiles(tmp_path, monkeypatch):
     fake_hermes(tmp_path, monkeypatch)
     home = tmp_path / "hermes"
-    unmanaged = home / "profiles" / "mdr-selector"
+    unmanaged = home / "profiles" / "hmr-selector"
     unmanaged.mkdir(parents=True)
     (unmanaged / "personal.txt").write_text("keep me")
     with pytest.raises(ValidationError, match="unmanaged"):
@@ -159,7 +159,7 @@ def test_bootstrap_refuses_unmanaged_and_edited_profiles(tmp_path, monkeypatch):
     (unmanaged / "personal.txt").unlink()
     unmanaged.rmdir()
     bootstrap_profiles(apply=True, hermes_home=home)
-    soul = home / "profiles" / "mdr-selector" / "SOUL.md"
+    soul = home / "profiles" / "hmr-selector" / "SOUL.md"
     soul.write_text("locally edited")
     with pytest.raises(ValidationError, match="edited outside"):
         bootstrap_profiles(apply=True, hermes_home=home)
@@ -169,17 +169,17 @@ def test_bootstrap_can_update_only_the_searcher_profile(tmp_path, monkeypatch):
     fake_hermes(tmp_path, monkeypatch)
     home = tmp_path / "hermes"
     bootstrap_profiles(apply=True, hermes_home=home)
-    selector = home / "profiles" / "mdr-selector" / "SOUL.md"
+    selector = home / "profiles" / "hmr-selector" / "SOUL.md"
     selector.write_text("operator-owned drift")
 
     result = bootstrap_profiles(
         apply=True,
         hermes_home=home,
-        profile="mdr-searcher",
+        profile="hmr-searcher",
     )
-    assert [item["profile"] for item in result["profiles"]] == ["mdr-searcher"]
+    assert [item["profile"] for item in result["profiles"]] == ["hmr-searcher"]
     config = yaml.safe_load(
-        (home / "profiles" / "mdr-searcher" / "config.yaml").read_text()
+        (home / "profiles" / "hmr-searcher" / "config.yaml").read_text()
     )
     assert config["agent"]["max_turns"] == 8
     assert selector.read_text() == "operator-owned drift"
@@ -201,22 +201,22 @@ def test_managed_routine_edit_preserves_operator_model_and_pause_pins(
 
     monkeypatch.setattr("hermes_medical_research.hermes.subprocess.run", fake_run)
     spec = {
-        "profile": "mdr-searcher",
-        "name": "mdr-work-searcher",
+        "profile": "hmr-searcher",
+        "name": "hmr-work-searcher",
         "schedule": "* * * * *",
         "prompt": "Run the bounded search claim.",
-        "monitor_script": "mdr-probe-searcher.sh",
+        "monitor_script": "hmr-probe-searcher.sh",
         "no_agent": False,
         "skills": ["medical-search"],
         "deliver": None,
-        "failure_deliver": "bot-chat:mdr-coordinator",
+        "failure_deliver": "bot-chat:hmr-coordinator",
     }
     _edit_routine("/bin/hermes", tmp_path, spec, {"id": "job-1"})
     command = calls[0][0]
     assert command[:6] == [
         "/bin/hermes",
         "-p",
-        "mdr-searcher",
+        "hmr-searcher",
         "cron",
         "edit",
         "job-1",
@@ -241,21 +241,21 @@ def test_managed_routine_edit_converts_selector_to_script_only(tmp_path, monkeyp
 
     monkeypatch.setattr("hermes_medical_research.hermes.subprocess.run", fake_run)
     spec = {
-        "profile": "mdr-selector",
-        "name": "mdr-work-selector",
+        "profile": "hmr-selector",
+        "name": "hmr-work-selector",
         "schedule": "* * * * *",
         "prompt": "",
-        "script": "mdr-work-selector.sh",
+        "script": "hmr-work-selector.sh",
         "no_agent": True,
         "skills": [],
         "deliver": None,
-        "failure_deliver": "bot-chat:mdr-coordinator",
+        "failure_deliver": "bot-chat:hmr-coordinator",
     }
 
     _edit_routine("/bin/hermes", tmp_path, spec, {"id": "job-2"})
 
     command = calls[0][0]
-    assert command[command.index("--script") + 1] == "mdr-work-selector.sh"
+    assert command[command.index("--script") + 1] == "hmr-work-selector.sh"
     assert command[command.index("--monitor-script") + 1] == ""
     assert "--no-agent" in command
     assert "--agent" not in command
@@ -274,7 +274,7 @@ def test_doctor_requires_managed_cron_routines_not_bot_roster_metadata(
     assert checked["routines"]["problems"] == [
         "managed cron routines are not installed"
     ]
-    (home / "profiles" / "mdr-coordinator" / "profile.yaml").write_text(
+    (home / "profiles" / "hmr-coordinator" / "profile.yaml").write_text(
         "ui_meta:\n  hermes-bots: {}\n"
     )
     assert not doctor(hermes_home=home)["ready"]

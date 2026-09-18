@@ -33,7 +33,7 @@ from .tasks import (
     Actor,
     RunCatalog,
     TaskEngine,
-    mdr_command,
+    hmr_command,
     source_commands,
 )
 from .workspace import digest
@@ -163,7 +163,7 @@ def _source_digest(record: dict[str, Any]) -> str:
 
 
 class AutomationEngine:
-    """Deep module behind the small ``mdr review`` and ``mdr work`` interfaces."""
+    """Deep module behind the small ``hmr review`` and ``hmr work`` interfaces."""
 
     def __init__(
         self,
@@ -487,7 +487,7 @@ class AutomationEngine:
                 status = engine.status()
                 if status["state"] == "ready":
                     result = await engine.finalize(
-                        Actor("mdr-coordinator", "automation-tick", "coordinator"),
+                        Actor("hmr-coordinator", "automation-tick", "coordinator"),
                         offline=False,
                     )
                     if result.get("completed"):
@@ -515,7 +515,7 @@ class AutomationEngine:
                         self._save_review(path, review)
                         continue
                     routed_result = engine.route_next(
-                        Actor("mdr-coordinator", "automation-tick", "coordinator")
+                        Actor("hmr-coordinator", "automation-tick", "coordinator")
                     )
                     if routed_result.get("task_id"):
                         routed += 1
@@ -531,7 +531,7 @@ class AutomationEngine:
         return result
 
     def probe(self, role: str) -> dict[str, Any]:
-        role = role.casefold().replace("mdr-", "")
+        role = role.casefold().replace("hmr-", "")
         if role not in ROLES:
             raise ValidationError(f"unknown specialist role: {role}")
         ready = self._eligible(role, mutate=False)
@@ -590,7 +590,7 @@ class AutomationEngine:
                 "expires_at": _at(expires),
             }
             _write_json(self.claims / f"{claim_id}.json", claim)
-        executable = mdr_command()
+        executable = hmr_command()
         base = (
             f"{executable} --store {shlex.quote(str(self.root))} "
             f"--actor {ROLE_PROFILES[role]} --session-id {actor.session_id} "
@@ -738,7 +738,7 @@ class AutomationEngine:
                     f'Medical Review "{event["review"]}" cycle {event["cycle"]} '
                     f"is {label}. Event {event['event_id']}. "
                     f"Acknowledge after presenting this update with: "
-                    f"{mdr_command()} --store {shlex.quote(str(self.root))} "
+                    f"{hmr_command()} --store {shlex.quote(str(self.root))} "
                     f"review acknowledge {event['event_id']}"
                 )
         return ""

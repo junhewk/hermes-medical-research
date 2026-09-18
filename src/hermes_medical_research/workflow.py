@@ -315,7 +315,7 @@ async def finalize(
         return {
             "completed": False,
             "check": checked,
-            "next_command": ["mdr", "run", "next", workspace.load().get("run_id", "RUN_ID")],
+            "next_command": ["hmr", "run", "next", workspace.load().get("run_id", "RUN_ID")],
         }
     if batch is not None:
         result = submit_batch(workspace, batch)

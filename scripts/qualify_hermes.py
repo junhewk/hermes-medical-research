@@ -111,7 +111,7 @@ def invoke_routine(
             env={
                 **os.environ,
                 "HERMES_HOME": str(hermes_home),
-                "MDR_HOME": str(store),
+                "HMR_HOME": str(store),
             },
         )
     except subprocess.TimeoutExpired as exc:
@@ -137,10 +137,10 @@ def selector_pilot(
         review, run_id, task_id = synthetic_selector_run(automation, scratch)
         invocation = invoke_routine(
             args.hermes,
-            "mdr-selector",
+            "hmr-selector",
             args.hermes_home,
             args.store,
-            "mdr-work-selector",
+            "hmr-work-selector",
             args.timeout,
         )
         engine = TaskEngine(automation.catalog.workspace(run_id))
@@ -190,10 +190,10 @@ def full_runs(args, automation: AutomationEngine) -> list[dict]:
             role = status["active"][0]["role"]
             invocation = invoke_routine(
                 args.hermes,
-                f"mdr-{role}",
+                f"hmr-{role}",
                 args.hermes_home,
                 args.store,
-                f"mdr-work-{role}",
+                f"hmr-work-{role}",
                 args.timeout,
             )
             invocations.append(invocation)
@@ -228,7 +228,7 @@ def main() -> int:
     args = parsed.parse_args()
     if args.full_runs not in {0, 3}:
         parsed.error("--full-runs must be 0 (selector gate only) or 3")
-    temporary = Path(tempfile.mkdtemp(prefix="mdr-qualification-"))
+    temporary = Path(tempfile.mkdtemp(prefix="hmr-qualification-"))
     args.store = (args.store or temporary / "store").resolve()
     scratch = (args.scratch or temporary / "scratch").resolve()
     scratch.mkdir(parents=True, exist_ok=True)
@@ -237,7 +237,7 @@ def main() -> int:
         review, run_id, task_id = synthetic_selector_run(automation, scratch)
         report = {
             "prepared": True,
-            "profile": "mdr-selector",
+            "profile": "hmr-selector",
             "run_id": run_id,
             "task_id": task_id,
             "review": review,

@@ -25,8 +25,8 @@ from hermes_medical_research.validation import GRADE_DOMAINS
 from hermes_medical_research.workflow import check, finalize, submit_batch
 
 OUTCOMES = ["Theoretical exam score", "Clinical skills (Mini-CEX)", "Learner satisfaction"]
-COORDINATOR = Actor("mdr-coordinator", "coordinator-session", "coordinator")
-EXTRACTOR = Actor("mdr-extractor", "extractor-session", "extractor")
+COORDINATOR = Actor("hmr-coordinator", "coordinator-session", "coordinator")
+EXTRACTOR = Actor("hmr-extractor", "extractor-session", "extractor")
 JATS = b"""<article><body>
 <sec><title>Methods</title>
 <p>Eighty students were randomized to ChatGPT-assisted or traditional teaching.</p></sec>
@@ -522,7 +522,7 @@ def test_source_find_and_read_are_bounded_like_source_show(tmp_path):
     with pytest.raises(ValidationError, match="three or more characters"):
         engine.source_find(task_id, "a b", EXTRACTOR)
     with pytest.raises(ValidationError, match="active task"):
-        engine.source_find(task_id, "exam", Actor("mdr-selector", "other", "selector"))
+        engine.source_find(task_id, "exam", Actor("hmr-selector", "other", "selector"))
 
 
 def test_legacy_run_keeps_validating_with_an_explicit_warning(tmp_path):

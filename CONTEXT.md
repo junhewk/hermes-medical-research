@@ -24,10 +24,10 @@ own task scope, validate its own citations, or declare the run complete.
 - A **Runner** is a script-only Routine that claims one Task at a time for one role and starts one
   fresh Hermes session per Task with an instruction file of exact commands.
 - A **Halt** stops a Run when an audit group stays unresolved after two corrections; an operator
-  clears it with `mdr review retry`.
+  clears it with `hmr review retry`.
 - The **Outbox** carries only completed, no-change, and blocked Cycle notifications to Coordinator.
 - The **Corpus** is the search and source material owned by the CLI. Bots access it only through a
-  bounded Task packet or paginated `mdr source show` calls.
+  bounded Task packet or paginated `hmr source show` calls.
 - The **Candidate** is the frozen pre-audit protocol, workflow provenance, evidence, and synthesis.
 - **Coordinator, Searcher, Selector, Extractor, Synthesizer, and Auditor** are isolated Hermes
   profiles. Cron workers claim Tasks from the CLI; the Auditor is independent of every evidence
@@ -54,9 +54,9 @@ own task scope, validate its own citations, or declare the run complete.
 
 `hermes_medical_research.tasks` is the deep per-Run Module.
 `hermes_medical_research.automation` is the deep cross-Run Review/queue Module. Their narrow
-Interface is the `mdr` CLI. `hermes_medical_research.hermes` is the localized true-external Adapter
+Interface is the `hmr` CLI. `hermes_medical_research.hermes` is the localized true-external Adapter
 for profiles and Routines; it does not implement workflow state. Search retrieval and evidence
 validation remain internal libraries. Hermes skills describe commands; they do not implement
 correctness. The default store is
 `$XDG_DATA_HOME/hermes-medical-research` (or `~/.local/share/hermes-medical-research`) and can be
-isolated with `MDR_HOME`.
+isolated with `HMR_HOME`.

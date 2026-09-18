@@ -17,9 +17,9 @@ from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, RunCatalog, TaskEngine
 from hermes_medical_research.workspace import Workspace
 
-COORDINATOR = Actor("mdr-coordinator", "coordinator-session", "coordinator")
-SELECTOR = Actor("mdr-selector", "selector-session", "selector")
-SEARCHER = Actor("mdr-searcher", "searcher-session", "searcher")
+COORDINATOR = Actor("hmr-coordinator", "coordinator-session", "coordinator")
+SELECTOR = Actor("hmr-selector", "selector-session", "selector")
+SEARCHER = Actor("hmr-searcher", "searcher-session", "searcher")
 
 
 def selector_workspace(tmp_path: Path) -> tuple[TaskEngine, dict]:
@@ -77,7 +77,7 @@ async def test_selector_records_one_decision_and_replays_from_fresh_session(tmp_
         "run_id": created["run_id"],
         "task_id": route["task_id"],
         "role": "selector",
-        "profile": "mdr-selector",
+        "profile": "hmr-selector",
         "state": "pending",
     }
     opened = engine.role_next("select", route["task_id"], SELECTOR)
@@ -93,7 +93,7 @@ async def test_selector_records_one_decision_and_replays_from_fresh_session(tmp_
     assert accepted["state"] == "accepted"
     assert engine.workspace.index("screening")[assigned]["decision"] == "include"
 
-    fresh = Actor("mdr-selector", "fresh-selector-session", "selector")
+    fresh = Actor("hmr-selector", "fresh-selector-session", "selector")
     replay = await engine.submit("select", route["task_id"], proposal_path, fresh)
     assert replay == accepted
 
@@ -134,7 +134,7 @@ def test_in_progress_proposal_resumes_under_a_fresh_profile_session(tmp_path):
     resumed = engine.role_next(
         "select",
         route["task_id"],
-        Actor("mdr-selector", "replacement-session", "selector"),
+        Actor("hmr-selector", "replacement-session", "selector"),
     )
     assert resumed["proposal_path"] == str(path)
     assert json.loads(path.read_text()) == proposal
@@ -191,7 +191,7 @@ def test_source_access_is_bounded_to_active_task(tmp_path):
             route["task_id"],
             source_id,
             1,
-            Actor("mdr-extractor", "other-session", "extractor"),
+            Actor("hmr-extractor", "other-session", "extractor"),
         )
 
 
@@ -204,8 +204,8 @@ def test_auditor_is_independent_and_every_receipt_is_immutable(tmp_path):
         if task["kind"] == "audit" and task["state"] == "accepted"
     ]
     assert audit_tasks
-    assert {task["actor_profile"] for task in audit_tasks} == {"mdr-auditor"}
-    assert "mdr-auditor" not in {
+    assert {task["actor_profile"] for task in audit_tasks} == {"hmr-auditor"}
+    assert "hmr-auditor" not in {
         profile
         for profiles in manifest["task_engine"]["authors"].values()
         for profile in profiles
@@ -254,7 +254,7 @@ def test_actor_roles_are_enforced(tmp_path):
         engine.role_next(
             "select",
             route["task_id"],
-            Actor("mdr-synthesizer", "wrong-session", "synthesizer"),
+            Actor("hmr-synthesizer", "wrong-session", "synthesizer"),
         )
 
 
@@ -349,7 +349,7 @@ async def test_zero_core_hits_freezes_materialized_search_plan(monkeypatch, tmp_
         )
 
 
-def test_mdr_cli_creates_and_routes_an_opaque_run(tmp_path, capsys):
+def test_hmr_cli_creates_and_routes_an_opaque_run(tmp_path, capsys):
     request = tmp_path / "request.json"
     request.write_text(json.dumps(protocol()))
     store = tmp_path / "store"
@@ -362,7 +362,7 @@ def test_mdr_cli_creates_and_routes_an_opaque_run(tmp_path, capsys):
                 "--store",
                 str(store),
                 "--actor",
-                "mdr-coordinator",
+                "hmr-coordinator",
                 "run",
                 "next",
                 created["run_id"],
@@ -372,20 +372,20 @@ def test_mdr_cli_creates_and_routes_an_opaque_run(tmp_path, capsys):
     )
     routed = json.loads(capsys.readouterr().out)
     assert routed["run_id"] == created["run_id"]
-    assert routed["profile"] == "mdr-searcher"
+    assert routed["profile"] == "hmr-searcher"
 
 
 def test_global_options_are_accepted_after_the_subcommand(tmp_path, capsys):
     from hermes_medical_research.cli import hoist_global_options
 
     assert hoist_global_options(
-        ["extract", "claim", "--actor", "mdr-extractor", "--store=/tmp/x"]
-    ) == ["--actor", "mdr-extractor", "--store=/tmp/x", "extract", "claim"]
+        ["extract", "claim", "--actor", "hmr-extractor", "--store=/tmp/x"]
+    ) == ["--actor", "hmr-extractor", "--store=/tmp/x", "extract", "claim"]
     request = tmp_path / "request.json"
     request.write_text(json.dumps(protocol()))
     store = tmp_path / "store"
     assert main(["run", "create", "--request", str(request), "--store", str(store)]) == 0
     created = json.loads(capsys.readouterr().out)
     assert main(["run", "next", created["run_id"], "--store", str(store), "--actor",
-                 "mdr-coordinator"]) == 0
-    assert json.loads(capsys.readouterr().out)["profile"] == "mdr-searcher"
+                 "hmr-coordinator"]) == 0
+    assert json.loads(capsys.readouterr().out)["profile"] == "hmr-searcher"

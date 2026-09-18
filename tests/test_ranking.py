@@ -105,7 +105,7 @@ def test_scoring_components_and_no_journal_bonus() -> None:
     first = record(journal="New England Journal of Medicine")
     second = record(source_id="2", doi="10.1000/other", pmid="124", journal="Unknown Journal")
     ranked = rank_records([first, second], question(), today=date(2026, 1, 1))
-    assert ranked[0]["ranking"]["version"] == "mdr-v2-grouped"
+    assert ranked[0]["ranking"]["version"] == "hmr-v2-grouped"
     assert ranked[0]["ranking"]["evidence_category"] == "II"
     assert ranked[0]["ranking"]["composite_score"] == ranked[1]["ranking"][
         "composite_score"

@@ -20,7 +20,7 @@ from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import MAX_CORRECTIONS_PER_GROUP, Actor, TaskEngine
 from hermes_medical_research.workflow import check
 
-COORDINATOR = Actor("mdr-coordinator", "operator", "coordinator")
+COORDINATOR = Actor("hmr-coordinator", "operator", "coordinator")
 
 
 def review_with_records(tmp_path: Path, name: str, count: int, clock=None):
@@ -47,7 +47,7 @@ def exclude(claim: dict) -> Path:
 async def test_acceptance_continues_into_the_next_role_without_a_tick(tmp_path):
     automation, workspace = review_with_records(tmp_path, "handoff", 1)
     await automation.tick()
-    actor = Actor("mdr-selector", "handoff-session", "selector")
+    actor = Actor("hmr-selector", "handoff-session", "selector")
     claim = automation.claim("select", actor)
 
     receipt = await TaskEngine(workspace).submit(
@@ -55,7 +55,7 @@ async def test_acceptance_continues_into_the_next_role_without_a_tick(tmp_path):
     )
 
     assert receipt["continuation"]["role"] == "synthesizer"
-    synthesizer = Actor("mdr-synthesizer", "next-session", "synthesizer")
+    synthesizer = Actor("hmr-synthesizer", "next-session", "synthesizer")
     assert automation.claim("synthesize", synthesizer)["kind"] == "synthesis"
     stored = json.loads((automation.claims / f"{claim['claim_id']}.json").read_text())
     assert stored["state"] == "completed"
@@ -69,7 +69,7 @@ async def test_paused_review_is_unclaimable_and_never_marked_abandoned(tmp_path)
     )
     await automation.tick()
     automation.set_paused("paused", True)
-    actor = Actor("mdr-selector", "paused-session", "selector")
+    actor = Actor("hmr-selector", "paused-session", "selector")
     assert automation.claim("select", actor)["state"] == "idle"
     assert automation.probe("selector")["state"] == "idle"
 
@@ -91,7 +91,7 @@ async def test_blocked_cycle_retries_in_place_and_keeps_partial_proposal(tmp_pat
         tmp_path, "retry-in-place", 2, clock=lambda: current[0]
     )
     await automation.tick()
-    actor = Actor("mdr-selector", "first-session", "selector")
+    actor = Actor("hmr-selector", "first-session", "selector")
     first = automation.claim("select", actor)
     await TaskEngine(workspace).submit(
         "select", first["task_id"], exclude(first), actor, claim_token=first["claim_token"]
@@ -114,7 +114,7 @@ async def test_blocked_cycle_retries_in_place_and_keeps_partial_proposal(tmp_pat
 
     assert retried["cycle_state"] == "active"
     assert retried["retried_task_ids"] == [claim["task_id"]]
-    reopened = automation.claim("select", Actor("mdr-selector", "second-session", "selector"))
+    reopened = automation.claim("select", Actor("hmr-selector", "second-session", "selector"))
     assert reopened["task_id"] == claim["task_id"]
     assert json.loads(Path(reopened["proposal_path"]).read_text()) == partial
     assert len(workspace.rows("screening")) == 1
@@ -171,7 +171,7 @@ async def test_unfinished_host_session_is_failed_without_stopping_the_runner(
 async def test_fulltext_tasks_are_submitted_without_a_model_session(tmp_path, monkeypatch):
     automation, workspace = review_with_records(tmp_path, "fulltext-runner", 1)
     await automation.tick()
-    actor = Actor("mdr-selector", "include-session", "selector")
+    actor = Actor("hmr-selector", "include-session", "selector")
     claim = automation.claim("select", actor)
     path = Path(claim["proposal_path"])
     proposal = json.loads(path.read_text())
@@ -233,8 +233,8 @@ def test_drain_rejects_unknown_roles_and_reports_concurrent_runners(tmp_path, mo
 def test_routine_pause_controls_use_public_cron_commands(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     for profile, job_id, enabled in (
-        ("mdr-coordinator", "tick1", True),
-        ("mdr-extractor", "ext1", False),
+        ("hmr-coordinator", "tick1", True),
+        ("hmr-extractor", "ext1", False),
     ):
         cron = home / "profiles" / profile / "cron"
         cron.mkdir(parents=True)
@@ -243,18 +243,18 @@ def test_routine_pause_controls_use_public_cron_commands(tmp_path, monkeypatch):
                 {"jobs": [{"id": job_id, "name": f"job-{profile}", "enabled": enabled}]}
             )
         )
-    (home / "mdr-routines.json").write_text(
+    (home / "hmr-routines.json").write_text(
         json.dumps(
             {
                 "scripts": {},
                 "jobs": [
-                    {"profile": "mdr-coordinator", "name": "job-mdr-coordinator"},
-                    {"profile": "mdr-extractor", "name": "job-mdr-extractor"},
+                    {"profile": "hmr-coordinator", "name": "job-hmr-coordinator"},
+                    {"profile": "hmr-extractor", "name": "job-hmr-extractor"},
                 ],
             }
         )
     )
-    assert routine_status(home)["paused"] == ["mdr-extractor/job-mdr-extractor"]
+    assert routine_status(home)["paused"] == ["hmr-extractor/job-hmr-extractor"]
     calls = []
 
     def fake_run(command, **_kwargs):
@@ -264,8 +264,8 @@ def test_routine_pause_controls_use_public_cron_commands(tmp_path, monkeypatch):
     _hermes(monkeypatch)
     monkeypatch.setattr("hermes_medical_research.hermes.subprocess.run", fake_run)
     result = set_routines_paused(False, hermes_home=home)
-    assert calls == [["/opt/hermes", "-p", "mdr-extractor", "cron", "resume", "ext1"]]
-    assert result["changed"] == ["mdr-extractor/job-mdr-extractor"]
+    assert calls == [["/opt/hermes", "-p", "hmr-extractor", "cron", "resume", "ext1"]]
+    assert result["changed"] == ["hmr-extractor/job-hmr-extractor"]
 
 
 def test_report_audits_are_grouped_per_record_and_bounded(tmp_path):
@@ -388,7 +388,7 @@ async def test_runner_renews_the_claim_while_a_slow_session_works(tmp_path, monk
         tmp_path, "slow-session", 1, clock=lambda: current[0]
     )
     await automation.tick()
-    actor = Actor("mdr-selector", "slow-session", "selector")
+    actor = Actor("hmr-selector", "slow-session", "selector")
     claim = automation.claim("select", actor)
     first_expiry = claim["expires_at"]
     current[0] += timedelta(minutes=50)
@@ -398,7 +398,7 @@ async def test_runner_renews_the_claim_while_a_slow_session_works(tmp_path, monk
     assert task["lease"]["expires_at"] == renewed["expires_at"]
     assert task["lease"]["renewals"] == 1
     with pytest.raises(ValidationError, match="different Hermes session"):
-        automation.renew(claim["claim_id"], Actor("mdr-selector", "other", "selector"))
+        automation.renew(claim["claim_id"], Actor("hmr-selector", "other", "selector"))
     current[0] += timedelta(minutes=61)
     with pytest.raises(ValidationError, match="already expired"):
         automation.renew(claim["claim_id"], actor)

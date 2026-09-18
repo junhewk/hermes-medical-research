@@ -24,23 +24,23 @@ from hermes_medical_research import __version__
 from hermes_medical_research.search.models import ValidationError
 
 PROFILE_SKILLS = {
-    "mdr-coordinator": (),
-    "mdr-searcher": ("medical-search",),
-    "mdr-selector": ("medical-select",),
-    "mdr-extractor": ("medical-extract",),
-    "mdr-synthesizer": ("medical-synthesize",),
-    "mdr-auditor": ("medical-synthesize",),
+    "hmr-coordinator": (),
+    "hmr-searcher": ("medical-search",),
+    "hmr-selector": ("medical-select",),
+    "hmr-extractor": ("medical-extract",),
+    "hmr-synthesizer": ("medical-synthesize",),
+    "hmr-auditor": ("medical-synthesize",),
 }
 DESCRIPTIONS = {
-    "mdr-coordinator": "Routes opaque medical-research task IDs; never performs specialist work.",
-    "mdr-searcher": "Builds and runs bounded, reproducible medical searches.",
-    "mdr-selector": "Screens and selects one supplied medical record at a time.",
-    "mdr-extractor": "Acquires full text, links studies, extracts results, and appraises them.",
-    "mdr-synthesizer": "Synthesizes one protocol outcome at a time.",
-    "mdr-auditor": "Independently audits frozen evidence and report assertions.",
+    "hmr-coordinator": "Routes opaque medical-research task IDs; never performs specialist work.",
+    "hmr-searcher": "Builds and runs bounded, reproducible medical searches.",
+    "hmr-selector": "Screens and selects one supplied medical record at a time.",
+    "hmr-extractor": "Acquires full text, links studies, extracts results, and appraises them.",
+    "hmr-synthesizer": "Synthesizes one protocol outcome at a time.",
+    "hmr-auditor": "Independently audits frozen evidence and report assertions.",
 }
-MANAGED = "mdr-managed.json"
-ROUTINES_MANAGED = "mdr-routines.json"
+MANAGED = "hmr-managed.json"
+ROUTINES_MANAGED = "hmr-routines.json"
 TOOLSETS = ["terminal", "file", "skills"]
 WORKER_ROLES = ("searcher", "selector", "extractor", "synthesizer", "auditor")
 ROLE_SKILLS = {
@@ -60,11 +60,11 @@ ROLE_COMMANDS = {
 # Per-session model-turn ceilings for one claimed Task.  An assessment reads each protocol
 # outcome's locations and edits one proposal; an audit group checks several targets.
 PROFILE_MAX_TURNS = {
-    "mdr-searcher": 8,
-    "mdr-selector": 16,
-    "mdr-extractor": 60,
-    "mdr-synthesizer": 40,
-    "mdr-auditor": 48,
+    "hmr-searcher": 8,
+    "hmr-selector": 16,
+    "hmr-extractor": 60,
+    "hmr-synthesizer": 40,
+    "hmr-auditor": 48,
 }
 WORKER_SCRIPT_TIMEOUT_SECONDS = 24 * 60 * 60
 HOST_ATTEMPTS = 3
@@ -192,7 +192,7 @@ def _desired_files(name: str, settings: dict[str, Any]) -> dict[str, bytes]:
         )
         if isinstance(value, str) and value.strip()
     }
-    if name != "mdr-coordinator":
+    if name != "hmr-coordinator":
         # Each worker Routine is a serial runner that may drain its queue for hours.
         cron["script_timeout_seconds"] = WORKER_SCRIPT_TIMEOUT_SECONDS
     config = {
@@ -237,7 +237,7 @@ def _check_ownership(root: Path, desired: dict[str, bytes]) -> None:
     for relative, expected in manifest["files"].items():
         path = root / relative
         if not path.is_file() or _sha256(path.read_bytes()) != expected:
-            raise ValidationError(f"managed Hermes profile was edited outside mdr: {path}")
+            raise ValidationError(f"managed Hermes profile was edited outside hmr: {path}")
     installed_skills = {
         path.parent.name for path in (root / "skills").glob("*/SKILL.md")
     }
@@ -401,7 +401,7 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
         # not a root config.yaml.  The coordinator received the same selected
         # provider settings at bootstrap, so it is the authoritative fallback.
         main_config = _source_settings(
-            _profile_root(home, "mdr-coordinator") / "config.yaml", home
+            _profile_root(home, "hmr-coordinator") / "config.yaml", home
         )
     raw_config: dict[str, Any] = {}
     config_path = home / "config.yaml"
@@ -412,7 +412,7 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
     multiplex = bool(
         isinstance(gateway, dict) and gateway.get("multiplex_profiles") is True
     )
-    mdr_executable = shutil.which("mdr")
+    hmr_executable = shutil.which("hmr")
     cron_doctors = []
     if executable:
         for name in PROFILE_SKILLS:
@@ -437,7 +437,7 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
             ready
             and routine_state["ready"]
             and multiplex
-            and mdr_executable is not None
+            and hmr_executable is not None
             and cron_ready
         ),
         "hermes": executable,
@@ -447,7 +447,7 @@ def doctor(*, hermes_home: Path | None = None) -> dict[str, Any]:
         "profiles": profiles,
         "routines": routine_state,
         "paused_routines": paused_routines,
-        "mdr": mdr_executable,
+        "hmr": hmr_executable,
         "gateway_multiplex_profiles": multiplex,
         "cron_schedulers": cron_doctors,
         "provider_selection": {
@@ -472,7 +472,7 @@ def _jobs(profile_root: Path) -> list[dict[str, Any]]:
 
 
 def _job_static(job: dict[str, Any]) -> dict[str, Any]:
-    """Project only mdr-owned fields; user inference pins and pause state stay outside."""
+    """Project only hmr-owned fields; user inference pins and pause state stay outside."""
     keys = (
         "name",
         "schedule",
@@ -528,19 +528,19 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
     from .automation import AutomationEngine
 
     quoted_store = shlex.quote(str(store))
-    quoted_mdr = shlex.quote(shutil.which("mdr") or "mdr")
+    quoted_hmr = shlex.quote(shutil.which("hmr") or "hmr")
     quoted_hermes = shlex.quote(shutil.which("hermes") or "hermes")
     scripts: dict[str, bytes] = {}
     jobs: list[dict[str, Any]] = []
-    tick_script = "mdr-work-tick.sh"
-    scripts[f"mdr-coordinator/scripts/{tick_script}"] = (
+    tick_script = "hmr-work-tick.sh"
+    scripts[f"hmr-coordinator/scripts/{tick_script}"] = (
         "#!/bin/sh\n"
-        f"exec {quoted_mdr} --store {quoted_store} --actor mdr-coordinator work cron-tick\n"
+        f"exec {quoted_hmr} --store {quoted_store} --actor hmr-coordinator work cron-tick\n"
     ).encode()
     jobs.append(
         {
-            "profile": "mdr-coordinator",
-            "name": "mdr-work-tick",
+            "profile": "hmr-coordinator",
+            "name": "hmr-work-tick",
             "schedule": "* * * * *",
             "prompt": "",
             "script": tick_script,
@@ -551,30 +551,30 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
         }
     )
     for role in WORKER_ROLES:
-        profile = f"mdr-{role}"
-        script = f"mdr-work-{role}.sh"
+        profile = f"hmr-{role}"
+        script = f"hmr-work-{role}.sh"
         scripts[f"{profile}/scripts/{script}"] = (
             "#!/bin/sh\n"
-            f"exec {quoted_mdr} --store {quoted_store} hermes drain --role {role} "
+            f"exec {quoted_hmr} --store {quoted_store} hermes drain --role {role} "
             f"--hermes-home {shlex.quote(str(home))} "
             f"--hermes-executable {quoted_hermes}\n"
         ).encode()
         jobs.append(
             {
                 "profile": profile,
-                "name": f"mdr-work-{role}",
+                "name": f"hmr-work-{role}",
                 "schedule": "* * * * *",
                 "prompt": "",
                 "script": script,
                 "no_agent": True,
                 "deliver": None,
-                "failure_deliver": "bot-chat:mdr-coordinator",
+                "failure_deliver": "bot-chat:hmr-coordinator",
                 "skills": [],
                 "paused": False,
             }
         )
     automation = AutomationEngine(store)
-    coordinator_config = _profile_root(home, "mdr-coordinator") / "config.yaml"
+    coordinator_config = _profile_root(home, "hmr-coordinator") / "config.yaml"
     config = (
         yaml.safe_load(coordinator_config.read_text(encoding="utf-8")) or {}
         if coordinator_config.is_file()
@@ -592,17 +592,17 @@ def _routine_specs(store: Path, home: Path) -> tuple[list[dict[str, Any]], dict[
                 f"Review {view['name']} timezone {schedule['timezone']} differs from "
                 f"Coordinator timezone {coordinator_timezone}"
             )
-        script = f"mdr-review-{view['name']}.sh"
-        scripts[f"mdr-coordinator/scripts/{script}"] = (
+        script = f"hmr-review-{view['name']}.sh"
+        scripts[f"hmr-coordinator/scripts/{script}"] = (
             "#!/bin/sh\n"
-            f"exec {quoted_mdr} --store {quoted_store} review run-now "
+            f"exec {quoted_hmr} --store {quoted_store} review run-now "
             f"{shlex.quote(view['name'])} "
             "--scheduled\n"
         ).encode()
         jobs.append(
             {
-                "profile": "mdr-coordinator",
-                "name": f"mdr-review-{view['name']}",
+                "profile": "hmr-coordinator",
+                "name": f"hmr-review-{view['name']}",
                 "schedule": schedule["expression"],
                 "prompt": "",
                 "script": script,
@@ -640,7 +640,7 @@ def _create_routine(executable: str, home: Path, spec: dict[str, Any]) -> None:
     if spec.get("failure_deliver"):
         command.extend(["--failure-deliver", spec["failure_deliver"]])
     if spec.get("paused"):
-        command.extend(["--paused", "--paused-reason", "Review is paused in mdr"])
+        command.extend(["--paused", "--paused-reason", "Review is paused in hmr"])
     completed = subprocess.run(
         command,
         check=False,
@@ -770,11 +770,11 @@ def _invoke_claim(
         **{key: claim[key] for key in commands if key in claim},
     }
     skill = ROLE_SKILLS[role]
-    profile = f"mdr-{role}"
+    profile = f"hmr-{role}"
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
-        prefix=f"mdr-{role}-",
+        prefix=f"hmr-{role}-",
         suffix=".json",
         delete=False,
     ) as handle:
@@ -845,7 +845,7 @@ async def drain(
         return {"state": "already_running", "role": role, "processed": 0, "failed": []}
     processed = 0
     failed: list[dict[str, Any]] = []
-    profile = f"mdr-{role}"
+    profile = f"hmr-{role}"
     try:
         automation = AutomationEngine(root)
         claim_errors = 0
@@ -1049,7 +1049,7 @@ def routines(
             observed = _sha256(path.read_bytes()) if path.is_file() else None
             desired = _sha256(scripts[key]) if key in scripts else None
             if observed not in {checksum, desired}:
-                raise ValidationError(f"managed routine script was edited outside mdr: {path}")
+                raise ValidationError(f"managed routine script was edited outside hmr: {path}")
         for key in set(previous["scripts"]) - set(scripts):
             profile, relative = key.split("/", 1)
             (_profile_root(home, profile) / relative).unlink(missing_ok=True)
@@ -1107,7 +1107,7 @@ def routines(
             observed = previous_jobs[key].get("observed")
             if observed is not None and _job_static(existing[0]) != observed:
                 raise ValidationError(
-                    f"managed cron job was edited outside mdr: "
+                    f"managed cron job was edited outside hmr: "
                     f"{spec['profile']}/{spec['name']}"
                 )
             if previous_jobs[key].get("spec_digest") != desired_digest:

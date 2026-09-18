@@ -1,4 +1,4 @@
-"""The deep Run/Task Module behind the small ``mdr`` command interface."""
+"""The deep Run/Task Module behind the small ``hmr`` command interface."""
 
 from __future__ import annotations
 
@@ -67,13 +67,23 @@ RUN_ID_PREFIX = "run-"
 TASK_ID_PREFIX = "task-"
 
 ROLE_PROFILES = {
-    "coordinator": "mdr-coordinator",
-    "searcher": "mdr-searcher",
-    "selector": "mdr-selector",
-    "extractor": "mdr-extractor",
-    "synthesizer": "mdr-synthesizer",
-    "auditor": "mdr-auditor",
+    "coordinator": "hmr-coordinator",
+    "searcher": "hmr-searcher",
+    "selector": "hmr-selector",
+    "extractor": "hmr-extractor",
+    "synthesizer": "hmr-synthesizer",
+    "auditor": "hmr-auditor",
 }
+# 0.5.x named every profile ``mdr-*``. Receipts in existing Runs carry those strings, so they still
+# resolve to their role; nothing writes them again.
+LEGACY_ROLE_PROFILES = {role: f"mdr-{name}" for role, name in (
+    ("coordinator", "coordinator"),
+    ("searcher", "searcher"),
+    ("selector", "selector"),
+    ("extractor", "extractor"),
+    ("synthesizer", "synthesizer"),
+    ("auditor", "auditor"),
+)}
 COMMAND_ROLES = {
     "search": "searcher",
     "select": "selector",
@@ -95,7 +105,8 @@ KIND_ROLES = {
 
 def data_home(environ: dict[str, str] | None = None) -> Path:
     values = environ if environ is not None else os.environ
-    configured = values.get("MDR_HOME")
+    # MDR_HOME is the 0.5.x spelling, honored so existing operator scripts keep their store.
+    configured = values.get("HMR_HOME") or values.get("MDR_HOME")
     if configured:
         root = Path(configured).expanduser()
     else:
@@ -106,13 +117,13 @@ def data_home(environ: dict[str, str] | None = None) -> Path:
             else (Path.home() / ".local" / "share" / "hermes-medical-research")
         )
     if not root.is_absolute():
-        raise ValidationError("MDR_HOME and XDG_DATA_HOME must resolve to absolute paths")
+        raise ValidationError("HMR_HOME and XDG_DATA_HOME must resolve to absolute paths")
     return root.resolve()
 
 
-def mdr_command() -> str:
-    """The resolved ``mdr`` executable, so Hermes sessions never depend on a reduced PATH."""
-    return shlex.quote(shutil.which("mdr") or "mdr")
+def hmr_command() -> str:
+    """The resolved ``hmr`` executable, so Hermes sessions never depend on a reduced PATH."""
+    return shlex.quote(shutil.which("hmr") or "hmr")
 
 
 def _safe_id(value: str, prefix: str) -> str:
@@ -155,7 +166,7 @@ class Actor:
             (
                 role_name
                 for role_name, role_profile in ROLE_PROFILES.items()
-                if normalized in {role_name, role_profile}
+                if normalized in {role_name, role_profile, LEGACY_ROLE_PROFILES[role_name]}
             ),
             "",
         )
@@ -458,7 +469,7 @@ class TaskEngine:
             )
             ledger["state"] = _state_for_role(task["role"])
             self.workspace.save(manifest)
-            base = f"{mdr_command()} --actor {ROLE_PROFILES[task['role']]}"
+            base = f"{hmr_command()} --actor {ROLE_PROFILES[task['role']]}"
             view = {
                 "run_id": self.run_id,
                 "task_id": task_id,
@@ -1320,7 +1331,7 @@ class TaskEngine:
                 "already set) and its appraisal, copy the pair with a new extraction_id for each "
                 "further estimand, and set the outcome's disposition status to extracted. "
                 "Otherwise set status to not_reported or not_applicable with a rationale and the "
-                "inspected_locations you read. Leave unused scaffold rows unchanged; mdr removes "
+                "inspected_locations you read. Leave unused scaffold rows unchanged; hmr removes "
                 "them. Submission is rejected while any outcome is undecided."
             )
         else:
@@ -1609,7 +1620,7 @@ class TaskEngine:
             "proposal_path": str(self.workspace.path / proposal_file),
             "source_count": len(allowed_sources),
             "source_list": (
-                f"{mdr_command()} --actor {ROLE_PROFILES[role]} source list {self.run_id} {task_id}"
+                f"{hmr_command()} --actor {ROLE_PROFILES[role]} source list {self.run_id} {task_id}"
             ),
             **spec["packet_data"],
         }
@@ -1821,7 +1832,7 @@ class TaskEngine:
                 elif supplied and sorted(supplied) != ids:
                     problems.append(
                         f"outcome {outcome!r} extraction_ids must be {', '.join(ids)} "
-                        "(or leave the list empty for mdr to fill)"
+                        "(or leave the list empty for hmr to fill)"
                     )
                 item["extraction_ids"] = ids
                 continue
@@ -2003,7 +2014,7 @@ class TaskEngine:
             "state": "plan_recorded",
             "plan_digest": digest(plan),
             "next": (
-                f"{mdr_command()} --actor mdr-searcher search run {self.run_id} {task['task_id']}"
+                f"{hmr_command()} --actor hmr-searcher search run {self.run_id} {task['task_id']}"
             ),
         }
 

@@ -1,6 +1,6 @@
 ---
 name: medical-synthesize
-description: Synthesize one outcome or independently audit one frozen evidence group through mdr.
+description: Synthesize one outcome or independently audit one frozen evidence group through hmr.
 metadata:
   hermes:
     requires_toolsets: [terminal, file]
@@ -10,8 +10,8 @@ metadata:
 
 You work on exactly one claimed task. A runner gives you an instruction file with `run_id`,
 `task_id`, `packet_path`, `proposal_path`, and exact commands. Without one, run the claim command
-matching your profile: `mdr --actor mdr-synthesizer synthesize claim` or
-`mdr --actor mdr-auditor audit claim`. If it returns `state: idle`, return `[SILENT]`. Use only the
+matching your profile: `hmr --actor hmr-synthesizer synthesize claim` or
+`hmr --actor hmr-auditor audit claim`. If it returns `state: idle`, return `[SILENT]`. Use only the
 packet, proposal, and supplied commands, replacing only their uppercase placeholders.
 
 The Synthesizer completes exactly one assigned outcome. The packet summarizes each bound extraction

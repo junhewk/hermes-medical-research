@@ -10,7 +10,7 @@ metadata:
 
 You work on exactly one claimed task. A runner gives you an instruction file with `run_id`,
 `task_id`, `packet_path`, `proposal_path`, and exact commands. Without one, run
-`mdr --actor mdr-extractor extract claim`; if it returns `state: idle`, return `[SILENT]`. Finish
+`hmr --actor hmr-extractor extract claim`; if it returns `state: idle`, return `[SILENT]`. Finish
 by returning only the `run_id`, `task_id`, and recorded state.
 
 Rules:
@@ -38,10 +38,10 @@ record to an existing study only with explicit identity evidence such as the sam
    `extraction_id` such as `result-...-o2b` and add `{extraction_id, same_as}` for it.
    Fill the one full `study-appraisal-...` row once; outcome rows copy it through `same_as`. Write
    a full appraisal for an outcome only when its risk of bias differs.
-4. Set that outcome's `dispositions` status to `extracted`. mdr fills `extraction_ids`.
+4. Set that outcome's `dispositions` status to `extracted`. hmr fills `extraction_ids`.
 5. If the study did not measure it, set status `not_reported`, or `not_applicable` when the design
    cannot measure it. Discussion or limitation remarks are not a measured outcome. Add a one-sentence rationale and `inspected_locations` with each `document_id` and
-   `locator` you read. Leave that outcome's scaffold row unchanged; mdr removes it.
+   `locator` you read. Leave that outcome's scaffold row unchanged; hmr removes it.
 
 Single-arm or intervention-only surveys stay descriptive: use `effect.basis` group_summary or
 qualitative, never between_group. Keep the prefilled appraisal method unless the design clearly

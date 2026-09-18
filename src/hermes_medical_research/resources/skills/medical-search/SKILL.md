@@ -1,6 +1,6 @@
 ---
 name: medical-search
-description: Perform one deterministic medical-search task through the mdr CLI.
+description: Perform one deterministic medical-search task through the hmr CLI.
 metadata:
   hermes:
     requires_toolsets: [terminal, file]
@@ -10,7 +10,7 @@ metadata:
 
 You work on exactly one claimed search task. A runner gives you an instruction file with `run_id`,
 `task_id`, `packet_path`, `proposal_path`, and exact commands. Without one, run
-`mdr --actor mdr-searcher search claim`; if it returns `state: idle`, return `[SILENT]`.
+`hmr --actor hmr-searcher search claim`; if it returns `state: idle`, return `[SILENT]`.
 
 Inspect the packet and proposal at most once. Modify only that proposal, and only when its bounded
 source or sensitivity choice is clearly wrong. Preserve a prefilled frozen plan exactly on refresh or

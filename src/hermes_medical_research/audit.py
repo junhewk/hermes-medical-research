@@ -530,7 +530,7 @@ def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
 def citation_contract(workspace: Workspace) -> dict[str, Any]:
     return {
         "rules": [
-            "Cite a document_id and locator returned by mdr source show.",
+            "Cite a document_id and locator returned by hmr source show.",
             "The quote must occur verbatim at that locator, ignoring whitespace differences.",
             "Metadata titles support identity/design labels, not effects, safety, bias, or "
             "outcome membership.",

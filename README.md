@@ -1,7 +1,7 @@
 # Hermes Medical Research
 
 Hermes Medical Research is a deterministic evidence workflow operated by isolated Hermes bots. The
-bots perform bounded semantic tasks; the `mdr` CLI owns the corpus, schemas, citations, digests,
+bots perform bounded semantic tasks; the `hmr` CLI owns the corpus, schemas, citations, digests,
 state transitions, audit independence, and final completeness checks.
 
 This is a normal Python package, not a Hermes, Codex, or Claude plugin.
@@ -19,14 +19,14 @@ pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.11
 The package exposes one executable:
 
 ```bash
-mdr --version
+hmr --version
 ```
 
 ## Architecture
 
 | Layer | Responsibility |
 | --- | --- |
-| Hermes skill | Tells one role what bounded task to perform and which `mdr` commands to call |
+| Hermes skill | Tells one role what bounded task to perform and which `hmr` commands to call |
 | CLI/core | Enforces schemas, exact scope, citations, digests, receipts, legal transitions, and completion |
 | Bot profile | Supplies role separation, model/provider choice, memory, configuration, and session identity |
 | Artifact store | Carries immutable results between roles; bots exchange only `run_id` and `task_id` |
@@ -41,30 +41,30 @@ Four checked-in skills serve six profiles:
   skills.
 
 The default artifact root is `$XDG_DATA_HOME/hermes-medical-research`, falling back to
-`~/.local/share/hermes-medical-research`. Set `MDR_HOME` to an absolute path for an isolated store.
+`~/.local/share/hermes-medical-research`. Set `HMR_HOME` to an absolute path for an isolated store.
 
 ## Bootstrap Hermes profiles
 
 Preview the six-profile installation without changing anything:
 
 ```bash
-mdr hermes bootstrap
+hmr hermes bootstrap
 ```
 
 Apply it explicitly:
 
 ```bash
-mdr hermes bootstrap --apply
+hmr hermes bootstrap --apply
 ```
 
 To update only the bounded Searcher profile while leaving other managed profiles untouched:
 
 ```bash
-mdr hermes bootstrap --profile mdr-searcher --apply
+hmr hermes bootstrap --profile hmr-searcher --apply
 ```
 
-Bootstrap creates clean `mdr-coordinator`, `mdr-searcher`, `mdr-selector`, `mdr-extractor`,
-`mdr-synthesizer`, and `mdr-auditor` profiles through Hermes's public profile command. It copies only
+Bootstrap creates clean `hmr-coordinator`, `hmr-searcher`, `hmr-selector`, `hmr-extractor`,
+`hmr-synthesizer`, and `hmr-auditor` profiles through Hermes's public profile command. It copies only
 the current model/provider/timezone selection and enables the terminal, file, and skills toolsets. It
 refuses to overwrite unmanaged profiles or managed files edited after installation.
 
@@ -73,12 +73,12 @@ added while Hermes Desktop was connected, use **Reconnect gateway** to refresh i
 the cron fleet, then apply it explicitly after enabling gateway profile multiplexing:
 
 ```bash
-mdr hermes routines
-mdr hermes routines --apply
+hmr hermes routines
+hmr hermes routines --apply
 ```
 
 This creates six base Routines, all script-only: a Coordinator tick and one serial runner per
-specialist (`mdr hermes drain --role ROLE`). A runner claims exactly one Task, opens one fresh Hermes
+specialist (`hmr hermes drain --role ROLE`). A runner claims exactly one Task, opens one fresh Hermes
 session for it with an instruction file of exact commands, and claims the next Task immediately after
 acceptance until its queue is empty. A session that cannot finish its Task is failed with backoff and
 the runner moves on. Full-text acquisition has no semantic choice and is submitted without a model
@@ -89,86 +89,86 @@ Each session has a model-turn ceiling set in its profile:
 
 | Profile | Turn ceiling |
 | --- | --- |
-| `mdr-searcher` | 8 |
-| `mdr-selector` | 16 |
-| `mdr-extractor` | 60 |
-| `mdr-synthesizer` | 40 |
-| `mdr-auditor` | 48 |
+| `hmr-searcher` | 8 |
+| `hmr-selector` | 16 |
+| `hmr-extractor` | 60 |
+| `hmr-synthesizer` | 40 |
+| `hmr-auditor` | 48 |
 
-Verify profiles, `mdr`, multiplexing, cron schedulers, managed scripts/jobs, cron health, and paused
+Verify profiles, `hmr`, multiplexing, cron schedulers, managed scripts/jobs, cron health, and paused
 Routines with:
 
 ```bash
-mdr hermes doctor
+hmr hermes doctor
 ```
 
 Hermes keeps its own pause state for each Routine. Inspect or change all managed Routines at once:
 
 ```bash
-mdr hermes routines --status
-mdr hermes routines --pause-all
-mdr hermes routines --resume-all
+hmr hermes routines --status
+hmr hermes routines --pause-all
+hmr hermes routines --resume-all
 ```
 
 ## Workflow
 
-For normal use, open `mdr-coordinator` in the Bot roster and describe the research request in ordinary
+For normal use, open `hmr-coordinator` in the Bot roster and describe the research request in ordinary
 language. The Coordinator confirms the protocol and creates a human-named Review. Cron workers claim
 bounded Tasks directly; no Bot or human relays IDs.
 
 One-off and living Reviews use the same interface:
 
 ```bash
-mdr review create --name exercise-review \
+hmr review create --name exercise-review \
   --request examples/research-protocol.json --schedule once
 
-mdr review create --name living-exercise \
+hmr review create --name living-exercise \
   --request examples/research-protocol.json \
   --schedule "0 3 * * 1" --timezone Asia/Seoul
 
-mdr review list
-mdr review status living-exercise
-mdr review pause living-exercise
-mdr review resume living-exercise
-mdr --actor mdr-coordinator review retry living-exercise \
+hmr review list
+hmr review status living-exercise
+hmr review pause living-exercise
+hmr review resume living-exercise
+hmr --actor hmr-coordinator review retry living-exercise \
   --reason "Workers were restarted after an outage"
-mdr --actor mdr-coordinator review cancel living-exercise \
+hmr --actor hmr-coordinator review cancel living-exercise \
   --reason "Replace a blocked or defective Cycle"
-mdr review run-now living-exercise
+hmr review run-now living-exercise
 ```
 
 Pausing a Review stops new claims and never marks its waiting Tasks abandoned; resuming restarts that
 clock. A pending Task that no worker claims within 95 active minutes blocks the Cycle. `review retry`
 reopens a blocked latest Cycle in place: blocked Tasks return to the queue with fresh attempts and
 keep any partial proposal edits, and all accepted work is kept. `review run-now` instead starts a new
-Cycle on a new Run. An immutable protocol change uses `mdr review fork`; a standalone Run can be
-brought under human status management with `mdr review adopt`. A living Review starts its first
+Cycle on a new Run. An immutable protocol change uses `hmr review fork`; a standalone Run can be
+brought under human status management with `hmr review adopt`. A living Review starts its first
 Cycle immediately. Schedule fires during an active Cycle coalesce into one catch-up Cycle.
 
 For scripted or diagnostic use, create a Run from a versioned PICO/PCC request:
 
 ```bash
-mdr run create --request examples/research-protocol.json
+hmr run create --request examples/research-protocol.json
 ```
 
 The Coordinator can inspect a standalone Run diagnostically:
 
 ```bash
-mdr --actor mdr-coordinator run next RUN_ID
+hmr --actor hmr-coordinator run next RUN_ID
 ```
 
 Serial runners claim work for their sessions. For diagnostics, a worker profile can claim directly:
 
 ```bash
-mdr search claim
-mdr select claim
-mdr extract claim
-mdr synthesize claim
-mdr audit claim
+hmr search claim
+hmr select claim
+hmr extract claim
+hmr synthesize claim
+hmr audit claim
 ```
 
 Each claim returns a bounded packet/proposal, a 60-minute session-bound token, and exact source,
-submit, and failure commands that name the resolved `mdr` executable. Failures retry after 5 and 30
+submit, and failure commands that name the resolved `hmr` executable. Failures retry after 5 and 30
 minutes; the third blocks the Cycle. Accepting any Task routes the next Task at once, so the
 Coordinator tick is a safety net rather than a one-Task-per-minute throttle. The Searcher claim also
 returns one `search execute` command that records the initial plan and performs retrieval in one
@@ -178,21 +178,21 @@ it requires a new Review fork.
 The older explicit-ID commands remain operator diagnostics for non-managed Runs:
 
 ```bash
-mdr search next RUN_ID TASK_ID
-mdr search execute RUN_ID TASK_ID --from PROPOSAL.json
-mdr search run RUN_ID TASK_ID
+hmr search next RUN_ID TASK_ID
+hmr search execute RUN_ID TASK_ID --from PROPOSAL.json
+hmr search run RUN_ID TASK_ID
 
-mdr select next RUN_ID TASK_ID
-mdr select submit RUN_ID TASK_ID --from PROPOSAL.json
+hmr select next RUN_ID TASK_ID
+hmr select submit RUN_ID TASK_ID --from PROPOSAL.json
 
-mdr extract next RUN_ID TASK_ID
-mdr extract submit RUN_ID TASK_ID --from PROPOSAL.json
+hmr extract next RUN_ID TASK_ID
+hmr extract submit RUN_ID TASK_ID --from PROPOSAL.json
 
-mdr synthesize next RUN_ID TASK_ID
-mdr synthesize submit RUN_ID TASK_ID --from PROPOSAL.json
+hmr synthesize next RUN_ID TASK_ID
+hmr synthesize submit RUN_ID TASK_ID --from PROPOSAL.json
 
-mdr audit next RUN_ID TASK_ID
-mdr audit submit RUN_ID TASK_ID --from PROPOSAL.json
+hmr audit next RUN_ID TASK_ID
+hmr audit submit RUN_ID TASK_ID --from PROPOSAL.json
 ```
 
 Hermes profiles normally provide actor/session identity. `--actor` exists for deterministic testing
@@ -202,10 +202,10 @@ Task's documents by search words with short snippets, and `read` returns one loc
 verbatim quotes. `show` pages a whole source, including logical rows, in 16 KiB pages:
 
 ```bash
-mdr source find RUN_ID TASK_ID Mini-CEX satisfaction survey
-mdr source read RUN_ID TASK_ID DOCUMENT_ID table:1
-mdr source list RUN_ID TASK_ID --page 1
-mdr source show RUN_ID TASK_ID SOURCE_ID --page 1
+hmr source find RUN_ID TASK_ID Mini-CEX satisfaction survey
+hmr source read RUN_ID TASK_ID DOCUMENT_ID table:1
+hmr source list RUN_ID TASK_ID --page 1
+hmr source show RUN_ID TASK_ID SOURCE_ID --page 1
 ```
 
 ## Outcome decisions
@@ -223,8 +223,8 @@ per-outcome completeness was not verified.
 After all audit groups pass:
 
 ```bash
-mdr run status RUN_ID
-mdr --actor mdr-coordinator finalize RUN_ID
+hmr run status RUN_ID
+hmr --actor hmr-coordinator finalize RUN_ID
 ```
 
 For review-preparation mode, supply explicit retrieval and full-text limits (or `all`). Search
@@ -266,7 +266,7 @@ the prior report and skips downstream inference. Changed audit targets always re
 Copy a v0.4 evidence-schema workspace into the shared store:
 
 ```bash
-mdr run migrate /absolute/path/to/v0.4-run
+hmr run migrate /absolute/path/to/v0.4-run
 ```
 
 The source is never modified. Existing native-review, completion, verification, and review artifacts

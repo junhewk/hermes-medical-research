@@ -28,9 +28,9 @@ jobs:
       - name: Wheel-only smoke test
         # Dry-run bootstrap and routine planning must never touch the runner's real data home.
         run: |
-          export MDR_HOME="$RUNNER_TEMP/mdr-store" HERMES_HOME="$RUNNER_TEMP/hermes-home"
+          export HMR_HOME="$RUNNER_TEMP/hmr-store" HERMES_HOME="$RUNNER_TEMP/hermes-home"
           uv venv "$RUNNER_TEMP/wheel-venv"
           uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" dist/*.whl
-          "$RUNNER_TEMP/wheel-venv/bin/mdr" --version
-          "$RUNNER_TEMP/wheel-venv/bin/mdr" hermes bootstrap
-          "$RUNNER_TEMP/wheel-venv/bin/mdr" hermes routines
+          "$RUNNER_TEMP/wheel-venv/bin/hmr" --version
+          "$RUNNER_TEMP/wheel-venv/bin/hmr" hermes bootstrap
+          "$RUNNER_TEMP/wheel-venv/bin/hmr" hermes routines

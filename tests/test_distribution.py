@@ -18,7 +18,7 @@ def test_distribution_has_one_executable_and_new_identity():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert project["name"] == "hermes-medical-research"
     assert project["version"] == __version__ == "0.5.11"
-    assert project["scripts"] == {"mdr": "hermes_medical_research.cli:main"}
+    assert project["scripts"] == {"hmr": "hermes_medical_research.cli:main"}
     assert set(parser()._subparsers._group_actions[0].choices) == {
         "run",
         "search",
@@ -63,12 +63,12 @@ def test_exactly_four_small_hermes_skills_are_checked_in():
 
 def test_profiles_cover_every_role_without_a_plugin_lifecycle():
     assert set(PROFILE_SKILLS) == {
-        "mdr-coordinator",
-        "mdr-searcher",
-        "mdr-selector",
-        "mdr-extractor",
-        "mdr-synthesizer",
-        "mdr-auditor",
+        "hmr-coordinator",
+        "hmr-searcher",
+        "hmr-selector",
+        "hmr-extractor",
+        "hmr-synthesizer",
+        "hmr-auditor",
     }
     assert not any((ROOT / ".codex-plugin").glob("*"))
     assert not any((ROOT / ".claude-plugin").glob("*"))

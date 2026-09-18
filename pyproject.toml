@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.scripts]
-mdr = "hermes_medical_research.cli:main"
+hmr = "hermes_medical_research.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "jsonschema>=4"]

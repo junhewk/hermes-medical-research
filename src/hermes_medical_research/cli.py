@@ -1,4 +1,4 @@
-"""The narrow, deterministic ``mdr`` command-line interface."""
+"""The narrow, deterministic ``hmr`` command-line interface."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .tasks import COMMAND_ROLES, Actor, RunCatalog, TaskEngine
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        prog="mdr",
+        prog="hmr",
         description="Deterministic artifact boundary for Hermes medical-research bots.",
     )
     root.add_argument("--version", action="version", version=__version__)
@@ -149,12 +149,12 @@ def parser() -> argparse.ArgumentParser:
     bootstrap.add_argument(
         "--profile",
         choices=(
-            "mdr-coordinator",
-            "mdr-searcher",
-            "mdr-selector",
-            "mdr-extractor",
-            "mdr-synthesizer",
-            "mdr-auditor",
+            "hmr-coordinator",
+            "hmr-searcher",
+            "hmr-selector",
+            "hmr-extractor",
+            "hmr-synthesizer",
+            "hmr-auditor",
         ),
     )
     doctor_command = hermes_commands.add_parser("doctor")

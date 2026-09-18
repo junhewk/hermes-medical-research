@@ -31,7 +31,7 @@ from .query import compile_strategy, default_sources
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mdr-search-core",
+        prog="hmr-search-core",
         description="Internal medical literature retrieval commands.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

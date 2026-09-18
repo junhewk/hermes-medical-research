@@ -52,7 +52,7 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
     assert first_probe["state"] == "ready"
     assert automation.probe("searcher") == first_probe
 
-    actor = Actor("mdr-searcher", "cron-session", "searcher")
+    actor = Actor("hmr-searcher", "cron-session", "searcher")
     claim = automation.claim("search", actor)
     assert claim["attempt"] == 1
     assert "--claim-token" in claim["submit"]
@@ -74,7 +74,7 @@ async def test_review_tick_claim_and_capability_bound_submission(tmp_path: Path)
             "search",
             claim["task_id"],
             Path(claim["proposal_path"]),
-            Actor("mdr-searcher", "replacement", "searcher"),
+            Actor("hmr-searcher", "replacement", "searcher"),
             claim_token=claim["claim_token"],
         )
     accepted = await engine.submit(
@@ -102,7 +102,7 @@ async def test_selector_acceptance_immediately_routes_the_next_record(tmp_path: 
     workspace.attach(search.path)
     assert (await automation.tick())["routed"] == 1
 
-    actor = Actor("mdr-selector", "continuous-session", "selector")
+    actor = Actor("hmr-selector", "continuous-session", "selector")
     claim = automation.claim("select", actor)
     proposal_path = Path(claim["proposal_path"])
     proposal = json.loads(proposal_path.read_text())
@@ -135,12 +135,12 @@ async def test_coordinator_cancels_an_active_cycle_with_audit_trail(tmp_path: Pa
         timezone="Asia/Seoul",
     )
     await automation.tick()
-    searcher = Actor("mdr-searcher", "cancel-session", "searcher")
+    searcher = Actor("hmr-searcher", "cancel-session", "searcher")
     claim = automation.claim("search", searcher)
 
     result = automation.cancel_review(
         "cancelled-review",
-        Actor("mdr-coordinator", "operator-session", "coordinator"),
+        Actor("hmr-coordinator", "operator-session", "coordinator"),
         reason="Replace the run affected by the lost search reservation defect.",
     )
     assert result["state"] == "paused"
@@ -177,7 +177,7 @@ async def test_three_attempts_use_bounded_backoff_then_block(tmp_path: Path):
         timezone="Asia/Seoul",
     )
     await automation.tick()
-    actor = Actor("mdr-searcher", "retry-session", "searcher")
+    actor = Actor("hmr-searcher", "retry-session", "searcher")
 
     first = automation.claim("search", actor)
     failed = automation.fail(first["claim_id"], actor, code="fixture", message="one")
@@ -203,12 +203,12 @@ def test_routines_are_dry_run_first_and_plan_six_base_jobs(tmp_path: Path):
     assert not result["applied"]
     assert len(result["jobs"]) == 6
     assert {job["name"] for job in result["jobs"]} == {
-        "mdr-work-tick",
-        "mdr-work-searcher",
-        "mdr-work-selector",
-        "mdr-work-extractor",
-        "mdr-work-synthesizer",
-        "mdr-work-auditor",
+        "hmr-work-tick",
+        "hmr-work-searcher",
+        "hmr-work-selector",
+        "hmr-work-extractor",
+        "hmr-work-synthesizer",
+        "hmr-work-auditor",
     }
     for job in result["jobs"]:
         assert job["no_agent"] and job["prompt"] == "" and job["skills"] == []
@@ -322,15 +322,15 @@ def test_serial_selector_honors_a_failure_recorded_by_the_host(tmp_path: Path, m
     assert len(task["automation_failures"]) == 1
 
 
-def test_routine_scripts_pin_the_mdr_executable(tmp_path: Path, monkeypatch):
-    executable = tmp_path / "bin" / "mdr"
+def test_routine_scripts_pin_the_hmr_executable(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "bin" / "hmr"
     executable.parent.mkdir()
     executable.touch()
     monkeypatch.setattr(
         "hermes_medical_research.hermes.shutil.which",
         lambda name: (
             str(executable)
-            if name == "mdr"
+            if name == "hmr"
             else "/opt/hermes/bin/hermes"
             if name == "hermes"
             else None
@@ -342,14 +342,14 @@ def test_routine_scripts_pin_the_mdr_executable(tmp_path: Path, monkeypatch):
     assert scripts
     assert all(f"exec {executable} ".encode() in content for content in scripts.values())
     for role in ("searcher", "selector", "extractor", "synthesizer", "auditor"):
-        script = scripts[f"mdr-{role}/scripts/mdr-work-{role}.sh"]
+        script = scripts[f"hmr-{role}/scripts/hmr-work-{role}.sh"]
         assert f"hermes drain --role {role} ".encode() in script
         assert b"--hermes-executable /opt/hermes/bin/hermes" in script
 
 
 def test_living_review_adds_real_cadence_routine(tmp_path: Path):
     store = tmp_path / "store"
-    coordinator = tmp_path / "hermes" / "profiles" / "mdr-coordinator"
+    coordinator = tmp_path / "hermes" / "profiles" / "hmr-coordinator"
     coordinator.mkdir(parents=True)
     (coordinator / "config.yaml").write_text("timezone: Asia/Seoul\n")
     AutomationEngine(store).create_review(
@@ -359,7 +359,7 @@ def test_living_review_adds_real_cadence_routine(tmp_path: Path):
         timezone="Asia/Seoul",
     )
     result = routines(hermes_home=tmp_path / "hermes", store=store)
-    scheduled = next(job for job in result["jobs"] if job["name"] == "mdr-review-living-exercise")
+    scheduled = next(job for job in result["jobs"] if job["name"] == "hmr-review-living-exercise")
     assert scheduled["schedule"] == "0 3 * * 1"
     assert scheduled["no_agent"]
 
@@ -379,7 +379,7 @@ async def test_claim_returns_token_bound_find_and_read_commands(tmp_path: Path):
     workspace.attach(search.path)
     await automation.tick()
 
-    claim = automation.claim("select", Actor("mdr-selector", "find-session", "selector"))
+    claim = automation.claim("select", Actor("hmr-selector", "find-session", "selector"))
     for key in ("source_list", "source_show", "source_find", "source_read"):
         assert f"--claim-token {claim['claim_token']}" in claim[key]
     assert claim["source_find"].endswith("source find " f"{run_id} {claim['task_id']} SEARCH WORDS")

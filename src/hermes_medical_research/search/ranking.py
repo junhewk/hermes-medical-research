@@ -8,7 +8,7 @@ from typing import Any
 
 from .models import ConceptBlock, ConceptGroup, Question
 
-RANKING_VERSION = "mdr-v2-grouped"
+RANKING_VERSION = "hmr-v2-grouped"
 STOP_WORDS = {
     "about",
     "adult",

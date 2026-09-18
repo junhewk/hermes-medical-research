@@ -33,11 +33,11 @@ def modern_workspace(tmp_path):
     manifest["run_id"] = "run-" + "a" * 32
     manifest["task_engine"] = _empty_ledger()
     manifest["task_engine"]["authors"] = {
-        "screening": ["mdr-selector"],
-        "coverage": ["mdr-selector"],
-        "studies": ["mdr-extractor"],
-        "assessment": ["mdr-extractor"],
-        "synthesis": ["mdr-synthesizer"],
+        "screening": ["hmr-selector"],
+        "coverage": ["hmr-selector"],
+        "studies": ["hmr-extractor"],
+        "assessment": ["hmr-extractor"],
+        "synthesis": ["hmr-synthesizer"],
     }
     workspace.save(manifest)
     for stage in ("screening", "studies", "extractions", "appraisals", "synthesis"):
@@ -110,8 +110,8 @@ def record_reviews(workspace):
     from hermes_medical_research import audit
 
     engine = TaskEngine(workspace)
-    coordinator = Actor("mdr-coordinator", "fixture-coordinator", "coordinator")
-    auditor = Actor("mdr-auditor", "fixture-auditor", "auditor")
+    coordinator = Actor("hmr-coordinator", "fixture-coordinator", "coordinator")
+    auditor = Actor("hmr-auditor", "fixture-auditor", "auditor")
     while True:
         route = engine.route_next(coordinator)
         if route["task_id"] is None:

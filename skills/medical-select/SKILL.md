@@ -1,6 +1,6 @@
 ---
 name: medical-select
-description: Screen or select one supplied medical record through a bounded mdr task.
+description: Screen or select one supplied medical record through a bounded hmr task.
 metadata:
   hermes:
     requires_toolsets: [terminal, file]
@@ -18,7 +18,7 @@ process another task in this session, never inspect the artifact store directly,
 skills or run scripts. The host runner starts a fresh Selector session for the next article
 immediately after this one is accepted.
 
-Outside the serial runner, claim one article with `mdr --actor mdr-selector select claim`. If it
+Outside the serial runner, claim one article with `hmr --actor hmr-selector select claim`. If it
 returns `state: idle`, return `[SILENT]`; otherwise follow the same one-article boundary.
 
 Pitfalls: screening-stage `decision` must be one of `include`, `exclude`, or `uncertain`, while
@@ -28,4 +28,4 @@ report. If validation returns the allowed values, correct the proposal and resub
 claim token.
 
 For operator diagnostics only, an explicitly supplied `run_id` and `task_id` may be opened with
-`mdr select next RUN_ID TASK_ID` when the Run is not cron-managed.
+`hmr select next RUN_ID TASK_ID` when the Run is not cron-managed.

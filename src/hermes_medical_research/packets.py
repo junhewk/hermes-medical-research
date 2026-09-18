@@ -282,7 +282,7 @@ def assessment_field_rules(contract: bool) -> dict[str, Any]:
                 "are not a reported outcome"
             ),
             "extracted": "at least one filled extraction row with this protocol_outcome",
-            "extraction_ids": "leave empty; mdr fills them",
+            "extraction_ids": "leave empty; hmr fills them",
             "not_reported or not_applicable": (
                 "rationale plus inspected_locations with document_id and locator"
             ),
