@@ -30,13 +30,7 @@ shorten one. Edit only these, with the file tool:
   `unknown`), a nonempty `rationale`, and `sources`.
 
 A report group has `report_reviews` instead of one `record`: one entry per target, each with its own
-`status` and observations, and **no `checks` block at all**. Fill exactly the fields the template
-has and never add one it does not; judging every observation `supported` there means flipping each
-review's `status` from the template's `revise` to `pass`.
-
-`read_file` truncates a long single-line JSON value, and an assertion is often one long line. A
-truncated assertion is not the assertion, so page through it before judging: find its line, then
-read that line in slices with `sed -n 'Np' FILE | cut -cA-B`.
+`status` and observations.
 
 ## Rules the submission enforces
 
