@@ -493,3 +493,62 @@ def test_a_drifted_profile_can_still_be_removed_and_reinstalled(tmp_path, monkey
 
     bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
     assert skill.read_text() == original
+
+
+def test_a_removed_profile_can_be_reinstalled_over_hermes_own_state(tmp_path, monkeypatch):
+    """Removal leaves Hermes's own state behind, and apply must be able to adopt that back.
+
+    Ownership used to turn on whether the directory was empty. A live Hermes profile always holds
+    `profile.yaml` and `state.db`, so every removed profile looked like an operator's own and the
+    only way back was deleting files by hand.
+    """
+    fake_hermes(tmp_path, monkeypatch)
+    home = tmp_path / "hermes"
+    store = tmp_path / "store"
+    source = tmp_path / "source.yaml"
+    source.write_text(SELECTED_SOURCE)
+    bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
+    root = home / "profiles/hmr-synthesizer"
+    (root / "profile.yaml").write_text("name: hmr-synthesizer\n")
+    (root / "state.db").write_bytes(b"hermes state")
+
+    bootstrap_profiles(apply=True, remove=True, profile="hmr-synthesizer",
+                       hermes_home=home, source_profile=source, store=store)
+    assert not (root / "hmr-managed.json").exists()
+    assert (root / "state.db").is_file(), "removal must not touch Hermes's own state"
+
+    bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
+
+    assert (root / "skills/hmr-synthesize/SKILL.md").is_file()
+    assert (root / "SOUL.md").is_file()
+    assert (root / "state.db").read_bytes() == b"hermes state"
+
+
+def test_a_directory_hermes_did_not_create_is_still_refused(tmp_path, monkeypatch):
+    fake_hermes(tmp_path, monkeypatch)
+    home = tmp_path / "hermes"
+    root = home / "profiles/hmr-selector"
+    root.mkdir(parents=True)
+    (root / "personal.txt").write_text("keep me")
+    source = tmp_path / "source.yaml"
+    source.write_text(SELECTED_SOURCE)
+
+    with pytest.raises(ValidationError, match="refusing to overwrite unmanaged"):
+        bootstrap_profiles(apply=True, hermes_home=home, source_profile=source,
+                           store=tmp_path / "store")
+
+
+def test_a_hermes_profile_holding_one_of_our_files_is_refused(tmp_path, monkeypatch):
+    """Hermes made the directory, but something already wrote a file we would overwrite."""
+    fake_hermes(tmp_path, monkeypatch)
+    home = tmp_path / "hermes"
+    root = home / "profiles/hmr-selector"
+    root.mkdir(parents=True)
+    (root / "profile.yaml").write_text("name: hmr-selector\n")
+    (root / "SOUL.md").write_text("Someone else wrote this.\n")
+    source = tmp_path / "source.yaml"
+    source.write_text(SELECTED_SOURCE)
+
+    with pytest.raises(ValidationError, match="SOUL.md already exists"):
+        bootstrap_profiles(apply=True, hermes_home=home, source_profile=source,
+                           store=tmp_path / "store")

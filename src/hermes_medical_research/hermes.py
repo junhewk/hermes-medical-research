@@ -517,11 +517,29 @@ def _read_manifest(root: Path) -> dict[str, Any] | None:
     return None
 
 
-def _check_ownership(root: Path) -> None:
-    """Refuse a profile this package does not own, or one edited since it was written."""
+# Files Hermes itself writes into a profile it created.  Their presence is what separates a
+# profile this package removed its files from, which is safe to reinstall into, from a directory an
+# operator made by hand, which is not.
+HERMES_OWN_FILES = ("profile.yaml", "state.db")
+
+
+def _check_ownership(root: Path, desired: dict[str, bytes] | None = None) -> None:
+    """Refuse a profile this package does not own, or one edited since it was written.
+
+    Without a manifest, ownership turns on what is in the directory rather than on whether it is
+    empty.  A live Hermes profile always holds Hermes's own state, so an emptiness test called
+    every removed profile unmanaged and left apply unable to reinstall one it had just removed.
+    """
     manifest = _read_manifest(root)
     if root.exists() and manifest is None and any(root.iterdir()):
-        raise ValidationError(f"refusing to overwrite unmanaged Hermes profile: {root}")
+        collides = sorted(relative for relative in (desired or {}) if (root / relative).exists())
+        hermes_created = any((root / name).exists() for name in HERMES_OWN_FILES)
+        if collides or not hermes_created:
+            detail = f": {collides[0]} already exists" if collides else ""
+            raise ValidationError(
+                f"refusing to overwrite unmanaged Hermes profile: {root}{detail}"
+            )
+        return
     if manifest is None:
         return
     for relative, expected in manifest["files"].items():
@@ -578,7 +596,7 @@ def bootstrap_profiles(
             # Removal deletes exactly the files the manifest lists, so drift is no reason to refuse
             # it. Checking here too left a drifted profile unrepairable: apply refused to overwrite
             # it and remove refused to clear it, and the only way out was deleting files by hand.
-            _check_ownership(root)
+            _check_ownership(root, desired)
         plan.append(
             {
                 "profile": name,
@@ -670,7 +688,7 @@ def bootstrap_profiles(
         root.mkdir(parents=True, exist_ok=True)
         desired = desired_by_profile[name]
         if not created:
-            _check_ownership(root)
+            _check_ownership(root, desired)
         previous = _read_manifest(root)
         for relative in set((previous or {}).get("files", {})) - set(desired):
             (root / relative).unlink()
@@ -736,7 +754,7 @@ def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dic
         )
         problems: list[str] = []
         try:
-            _check_ownership(root)
+            _check_ownership(root, desired)
         except ValidationError as exc:
             problems.append(str(exc))
         manifest = _read_manifest(root)
