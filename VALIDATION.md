@@ -125,8 +125,10 @@ own meta-tools, so the session called `tool_describe` and then `tool_call`, abou
 and it reached for skill tools as well. That measurement is why the `call` lane carries a schema and
 the submit tools stay with the sessions.
 
-Fact three was verified standalone: `hmr mcp serve --role selector` started and listed its submit
-tools. It has not been checked from inside a session profile on the host.
+Fact three was verified twice. `hmr mcp serve --role selector` started standalone and listed its
+submit tools, and on 2026-09-18 the `hmr-extractor` profile registered the server from inside a real
+session: "MCP: registered 1 tool(s) from 1 server(s)", which is the one submit tool the extractor
+role owns.
 
 The re-screening comparison was run on `jkworkstation` on 2026-09-18 with
 `scripts/rescreen_compare.py`, which replays the corpus into an isolated store and never writes to
