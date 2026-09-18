@@ -36,6 +36,14 @@
   five session profiles therefore host the server, and `medical-extract` and `medical-synthesize`
   now say to call the submit tool when the instruction file names one, which costs fewer turns than
   editing a proposal and shelling out.
+- Gave the session lane its reads as tools too: `packet_read`, `source_list`, `source_find`, and
+  `source_read` resolve the claimed task themselves, so they take no run or task id, and they go
+  through the same engine guards the shell commands did. An assessment instruction now withdraws the
+  `source_*` commands instead of offering both, and no longer names the proposal file, since the
+  typed tools own it. This is not a speed fix: the measured session spent 691.9 of 695.2 seconds in
+  model turns, and Hermes sends independent calls in one turn, so ten shell calls were five turns
+  and serving them over MCP is turn-neutral. It takes the claim token out of a command line, drops
+  the CLI dependency from a session, and lets the runner see what a session read.
 - Turned reasoning off in a constrained call, because llama.cpp ignores a response schema while
   thinking is enabled. A schema in `response_format` is also what OpenAI-compatible servers accept,
   so the answer surface does not depend on one server.

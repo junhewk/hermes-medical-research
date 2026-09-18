@@ -180,15 +180,28 @@ needed a correction.
 
 Validity improved and time did not, and the session trace says why. Of 695.2 seconds of session
 span, 691.9 are model turn time, so the host spends essentially nothing on I/O and every saving has
-to come out of turns. There were 21 tool-bearing turns: 8 typed recordings, which is the work the
-tools were added for and which cost 16 to 33 seconds each once the reading was done; 10 `terminal`
-calls shelling out to `hmr source find` and `hmr source read` at 29 to 76 seconds each; 3
-`read_file` calls for the instruction file, the packet and the proposal; and one 60-second
-`tool_describe`, because Hermes proxies MCP tools behind its own meta-tools. So the typed tools
-removed the 26 KB write and the rejection cycle, and evidence reading through the shell is now the
-majority of the remaining cost. Moving `packet read` and `source find`/`source read` onto the same
-tool server, which ADR 0004 specifies and the deployed profile does not yet expose, is the next
-measured lever; it is not a correctness fix and nothing depends on it.
+to come out of a turn, not out of a call. The session issued 22 tool calls in 18 turns, because
+Hermes sends independent calls in one turn:
+
+| Turns | Calls | What | Cost |
+| --- | --- | --- | --- |
+| 8 | 8 | the typed recordings | 389 s, 16 to 33 s each after the first |
+| 5 | 10 | `terminal`, shelling out to `hmr source find` and `source read` | 182 s |
+| 3 | 3 | `read_file` for the instruction file, the packet and the proposal | 60 s |
+| 1 | 1 | `tool_describe`, since Hermes proxies MCP tools behind its own meta-tools | 60 s |
+
+Counting calls rather than turns overstates what the shell costs: ten shell calls were five turns,
+so serving the same reads over MCP is turn-neutral and saves no model time. The read tools were
+built anyway, because they take the claim token out of a command line, remove the CLI dependency
+from a session, and let the runner see what a session read; the measured saving is the one turn that
+the withdrawn `proposal_path` no longer invites, since the typed tools own that file.
+
+What is left is priced in turns: the 8 recordings are 389 of the 698 seconds, and 5 of them are the
+`not_reported` outcomes at 16 to 21 seconds each. Collapsing those five into one call is worth about
+75 seconds and is the only remaining lever of any size, but it is a plural payload, so it needs an
+explicit decision against the rule that a task decides one record at a time. One 31-second turn was
+also spent re-recording an outcome the server had already acknowledged, which the skill now forbids
+in prose.
 
 ### Current Hermes result (2026-09-15)
 
