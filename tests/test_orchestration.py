@@ -449,3 +449,44 @@ def test_screening_reuse_ignores_citation_counts_and_source_rank():
     }
     assert _source_digest(record) == _source_digest(later)
     assert _source_digest(record) != _source_digest({**record, "abstract": "Changed text"})
+
+
+@pytest.mark.asyncio
+async def test_runner_retries_a_busy_lock_instead_of_crashing(tmp_path, monkeypatch):
+    from filelock import Timeout
+
+    from hermes_medical_research import hermes
+
+    automation, workspace = review_with_records(tmp_path, "busy-lock", 1)
+    await automation.tick()
+    original = AutomationEngine.claim
+    calls = {"count": 0}
+
+    def flaky_claim(self, command, actor):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise Timeout(str(workspace.path / ".research.lock"))
+        return original(self, command, actor)
+
+    def accept(_executable, _home, claim, actor, _role):
+        path = Path(claim["proposal_path"])
+        proposal = json.loads(path.read_text())
+        proposal["stages"]["screening"]["records"][0].update(
+            decision="exclude", reason="Fails the synthetic eligibility criteria."
+        )
+        path.write_text(json.dumps(proposal))
+        asyncio.run(
+            TaskEngine(workspace).submit(
+                "select", claim["task_id"], path, actor, claim_token=claim["claim_token"]
+            )
+        )
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(AutomationEngine, "claim", flaky_claim)
+    monkeypatch.setattr(hermes, "CLAIM_RETRY_SECONDS", 0)
+    _hermes(monkeypatch)
+    result = await drain(
+        role="selector", store=tmp_path / "store", hermes_home=tmp_path / "h", invoke=accept
+    )
+    assert result["processed"] == 1
+    assert calls["count"] >= 2

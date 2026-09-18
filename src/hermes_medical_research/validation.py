@@ -120,7 +120,7 @@ def validate_dispositions(workspace: Workspace, rows: list[dict[str, Any]]) -> N
     screening = workspace.index("screening")
     studies = workspace.index("studies")
     extractions = workspace.rows("extractions")
-    outcomes = workspace.load()["protocol"]["outcomes"]
+    outcomes = workspace.manifest_view()["protocol"]["outcomes"]
     for row in rows:
         rid = row.get("record_id")
         _known(rid, records, "record_id")
@@ -272,7 +272,7 @@ def validate_stage(workspace: Workspace, stage: str, payload: dict[str, Any]) ->
             if workspace.outcome_contract or "protocol_outcome" in row:
                 _choice(
                     row.get("protocol_outcome"),
-                    set(workspace.load()["protocol"]["outcomes"]),
+                    set(workspace.manifest_view()["protocol"]["outcomes"]),
                     "protocol_outcome",
                 )
             for name in SCOPE_FIELDS:

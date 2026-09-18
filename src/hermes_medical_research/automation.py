@@ -180,11 +180,11 @@ class AutomationEngine:
 
     @property
     def lock(self) -> FileLock:
-        return FileLock(str(self.root / ".automation.lock"), timeout=15)
+        return FileLock(str(self.root / ".automation.lock"), timeout=300)
 
     @staticmethod
     def _review_lock(path: Path) -> FileLock:
-        return FileLock(str(path / ".review.lock"), timeout=15)
+        return FileLock(str(path / ".review.lock"), timeout=300)
 
     def create_review(
         self,

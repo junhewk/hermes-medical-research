@@ -71,6 +71,9 @@ HOST_ATTEMPTS = 3
 # One session may take many slow model turns; the runner renews its claim while it works.
 HOST_TIMEOUT_SECONDS = 75 * 60
 LEASE_RENEW_SECONDS = 10 * 60
+# Transient claim failures (for example a busy Run lock) are retried before the runner gives up.
+CLAIM_RETRIES = 5
+CLAIM_RETRY_SECONDS = 30
 
 
 def _home(value: Path | None) -> Path:
@@ -845,9 +848,18 @@ async def drain(
     profile = f"mdr-{role}"
     try:
         automation = AutomationEngine(root)
+        claim_errors = 0
         while True:
             actor = Actor(profile, f"serial-{role}-{uuid4().hex}", role)
-            claim = automation.claim(ROLE_COMMANDS[role], actor)
+            try:
+                claim = automation.claim(ROLE_COMMANDS[role], actor)
+            except (FileLockTimeout, ValidationError):
+                claim_errors += 1
+                if claim_errors > CLAIM_RETRIES:
+                    raise
+                await asyncio.sleep(CLAIM_RETRY_SECONDS)
+                continue
+            claim_errors = 0
             if claim.get("state") == "idle":
                 return {
                     "state": "drained",
@@ -907,7 +919,7 @@ async def drain(
                         claim["claim_id"], actor, code=code, message=last_error
                     )
                     record.update(code=code, blocked=result["blocked"])
-                except ValidationError as exc:
+                except (FileLockTimeout, ValidationError) as exc:
                     record.update(code=code, fail_not_recorded=str(exc))
             else:
                 # The host session itself ran the fail command, or the Task was superseded.

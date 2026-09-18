@@ -15,7 +15,8 @@ EDITABLE = set(DEPENDENCIES) - {"records", "documents"}
 
 
 def current_digests(workspace: Workspace) -> dict[str, str]:
-    return {stage: entry["digest"] for stage, entry in workspace.load()["datasets"].items()}
+    datasets = workspace.manifest_view()["datasets"]
+    return {stage: entry["digest"] for stage, entry in datasets.items()}
 
 
 class MemoryStore:
@@ -35,6 +36,11 @@ class MemoryStore:
 class Preview(Workspace):
     """Use the real source paths, but hold all proposed revisions in memory."""
 
+    def manifest_view(self):
+        if "research.json" not in self.store.values:
+            self.load()
+        return self.store.values["research.json"]
+
     def __init__(self, workspace: Workspace):
         super().__init__(workspace.path)
         self.store = MemoryStore(workspace.store)
@@ -42,7 +48,7 @@ class Preview(Workspace):
         self.payloads = {}
 
     def read(self, stage, *, fresh=True):
-        manifest = self.load()
+        manifest = self.manifest_view()
         entry = manifest["datasets"].get(stage)
         if not entry:
             return {"schema_version": self.stage_version(stage), "records": []}
@@ -60,7 +66,7 @@ class Preview(Workspace):
 
     def index(self, stage):
         rows = self.rows(stage)
-        key = (stage, self.load()["datasets"].get(stage, {}).get("digest"))
+        key = (stage, self.manifest_view()["datasets"].get(stage, {}).get("digest"))
         if key not in self.indices:
             self.indices[key] = {r[ID_FIELDS[stage]]: r for r in rows}
         return self.indices[key]

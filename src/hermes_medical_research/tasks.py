@@ -184,7 +184,7 @@ class RunCatalog:
 
     @property
     def lock(self) -> FileLock:
-        return FileLock(str(self.root / ".catalog.lock"), timeout=10)
+        return FileLock(str(self.root / ".catalog.lock"), timeout=120)
 
     def workspace(self, run_id: str) -> Workspace:
         value = _safe_id(run_id, RUN_ID_PREFIX)

@@ -92,10 +92,15 @@ class Workspace:
     def __init__(self, path: Path):
         self.path = path.resolve()
         self.store = RunStore(self.path)
+        self._view: dict[str, Any] | None = None
+        self._view_key: tuple[int, int, int] | None = None
+        self._documents_cache: tuple[Any, list[dict[str, Any]]] | None = None
 
     @property
     def lock(self) -> FileLock:
-        return FileLock(str(self.path / ".research.lock"), timeout=5)
+        # Submissions are serialized per Run. The manifest view keeps a validation pass short, so a
+        # waiting claim only needs to outlast one submission, not a whole-dataset revalidation.
+        return FileLock(str(self.path / ".research.lock"), timeout=30)
 
     def load(self) -> dict[str, Any]:
         data = self.store.read_json("research.json")
@@ -110,6 +115,24 @@ class Workspace:
     def save(self, manifest: dict[str, Any]) -> None:
         manifest["updated_at"] = now()
         self.store.write_json("research.json", manifest)
+
+    def manifest_view(self) -> dict[str, Any]:
+        """The current manifest for read-only hot paths; callers must never mutate it.
+
+        ``load`` returns an independent, verified copy for callers that save changes.  A Run
+        manifest grows with its task ledger, so re-reading or copying it for every row check made
+        large submissions hold the Run lock for minutes.
+        """
+        path = self.path / "research.json"
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return self.load()
+        key = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        if self._view is None or self._view_key != key:
+            self._view = self.load()
+            self._view_key = key
+        return self._view
 
     def init(
         self,
@@ -200,11 +223,11 @@ class Workspace:
 
     @property
     def evidence_version(self) -> str:
-        return self.load().get("evidence_version", "1")
+        return self.manifest_view().get("evidence_version", "1")
 
     @property
     def outcome_contract(self) -> bool:
-        manifest = self.load()
+        manifest = self.manifest_view()
         return (
             manifest.get("evidence_version") == "2"
             and manifest.get("assessment_contract") == OUTCOME_CONTRACT
@@ -225,7 +248,7 @@ class Workspace:
         return "1" if stage in {"records", "documents"} else self.evidence_version
 
     def read(self, stage: str, *, fresh: bool = True) -> dict[str, Any]:
-        manifest = self.load()
+        manifest = self.manifest_view()
         entry = manifest["datasets"].get(stage)
         if not entry:
             return {"schema_version": "1", "records": []}
@@ -299,7 +322,16 @@ class Workspace:
 
         Titles are projected at read time so older workspaces gain citable bibliographic
         context without rewriting their document stage or making downstream assessments stale.
+        The result is memoized by the records and documents digests and must not be mutated.
         """
+        datasets = self.manifest_view()["datasets"]
+        key = (
+            (datasets.get("records") or {}).get("digest"),
+            (datasets.get("documents") or {}).get("digest"),
+            fresh,
+        )
+        if self._documents_cache is not None and self._documents_cache[0] == key:
+            return self._documents_cache[1]
         records = self.index("records")
         documents = deepcopy(self.rows("documents", fresh=fresh))
         by_id = {row["document_id"]: row for row in documents}
@@ -332,10 +364,18 @@ class Workspace:
                 document.setdefault("segments", []).append({"locator": "title", "text": title})
             elif normalized_text(existing.get("text", "")) != normalized_text(title):
                 raise ValidationError(f"stored metadata title conflicts with record {record_id}")
-        return sorted(documents, key=lambda row: row["document_id"])
+        result = sorted(documents, key=lambda row: row["document_id"])
+        self._documents_cache = (key, result)
+        return result
 
     def source_index(self) -> dict[str, dict[str, Any]]:
-        return {row["document_id"]: row for row in self.source_documents()}
+        documents = self.source_documents()
+        cached = getattr(self, "_index_cache", None)
+        if cached is not None and cached[0] is documents:
+            return cached[1]
+        index = {row["document_id"]: row for row in documents}
+        self._index_cache = (documents, index)
+        return index
 
     def allocations(
         self, *, excluding: str | None = None, manifest: dict[str, Any] | None = None

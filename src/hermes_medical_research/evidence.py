@@ -152,7 +152,7 @@ def validate_appraisal(workspace: Workspace, row: dict) -> None:
                     raise ValidationError(
                         "full text is available; inspect it before claiming no access"
                     )
-                if extraction["record_id"] not in workspace.load()["fulltext_attempts"]:
+                if extraction["record_id"] not in workspace.manifest_view()["fulltext_attempts"]:
                     raise ValidationError(
                         "access_unavailable requires a recorded full-text attempt"
                     )
@@ -210,7 +210,7 @@ def validate_contribution_v2(workspace: Workspace, finding: dict, contribution: 
 
 
 def validate_finding(workspace: Workspace, finding: dict) -> None:
-    outcomes = workspace.load()["protocol"]["outcomes"]
+    outcomes = workspace.manifest_view()["protocol"]["outcomes"]
     for outcome in strings(finding, "protocol_outcomes"):
         if outcome not in outcomes:
             raise ValidationError(f"protocol_outcomes contains unknown outcome: {outcome}")
@@ -326,7 +326,7 @@ def validate_v2(workspace: Workspace, stage: str, payload: dict) -> None:
             )
             require_text(row.get("reason"), "coverage reason")
             for outcome in strings(row, "protocol_outcomes", nonempty=False):
-                if outcome not in workspace.load()["protocol"]["outcomes"]:
+                if outcome not in workspace.manifest_view()["protocol"]["outcomes"]:
                     raise ValidationError("unknown coverage protocol outcome")
     elif stage == "reviews":
         from .audit import current_group_digests, validate_receipt
@@ -412,7 +412,7 @@ def readiness(workspace: Workspace) -> list[str]:
         warnings.append(f"{limited} result appraisals are limited by unavailable methods/details.")
     findings = workspace.read("synthesis")["findings"]
     covered = {o for f in findings for o in f["protocol_outcomes"]}
-    missing = set(workspace.load()["protocol"]["outcomes"]) - covered
+    missing = set(workspace.manifest_view()["protocol"]["outcomes"]) - covered
     if missing:
         raise ValidationError(
             "address each protocol outcome with findings or explicit gaps: "

@@ -370,7 +370,7 @@ def _source(workspace, record_id: str) -> dict[str, Any]:
         },
         "documents": locators,
         "excerpts": excerpts,
-        "fulltext_attempt": workspace.load()["fulltext_attempts"].get(record_id),
+        "fulltext_attempt": workspace.manifest_view()["fulltext_attempts"].get(record_id),
     }
 
 
