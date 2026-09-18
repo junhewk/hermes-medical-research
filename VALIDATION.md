@@ -127,8 +127,9 @@ the submit tools stay with the sessions.
 
 Fact three was verified twice. `hmr mcp serve --role selector` started standalone and listed its
 submit tools, and on 2026-09-18 the `hmr-extractor` profile registered the server from inside a real
-session: "MCP: registered 1 tool(s) from 1 server(s)", which is the one submit tool the extractor
-role owns.
+session: "MCP: registered 1 tool(s) from 1 server(s)", which was the one submit tool the extractor
+role owned on that build. The role now owns the three per-outcome assessment tools, and a later
+session on the same host resolved all three by name through `tool_describe`.
 
 The re-screening comparison was run on `jkworkstation` on 2026-09-18 with
 `scripts/rescreen_compare.py`, which replays the corpus into an isolated store and never writes to
@@ -155,6 +156,39 @@ a record without a usable abstract as uncertain.
 
 A failure of a host fact is a stop condition: do not weaken the CLI boundary, and do not accept an
 unconstrained answer shape as a fallback.
+
+### Per-outcome assessment tools (2026-09-18)
+
+The assessment lane was measured on the production Review `ai-med-ed-evidence-report-v4`, on the one
+article `hmr step extract` claimed. The baseline was the same article under the file protocol: the
+session composed a 26 KB `proposal.json` in one write, the submission was rejected by the validator,
+and the attempt took 12 minutes 26 seconds without producing an accepted result. The replacement
+stages one protocol outcome per typed tool call and caps the session at 4096 tokens.
+
+| Measure | File protocol | Per-outcome tools |
+| --- | --- | --- |
+| Result | rejected by the validator | `accepted`, `errors: []` |
+| Automation attempts consumed | 1, no result | 1 |
+| Argument-validation refusals | n/a | 0 |
+| Wall clock | 12 min 26 s | 11 min 38.6 s |
+
+The article is a 73-participant trial with seven protocol outcomes. The session recorded the ROB2
+appraisal once (`complete`, `some_concerns`, five domains), extracted knowledge test score and
+learner satisfaction with quotes and between-group effects, marked the other five `not_reported`
+with four inspected locations each, and the submission pruned the five untouched scaffolds. Nothing
+needed a correction.
+
+Validity improved and time did not, and the session trace says why. Of 695.2 seconds of session
+span, 691.9 are model turn time, so the host spends essentially nothing on I/O and every saving has
+to come out of turns. There were 21 tool-bearing turns: 8 typed recordings, which is the work the
+tools were added for and which cost 16 to 33 seconds each once the reading was done; 10 `terminal`
+calls shelling out to `hmr source find` and `hmr source read` at 29 to 76 seconds each; 3
+`read_file` calls for the instruction file, the packet and the proposal; and one 60-second
+`tool_describe`, because Hermes proxies MCP tools behind its own meta-tools. So the typed tools
+removed the 26 KB write and the rejection cycle, and evidence reading through the shell is now the
+majority of the remaining cost. Moving `packet read` and `source find`/`source read` onto the same
+tool server, which ADR 0004 specifies and the deployed profile does not yet expose, is the next
+measured lever; it is not a correctness fix and nothing depends on it.
 
 ### Current Hermes result (2026-09-15)
 
