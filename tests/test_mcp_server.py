@@ -219,9 +219,25 @@ def test_the_extractor_serves_study_linking_and_the_three_assessment_tools(tmp_p
         "record_study_appraisal",
         "record_outcome_extracted",
         "record_outcome_missing",
+        "packet_read",
+        "source_list",
+        "source_find",
+        "source_read",
     ]
     for tool in mcp_server.tool_definitions(server.kinds):
-        answers.check_keywords(tool["inputSchema"]["properties"]["result"])
+        schema = tool["inputSchema"]
+        # A submit tool carries its payload under `result`; a read tool takes plain scalars.
+        answers.check_keywords(schema["properties"].get("result", schema))
+
+
+def test_a_constrained_call_lane_is_given_no_read_tools(tmp_path):
+    """A one-shot call gets its record in the prompt, so a read tool would only waste a turn."""
+    server = mcp_server.ToolServer(tmp_path, "selector")
+
+    names = [tool["name"] for tool in mcp_server.tool_definitions(server.kinds)]
+    assert names == ["submit_screening", "submit_coverage"]
+    with pytest.raises(ValidationError, match="unknown tool"):
+        server.call("source_find", {"words": "randomised"})
 
 
 @pytest.mark.asyncio
@@ -235,3 +251,82 @@ async def test_a_tool_call_works_even_when_the_caller_already_has_a_loop(tmp_pat
 
     assert json.loads(text)["accepted"] is True
     assert workspace.rows("screening")[0]["decision"] == "uncertain"
+
+
+def claimed_assessment(tmp_path: Path):
+    """A store whose extract step holds one claimed assessment task with a real document."""
+    from test_outcome_dispositions import contract_run, open_assessment
+
+    engine, _record_id, document_id = contract_run(tmp_path)
+    task_id, opened, _packet, proposal_path, _ = open_assessment(engine)
+    store = tmp_path / "store"
+    steps._write_json(steps.current_path(store, "extract"), {
+        "claim_id": "claim-read-tools",
+        "claim_token": None,
+        "run_id": engine.run_id,
+        "task_id": task_id,
+        "role": "extractor",
+        "kind": "assessment",
+        "actor_profile": "hmr-extractor",
+        "session_id": "extractor-session",
+        "packet_path": opened["packet_path"],
+        "proposal_path": str(proposal_path),
+    }, private=True)
+    return store, document_id
+
+
+def test_a_session_finds_and_reads_its_documents_without_a_shell(tmp_path):
+    store, document_id = claimed_assessment(tmp_path)
+    server = mcp_server.ToolServer(store, "extractor")
+
+    hits = json.loads(server.call("source_find", {"words": "theoretical exam"}))
+    assert hits["hits"], "the trial's results paragraph should rank for its own words"
+    assert hits["task_id"].startswith("task-")
+
+    first = hits["hits"][0]
+    page = json.loads(
+        server.call("source_read", {"source_id": first["document_id"],
+                                    "locator": first["locator"]})
+    )
+    assert page["document_id"] == document_id
+    assert page["locator"] == first["locator"]
+    assert page["text"].strip(), "a quote needs the verbatim text"
+
+
+def test_the_packet_arrives_through_a_tool_rather_than_a_file_read(tmp_path):
+    store, _document_id = claimed_assessment(tmp_path)
+    server = mcp_server.ToolServer(store, "extractor")
+
+    view = json.loads(server.call("packet_read", {}))
+    assert view["kind"] == "assessment"
+    assert (view["page"], view["pages"]) == (1, 1), "a synthetic packet fits one page"
+    assert json.loads(view["content"])["kind"] == "assessment"
+    with pytest.raises(ValidationError, match="the packet has 1 page"):
+        server.call("packet_read", {"page": 2})
+
+
+def test_a_read_keeps_the_engine_guards_it_had_on_the_shell_path(tmp_path):
+    store, _document_id = claimed_assessment(tmp_path)
+    server = mcp_server.ToolServer(store, "extractor")
+
+    listed = json.loads(server.call("source_list", {}))
+    assert listed["source_ids"]
+    with pytest.raises(ValidationError, match="outside this task's bounded corpus view"):
+        server.call("source_read", {"source_id": "r-elsewhere:fulltext:0", "locator": "p:1"})
+
+
+def test_a_read_tool_says_which_argument_is_missing(tmp_path):
+    store, _document_id = claimed_assessment(tmp_path)
+    server = mcp_server.ToolServer(store, "extractor")
+
+    with pytest.raises(ValidationError, match="source_read.locator is required"):
+        server.call("source_read", {"source_id": "x"})
+    with pytest.raises(ValidationError, match="unknown field"):
+        server.call("source_find", {"words": "exam", "depth": 3})
+
+
+def test_a_read_with_no_claimed_task_is_refused(tmp_path):
+    server = mcp_server.ToolServer(tmp_path, "extractor")
+
+    with pytest.raises(mcp_server.NoCurrentItem, match="no task is claimed"):
+        server.call("source_find", {"words": "exam"})

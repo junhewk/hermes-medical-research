@@ -32,10 +32,12 @@ from .tasks import (
     KIND_COMMANDS,
     KIND_ROLES,
     ROLE_PROFILES,
+    SOURCE_PAGE_LIMIT,
     Actor,
     RunCatalog,
     TaskEngine,
     ValidationError,
+    utf8_pages,
 )
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -59,7 +61,50 @@ ASSESSMENT_TOOLS = {
     "record_outcome_missing": "outcome_missing",
 }
 
+# The reads a session needs to do its work.  These exist so a session never shells out: the shell
+# path put the claim token in a command line and cost a turn per page, and the step runner could not
+# see what a session read.  Arguments are plain scalars, since nothing here is grammar-constrained.
+READ_SCHEMAS: dict[str, dict[str, Any]] = {
+    "packet_read": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [],
+        "properties": {"page": {"type": "integer"}},
+    },
+    "source_list": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [],
+        "properties": {"page": {"type": "integer"}},
+    },
+    "source_find": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["words"],
+        "properties": {
+            "words": {"type": "string"},
+            "source_id": {"type": "string"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
+        },
+    },
+    "source_read": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["source_id", "locator"],
+        "properties": {
+            "source_id": {"type": "string"},
+            "locator": {"type": "string"},
+            "page": {"type": "integer"},
+        },
+    },
+}
+
 TOOL_DESCRIPTIONS = {
+    "packet_read": "Read this task's packet: what to decide, the field rules, and the checklist.",
+    "source_list": "List the document ids this task may read.",
+    "source_find": "Rank locators in this task's documents by search words, with short snippets.",
+    "source_read": "Read one locator's exact text, for a verbatim quote.",
     "submit_screening": "Record the eligibility decision for the record in this task.",
     "submit_coverage": "Record whether this record goes on to detailed assessment.",
     "submit_study_link": "Record this record's study kind and whether it joins a linked study.",
@@ -90,6 +135,14 @@ def _definition(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_definition(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": TOOL_DESCRIPTIONS[name],
+        "inputSchema": READ_SCHEMAS[name],
+    }
+
+
 def tool_definitions(kinds: tuple[str, ...]) -> list[dict[str, Any]]:
     tools = [
         _definition(KIND_TOOLS[kind], RESULT_SCHEMAS[kind])
@@ -101,6 +154,8 @@ def tool_definitions(kinds: tuple[str, ...]) -> list[dict[str, Any]]:
             _definition(name, answers.ASSESSMENT_SCHEMAS[shape])
             for name, shape in ASSESSMENT_TOOLS.items()
         ]
+        # Only a session lane reads; a constrained call is handed everything in its prompt.
+        tools += [_read_definition(name) for name in READ_SCHEMAS]
     return tools
 
 
@@ -139,8 +194,34 @@ class ToolServer:
             )
         return item
 
+    def session_item(self) -> dict[str, Any]:
+        """The claim this role is working on, whatever kind it is.
+
+        A read applies to the claimed task itself, so unlike a submit tool it does not pin a kind.
+        """
+        for command in dict.fromkeys(KIND_COMMANDS[kind] for kind in self.kinds):
+            path = self.store / "steps" / command / "current.json"
+            try:
+                return json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
+        raise NoCurrentItem(
+            "no task is claimed for this role right now; stop and report that you had no work"
+        )
+
+    def _actor(self, item: dict[str, Any]) -> Actor:
+        return Actor(
+            profile=item.get("actor_profile") or ROLE_PROFILES[self.role],
+            session_id=item["session_id"],
+            role=self.role,
+        )
+
     # -- tool calls ---------------------------------------------------------------------------
     def call(self, name: str, arguments: dict[str, Any]) -> str:
+        if name in READ_SCHEMAS:
+            if not any(kind == "assessment" for kind in self.kinds):
+                raise ValidationError(f"unknown tool: {name}")
+            return self._read(name, arguments or {})
         if "result" not in (arguments or {}):
             raise ValidationError("call this tool with a single `result` object")
         if name in ASSESSMENT_TOOLS:
@@ -180,6 +261,63 @@ class ToolServer:
                 + ". Correct those fields and call the tool again."
             )
         return json.dumps({"accepted": True, "recorded": kind}, sort_keys=True)
+
+    def _read(self, name: str, arguments: dict[str, Any]) -> str:
+        """Serve one bounded read against the claimed task, through the engine's own guards."""
+        answers.check_shape(arguments, READ_SCHEMAS[name], name)
+        item = self.session_item()
+        task_id = item["task_id"]
+        if name == "packet_read":
+            return self._packet_page(item, int(arguments.get("page", 1)))
+        engine = TaskEngine(RunCatalog(self.store).workspace(item["run_id"]))
+        actor = self._actor(item)
+        token = item["claim_token"]
+        if name == "source_list":
+            view = engine.source_list(
+                task_id, int(arguments.get("page", 1)), actor, claim_token=token
+            )
+        elif name == "source_find":
+            view = engine.source_find(
+                task_id,
+                str(arguments["words"]),
+                actor,
+                source_id=arguments.get("source_id"),
+                offset=int(arguments.get("offset", 0)),
+                limit=int(arguments.get("limit", 5)),
+                claim_token=token,
+            )
+        else:
+            view = engine.source_read(
+                task_id,
+                str(arguments["source_id"]),
+                str(arguments["locator"]),
+                int(arguments.get("page", 1)),
+                actor,
+                claim_token=token,
+            )
+        return json.dumps(view, ensure_ascii=False, sort_keys=True)
+
+    def _packet_page(self, item: dict[str, Any], page: int) -> str:
+        if page < 1:
+            raise ValidationError("packet page must be positive")
+        packet_path = item.get("packet_path")
+        if not packet_path:
+            raise ValidationError("this task has no packet")
+        rendered = Path(packet_path).read_text(encoding="utf-8")
+        pages = utf8_pages(rendered, SOURCE_PAGE_LIMIT)
+        if page > len(pages):
+            raise ValidationError(f"the packet has {len(pages)} page(s)")
+        return json.dumps(
+            {
+                "task_id": item["task_id"],
+                "kind": item.get("kind"),
+                "page": page,
+                "pages": len(pages),
+                "content": pages[page - 1],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     def _record_assessment(self, name: str, result: Any) -> str:
         """Stage one outcome of an assessment, and submit when the last one is decided."""

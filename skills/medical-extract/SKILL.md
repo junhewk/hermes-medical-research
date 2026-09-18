@@ -8,11 +8,18 @@ metadata:
 
 # Medical extract
 
-A step runner supplies an instruction-file path for one already claimed task. Read that file, then
-read only its bounded packet and proposal. For more detail use only its `source_find` (search
-words), `source_read` (one document locator), `source_list`, and `source_show` commands, replacing
-only their uppercase placeholders. Never run Python, heredocs, scripts, or a code cell, and never
-edit a skill.
+A step runner supplies an instruction-file path for one already claimed task. Read that file first.
+
+When it lists `read_tools`, every read is a tool call: `packet_read` for the packet, `source_find`
+to rank locators by search words, `source_read` for one locator's exact text, `source_list` for the
+document ids. They resolve the claimed task themselves, so they take no run or task id. Do not read
+the packet or the proposal as files, and do not run a shell command to read a source: the typed
+tools own the proposal, so reading it only spends a turn.
+
+When it lists no `read_tools`, use only the instruction file's own `source_find`, `source_read`,
+`source_list`, and `source_show` commands, replacing only their uppercase placeholders.
+
+Never run Python, heredocs, scripts, or a code cell, and never edit a skill.
 
 ## Assessment: record one outcome at a time
 
@@ -24,9 +31,10 @@ in `outcome_checklist`:
 - `record_outcome_missing` when it does not, with the status, one sentence of rationale, and the
   locations you inspected.
 
-Each call is checked on its own and tells you what remains. The task submits itself when every
-outcome is decided. Do not rewrite the proposal file to do this work: a rejected call costs one
-short answer, a rejected file costs the whole file.
+Each call is checked on its own and its reply lists the outcomes that remain. Trust that list: an
+outcome it no longer names is recorded, so recording it again only spends a turn. The task submits
+itself when every outcome is decided. Do not rewrite the proposal file to do this work: a rejected
+call costs one short answer, a rejected file costs the whole file.
 
 ## Acquisition and linking
 

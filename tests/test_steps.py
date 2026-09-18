@@ -506,4 +506,11 @@ async def test_a_session_is_told_its_submit_tool_only_when_one_exists(tmp_path, 
     assert written[1]["submit_tools"] == [
         "record_study_appraisal", "record_outcome_extracted", "record_outcome_missing"
     ]
+    # A session that reads through tools is not also offered the shell commands, and is not shown
+    # the proposal at all: the typed tools own it, so a read of it can only waste a turn.
+    assert written[1]["read_tools"] == [
+        "packet_read", "source_list", "source_find", "source_read"
+    ]
+    assert not [key for key in written[1] if key.startswith("source_")]
+    assert "proposal_path" not in written[1]
     del store

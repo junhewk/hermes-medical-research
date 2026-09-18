@@ -600,7 +600,7 @@ class TaskEngine:
             raise ValidationError("source is outside this task's bounded corpus view")
         value = self._source_value(source_id)
         rendered = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
-        chunks = _utf8_pages(rendered, SOURCE_PAGE_LIMIT)
+        chunks = utf8_pages(rendered, SOURCE_PAGE_LIMIT)
         if page > len(chunks):
             raise ValidationError(f"source has {len(chunks)} page(s)")
         return {
@@ -671,7 +671,7 @@ class TaskEngine:
             raise ValidationError(
                 f"unknown locator {locator!r} in {source_id}; use source_find to list locators"
             )
-        chunks = _utf8_pages(segments[index]["text"], SOURCE_PAGE_LIMIT)
+        chunks = utf8_pages(segments[index]["text"], SOURCE_PAGE_LIMIT)
         if page > len(chunks):
             raise ValidationError(f"segment has {len(chunks)} page(s)")
         return {
@@ -2683,7 +2683,7 @@ def _route_view(run_id: str, task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _utf8_pages(value: str, limit: int) -> list[str]:
+def utf8_pages(value: str, limit: int) -> list[str]:
     """Split text into independently valid UTF-8 pages bounded by bytes."""
     if not value:
         return [""]

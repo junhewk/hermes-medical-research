@@ -966,7 +966,7 @@ def invoke_task_session(
         "proposal_path": claim["proposal_path"],
         **{key: claim[key] for key in commands if key in claim},
     }
-    from .mcp_server import ASSESSMENT_TOOLS, KIND_TOOLS
+    from .mcp_server import ASSESSMENT_TOOLS, KIND_TOOLS, READ_SCHEMAS
 
     kind = claim.get("kind", "")
     submit_tool = KIND_TOOLS.get(kind)
@@ -977,6 +977,13 @@ def invoke_task_session(
     elif kind == "assessment":
         # An assessment is recorded one outcome at a time, so it has three tools and no file edit.
         instruction["submit_tools"] = list(ASSESSMENT_TOOLS)
+        # This kind also reads through tools, so the shell commands are withdrawn rather than
+        # offered alongside them: a session given both spends turns on the slower one.
+        instruction["read_tools"] = list(READ_SCHEMAS)
+        for command in ("source_list", "source_show", "source_find", "source_read"):
+            instruction.pop(command, None)
+        # The tools own the proposal, so naming the file only invites a pointless read.
+        instruction.pop("proposal_path", None)
     skill = PROFILES[SESSION_PROFILES[role]].skills[0]
     profile = f"hmr-{role}"
     with tempfile.NamedTemporaryFile(
