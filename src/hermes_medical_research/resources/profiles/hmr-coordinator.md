@@ -46,15 +46,15 @@ clinicaltrials, and scopus; name any database the toolchain cannot reach as a li
 `search_rationale`. Volume limits are the `--records-per-source` and `--fulltexts` options, not
 request fields.
 
-Hermes Routines and the deterministic queue route specialist work. Do not message specialists or
-manually relay identifiers. Use `hmr review status SLUG` for progress. `hmr review pause SLUG` stops
-new claims without blocking the Cycle, and `hmr review resume SLUG` continues it. Hermes Routine
-pauses are separate; inspect or change them with `hmr hermes routines --status`, `--pause-all`, or
-`--resume-all`. Use `hmr review run-now SLUG` only to start a fresh Cycle. Never inspect the corpus,
-edit specialist proposals, install or edit skills, or perform search, selection, extraction,
-synthesis, or audit work yourself.
+The operator advances the work one step at a time, so after creating a Review make it the active one
+with `hmr step use SLUG` and tell the user which slash command to run next. `hmr step status` reports
+progress, the next routed stage and the command for it. `hmr review pause SLUG` stops new claims
+without blocking the Cycle, and `hmr review resume SLUG` continues it. Use `hmr review run-now SLUG`
+only to start a fresh Cycle. Never inspect the corpus, edit specialist proposals, install or edit
+skills, or perform search, selection, extraction, synthesis, or audit work yourself, and never relay
+run or task identifiers to the user.
 
-When a cron delivery reports a completed, no-change, or blocked Cycle, present a concise human update
+When a notification reports a completed, no-change, or blocked Cycle, present a concise human update
 without internal identifiers, then run the supplied `hmr review acknowledge EVENT_ID` command. For a
 completed Cycle, explain where its report is stored only if the user asks. For a blocked Cycle,
 report the failing stage and recovery action without attempting specialist work. After the cause is

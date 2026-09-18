@@ -1,8 +1,9 @@
 # Hermes Medical Research
 
-Hermes Medical Research is a deterministic evidence workflow operated by isolated Hermes bots. The
-bots perform bounded semantic tasks; the `hmr` CLI owns the corpus, schemas, citations, digests,
-state transitions, audit independence, and final completeness checks.
+Hermes Medical Research is a deterministic evidence workflow that an operator advances one step at a
+time. A step drains one stage's queue for one Review. The `hmr` CLI owns the corpus, schemas,
+citations, digests, state transitions, audit independence, and final completeness checks. No model
+output has authority.
 
 This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 
@@ -11,12 +12,12 @@ This is a normal Python package, not a Hermes, Codex, or Claude plugin.
 Install directly from the GitHub repository with a Python tool installer:
 
 ```bash
-uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.11
+uv tool install git+https://github.com/junhewk/hermes-medical-research.git@v0.6.0
 # or
-pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.5.11
+pipx install git+https://github.com/junhewk/hermes-medical-research.git@v0.6.0
 ```
 
-The package exposes one executable:
+The package exposes one executable, and the managed profiles call it by its resolved path:
 
 ```bash
 hmr --version
@@ -26,95 +27,192 @@ hmr --version
 
 | Layer | Responsibility |
 | --- | --- |
-| Hermes skill | Tells one role what bounded task to perform and which `hmr` commands to call |
+| Step | One operator act. It claims and answers one stage's items until that queue is empty |
 | CLI/core | Enforces schemas, exact scope, citations, digests, receipts, legal transitions, and completion |
-| Bot profile | Supplies role separation, model/provider choice, memory, configuration, and session identity |
-| Artifact store | Carries immutable results between roles; bots exchange only `run_id` and `task_id` |
+| Hermes profile | Supplies role separation, model and provider choice, session identity, and the tool surface of one lane |
+| MCP submit tool | Carries one constrained answer into the normal submit path |
+| Artifact store | Carries immutable results between roles; sessions exchange only `run_id` and `task_id` |
 
-Four checked-in skills serve six profiles:
-
-- `medical-search` → Searcher
-- `medical-select` → Selector
-- `medical-extract` → Extractor
-- `medical-synthesize` → Synthesizer and independent Auditor
-- Coordinator uses its narrow profile instructions only; it does not install or perform specialist
-  skills.
+Three checked-in skills serve the five session profiles. `medical-select` belongs to the Selector,
+`medical-extract` to the Extractor, and `medical-synthesize` to the Synthesizer and the independent
+Auditor. The four constrained profiles carry no skill and no shell toolset. The Coordinator uses its
+own profile instructions and performs no specialist work.
 
 The default artifact root is `$XDG_DATA_HOME/hermes-medical-research`, falling back to
 `~/.local/share/hermes-medical-research`. Set `HMR_HOME` to an absolute path for an isolated store.
+`MDR_HOME` is the 0.5.x spelling of the same variable. It is still read when `HMR_HOME` is unset, so
+existing operator scripts keep their store. Nothing writes that spelling again.
+
+## Lanes
+
+Every item is still one claim, one lease, and one validated submission. The lane decides only which
+surface produces the answer.
+
+| Task kind | Lane | Why |
+| --- | --- | --- |
+| `search` | `none` | Retrieval replays a frozen accepted plan, so there is nothing to decide |
+| `screening` | `call` | One record, one packet of eligibility criteria, three allowed decisions |
+| `coverage` | `call` | Eligibility is already settled; the answer is a selection plus outcome names the packet lists |
+| `fulltext` | `none` | Acquisition is an HTTP fetch |
+| `studies` | `call` | A link is allowed only on identity evidence the packet already shows |
+| `assessment` | `agent` | Each protocol outcome must be decided from locations read in the full text |
+| `synthesis` | `call` | One finding from the packet's extraction, appraisal, and unreported-outcome rows |
+| `audit` | `agent` | Quotes and locators are checked against the stored sources |
+
+A `call` is one fresh tool-free Hermes session whose profile exposes exactly that kind's submit tool
+and pins `extra_body.tool_choice: required`. An `agent` is one fresh session with the role's skill
+and the terminal, file, and skills toolsets. A synthesis packet that was shortened to fit falls back
+to `agent`, because its rows are then summaries. Every audit correction takes `agent`, because a
+correction re-mints the same packet and a constrained call would repeat the rejected answer.
+
+A `call` gets two constrained attempts and then one session with tools. An `agent` gets three
+attempts. After the ladder the durable failure path runs: the item retries after 5 and 30 minutes,
+and the third failure blocks the Cycle for `hmr step retry`.
+
+## Why a step detaches
+
+A `type: exec` Hermes quick command is killed after 30 seconds and receives no arguments. So a step
+starts a detached worker and returns one line, and nothing about the work is passed as an argument:
+
+- the active Review is `<store>/steps/active.json`, set by `hmr step use NAME`;
+- progress, the last pace, recent failures, and the next command are in
+  `<store>/steps/<review>/<step>/status.json`, which `hmr step status` reads;
+- the worker's own output is in that step's `logs/JOB_ID.log`;
+- the claim a step is working on is `<store>/steps/<step>/current.json`, owner-readable, and the
+  tool server reads it to resolve its own work.
 
 ## Bootstrap Hermes profiles
 
-Preview the six-profile installation without changing anything:
+Preview the nine-profile installation without changing anything, then apply it:
 
 ```bash
-hmr hermes bootstrap
+hmr hermes profiles
+hmr hermes profiles --apply
+hmr hermes profiles --profile hmr-screen --apply
 ```
 
-Apply it explicitly:
+Five profiles run sessions: `hmr-coordinator`, `hmr-selector`, `hmr-extractor`, `hmr-synthesizer`,
+and `hmr-auditor`. Four answer one constrained call: `hmr-screen`, `hmr-cover`, `hmr-link`, and
+`hmr-finding`. A constrained profile hosts the submit tool for its kind, enables no toolset, pins
+`extra_body.tool_choice: required` on the provider entry its `model.provider` names, and caps
+`max_tokens` for that kind.
+
+Bootstrap creates profiles through Hermes's public profile command. It copies only the current model,
+provider, and timezone selection. It refuses to overwrite an unmanaged profile or a managed file
+edited after installation. `hmr-searcher` and `mdr-searcher` are removed when present, because the
+search step runs no session. Bot Mode discovers profiles automatically from each connected gateway;
+use **Reconnect gateway** to refresh a roster that was connected during installation.
+
+A per-kind model or lane choice is the operator's, and it is applied before the forced tool call is
+pinned:
 
 ```bash
-hmr hermes bootstrap --apply
+hmr hermes profiles --set-model screening=MODEL@PROVIDER --apply
+hmr hermes profiles --set-lane synthesis=agent --apply
+hmr hermes profiles --show
 ```
 
-To update only the bounded Searcher profile while leaving other managed profiles untouched:
-
-```bash
-hmr hermes bootstrap --profile hmr-searcher --apply
-```
-
-Bootstrap creates clean `hmr-coordinator`, `hmr-searcher`, `hmr-selector`, `hmr-extractor`,
-`hmr-synthesizer`, and `hmr-auditor` profiles through Hermes's public profile command. It copies only
-the current model/provider/timezone selection and enables the terminal, file, and skills toolsets. It
-refuses to overwrite unmanaged profiles or managed files edited after installation.
-
-Bot Mode discovers profiles automatically from each connected Hermes gateway. If profiles were
-added while Hermes Desktop was connected, use **Reconnect gateway** to refresh its roster. Preview
-the cron fleet, then apply it explicitly after enabling gateway profile multiplexing:
-
-```bash
-hmr hermes routines
-hmr hermes routines --apply
-```
-
-This creates six base Routines, all script-only: a Coordinator tick and one serial runner per
-specialist (`hmr hermes drain --role ROLE`). A runner claims exactly one Task, opens one fresh Hermes
-session for it with an instruction file of exact commands, and claims the next Task immediately after
-acceptance until its queue is empty. A session that cannot finish its Task is failed with backoff and
-the runner moves on. Full-text acquisition has no semantic choice and is submitted without a model
-session. Each living Review also gets one visible, script-only Routine at its actual cadence. Stable
-idle minutes use zero model calls.
+`--set-model` takes `MODEL` or `MODEL@PROVIDER`. Choices are stored in
+`<hermes_home>/hmr-steps.json` and cover the four constrained kinds only.
 
 Each session has a model-turn ceiling set in its profile:
 
 | Profile | Turn ceiling |
 | --- | --- |
-| `hmr-searcher` | 8 |
 | `hmr-selector` | 16 |
 | `hmr-extractor` | 60 |
 | `hmr-synthesizer` | 40 |
 | `hmr-auditor` | 48 |
+| `hmr-screen`, `hmr-cover`, `hmr-link`, `hmr-finding` | 2 |
 
-Verify profiles, `hmr`, multiplexing, cron schedulers, managed scripts/jobs, cron health, and paused
-Routines with:
+A constrained call is given 5 minutes and a session 75 minutes. The runner renews the claim every 10
+minutes while a session is still working, so a slow session cannot outlive its 60-minute lease.
+
+Verify profiles, the resolved `hmr`, the forced tool call, the hosted tool server, the installed
+quick commands, per-kind assignments, and any leftover cron fleet with:
 
 ```bash
 hmr hermes doctor
 ```
 
-Hermes keeps its own pause state for each Routine. Inspect or change all managed Routines at once:
+## Install the step commands
 
 ```bash
-hmr hermes routines --status
-hmr hermes routines --pause-all
-hmr hermes routines --resume-all
+hmr hermes commands
+hmr hermes commands --apply
+hmr hermes commands --status
+hmr hermes commands --apply --review REVIEW
+hmr hermes commands --remove --apply
 ```
+
+The edit is a marked region inside the host `config.yaml`, owned by a digest manifest. The file is
+backed up once before the first change, and the result is re-parsed and compared against the
+original, so an unmanaged quick command or any other setting cannot be changed. An entry edited
+outside `hmr` is refused rather than overwritten. With `--review` the Review name is baked into every
+command string; without it each command uses the stored active Review.
+
+| Command | What it does |
+| --- | --- |
+| `/hmr-search` | Runs the search step |
+| `/hmr-selector` | Screens and selects |
+| `/hmr-extractor` | Acquires full text, links studies, and assesses |
+| `/hmr-synthesizer` | Writes findings |
+| `/hmr-auditor` | Audits frozen evidence |
+| `/hmr-status` | Prints stage progress, recent failures, and the next command |
+| `/hmr-next` | Names the routed stage and the command for it |
+| `/hmr-stop` | Asks running steps to finish the item in flight and stop |
+| `/hmr-finalize` | Finalizes the active Cycle's Run |
+| `/hmr-retry` | Reopens a blocked Cycle in place |
+
+## The tool server
+
+```bash
+hmr mcp serve --role ROLE --kind KIND
+```
+
+The server speaks JSON-RPC 2.0 over newline-delimited stdio and is started by a constrained
+profile's `mcp_servers` entry. That entry is static: the server resolves its own claim from
+`<store>/steps/<step>/current.json`, so no task id, path, or claim token is ever written into a
+config file or a prompt. With no current item every tool call is refused. A submitted payload is
+mapped into the task's pre-filled proposal and put through the same `submit` path as a session, and a
+rejection comes back to the model as the validator's own message.
 
 ## Workflow
 
-For normal use, open `hmr-coordinator` in the Bot roster and describe the research request in ordinary
-language. The Coordinator confirms the protocol and creates a human-named Review. Cron workers claim
-bounded Tasks directly; no Bot or human relays IDs.
+For normal use, open `hmr-coordinator` in the Bot roster and describe the research request in
+ordinary language. The Coordinator confirms the protocol, creates a human-named Review, and tells you
+which command to run next.
+
+```bash
+hmr step use exercise-review
+hmr step status
+```
+
+Then run one step at a time, in order: `/hmr-search`, `/hmr-selector`, `/hmr-extractor`,
+`/hmr-synthesizer`, `/hmr-auditor`, and `/hmr-finalize`. `/hmr-status` after each one reports what is
+done, what failed, and the command for the routed stage. A step does nothing until you run it.
+
+The same steps are available as CLI commands, with flags the quick commands cannot carry:
+
+```bash
+hmr step select
+hmr step select --limit 10
+hmr step select --foreground
+hmr step extract --review exercise-review --max-wait 60
+hmr step prompt select
+hmr step stop --step select
+hmr step retry --reason "Corrected the model endpoint"
+hmr step finalize
+hmr step use --clear
+```
+
+A step claims only the active Review. It holds a per-step lock, so a second runner is refused rather
+than racing. A failed item is unavailable for 5 minutes, so the step waits that window out instead of
+mistaking it for an empty queue. A single wait is bounded by `--max-wait`, 40 minutes by default, and
+repeated empty rounds end the step as drained. An interrupted runner's claim is released on the
+next start without spending one of its three attempts. A step ends as drained, stopped,
+limit_reached, blocked, refused, or failed, and `hmr step prompt STEP` prints the prompt a
+constrained call would send without sending it.
 
 One-off and living Reviews use the same interface:
 
@@ -131,19 +229,20 @@ hmr review status living-exercise
 hmr review pause living-exercise
 hmr review resume living-exercise
 hmr --actor hmr-coordinator review retry living-exercise \
-  --reason "Workers were restarted after an outage"
+  --reason "Corrected the model endpoint"
 hmr --actor hmr-coordinator review cancel living-exercise \
   --reason "Replace a blocked or defective Cycle"
 hmr review run-now living-exercise
 ```
 
-Pausing a Review stops new claims and never marks its waiting Tasks abandoned; resuming restarts that
-clock. A pending Task that no worker claims within 95 active minutes blocks the Cycle. `review retry`
-reopens a blocked latest Cycle in place: blocked Tasks return to the queue with fresh attempts and
-keep any partial proposal edits, and all accepted work is kept. `review run-now` instead starts a new
-Cycle on a new Run. An immutable protocol change uses `hmr review fork`; a standalone Run can be
-brought under human status management with `hmr review adopt`. A living Review starts its first
-Cycle immediately. Schedule fires during an active Cycle coalesce into one catch-up Cycle.
+Pausing a Review stops new claims and leaves its waiting Tasks alone; a Task that nobody claims
+between two steps is normal and never blocks a Cycle. `review retry` reopens a blocked latest Cycle
+in place: blocked Tasks return to the queue with fresh attempts and keep any partial proposal edits,
+and all accepted work is kept. `review run-now` instead starts a new Cycle on a new Run. An immutable
+protocol change uses `hmr review fork`; a standalone Run can be brought under human status management
+with `hmr review adopt`. A living Review replays its accepted search plan. Every step first advances
+routing, leases, finalization, and a coalesced catch-up Cycle. Nothing fires a schedule now that the
+cron fleet is retired, so a refresh Cycle starts when you run `hmr review run-now`.
 
 For scripted or diagnostic use, create a Run from a versioned PICO/PCC request:
 
@@ -151,13 +250,26 @@ For scripted or diagnostic use, create a Run from a versioned PICO/PCC request:
 hmr run create --request examples/research-protocol.json
 ```
 
-The Coordinator can inspect a standalone Run diagnostically:
+## Operator diagnostics
+
+These commands inspect and repair; normal work goes through steps.
 
 ```bash
+hmr hermes doctor
+hmr hermes commands --status
+hmr hermes routines --status
+hmr hermes routines --remove --apply
+hmr step status --review exercise-review
+hmr work notifications
+hmr work fail CLAIM_ID --code CODE --message MESSAGE
+hmr run status RUN_ID
 hmr --actor hmr-coordinator run next RUN_ID
 ```
 
-Serial runners claim work for their sessions. For diagnostics, a worker profile can claim directly:
+`hmr hermes routines` is removal-only. It exists to take a 0.5.x cron fleet off a host that still has
+one, because a Routine that claims work on a timer would race the operator's own step runner.
+
+A role can also claim directly, which claims across every active Review rather than the active one:
 
 ```bash
 hmr search claim
@@ -167,15 +279,9 @@ hmr synthesize claim
 hmr audit claim
 ```
 
-Each claim returns a bounded packet/proposal, a 60-minute session-bound token, and exact source,
-submit, and failure commands that name the resolved `hmr` executable. Failures retry after 5 and 30
-minutes; the third blocks the Cycle. Accepting any Task routes the next Task at once, so the
-Coordinator tick is a safety net rather than a one-Task-per-minute throttle. The Searcher claim also
-returns one `search execute` command that records the initial plan and performs retrieval in one
-bounded operation. A retry resumes the materialized child search with the same frozen plan; changing
-it requires a new Review fork.
-
-The older explicit-ID commands remain operator diagnostics for non-managed Runs:
+Each claim returns a bounded packet and proposal, a 60-minute session-bound token, and exact source,
+submit, and failure commands that name the resolved `hmr` executable. The explicit-ID commands remain
+operator diagnostics for non-managed Runs:
 
 ```bash
 hmr search next RUN_ID TASK_ID
@@ -195,11 +301,12 @@ hmr audit next RUN_ID TASK_ID
 hmr audit submit RUN_ID TASK_ID --from PROPOSAL.json
 ```
 
-Hermes profiles normally provide actor/session identity. `--actor` exists for deterministic testing
-and recovery; global options such as `--actor`, `--store`, and `--claim-token` may appear before or
-after the subcommand. An active Task can read only allowed sources. `find` ranks the locators of the
-Task's documents by search words with short snippets, and `read` returns one locator's exact text for
-verbatim quotes. `show` pages a whole source, including logical rows, in 16 KiB pages:
+Hermes profiles normally provide actor and session identity. `--actor` exists for deterministic
+testing and recovery; global options such as `--actor`, `--store`, and `--claim-token` may appear
+before or after the subcommand. An active Task can read only allowed sources. `find` ranks the
+locators of the Task's documents by search words with short snippets, and `read` returns one
+locator's exact text for verbatim quotes. `show` pages a whole source, including logical rows, in
+16 KiB pages:
 
 ```bash
 hmr source find RUN_ID TASK_ID Mini-CEX satisfaction survey
@@ -227,29 +334,35 @@ hmr run status RUN_ID
 hmr --actor hmr-coordinator finalize RUN_ID
 ```
 
-For review-preparation mode, supply explicit retrieval and full-text limits (or `all`). Search
-strategies and all-results retrieval retain digest/token approval gates.
+For review-preparation mode, supply explicit retrieval and full-text limits, or `all`. Search
+strategies and all-results retrieval retain digest and token approval gates.
 
 Report protocols must include PubMed or Europe PMC. At least one of those biomedical indexes must be
 available and return a nonzero preflight count before retrieval proceeds. OpenAlex, Semantic Scholar,
 registries, and other configured sources remain useful supplements; an unavailable supplement is
 recorded in provenance without invalidating an otherwise viable report search. For high recall,
-search plans use the required framework concepts (PICO population plus intervention, PECO population
-plus exposure, or PCC population plus concept) and reserve comparison and outcome terms for
-eligibility, synthesis, or a documented precision variant.
+search plans use the required framework concepts, which are PICO population plus intervention, PECO
+population plus exposure, or PCC population plus concept, and reserve comparison and outcome terms
+for eligibility, synthesis, or a documented precision variant.
 
 ## Safety properties
 
 - Run and Task IDs resolve only inside the configured artifact store.
 - Packets are capped at 32 KiB and submissions must cover exactly their assigned targets.
+- A constrained schema buys shape only. Every value, identifier, digest, and cross-field rule is
+  checked when the mapped proposal reaches the normal submit path.
+- Identity and provenance fields are never taken from a model payload: record, study, and finding
+  ids, protocol outcomes, schema versions, base digests, and certainty origin stay as the Task minted
+  them.
 - Proposal base digests reject stale work; accepted retries are idempotent only when byte-equivalent
   JSON content has the same canonical digest.
 - Search snapshots, evidence revisions, audit results, and exports are content-addressed.
 - Parent search reservations and Task child links are committed together; interrupted child runs
   recreate a missing idempotent reservation before retrieval resumes.
-- Audit receipts bind every reviewed finding/report target to an independent Auditor profile and to
-  a digest of the target's assertion and every source it may be checked against. Report targets are
-  audited in record-level groups; unchanged groups keep their receipts when other evidence changes.
+- Audit receipts bind every reviewed finding and report target to an independent Auditor profile and
+  to a digest of the target's assertion and every source it may be checked against. Report targets
+  are audited in record-level groups; unchanged groups keep their receipts when other evidence
+  changes.
 - An audit verdict of `revise` returns one audit group at a time to the responsible specialist. A
   group still unresolved after two corrections halts the Run until an operator runs `review retry`.
 - Citation document IDs, locators, and verbatim quotes are checked against the stored corpus.
@@ -257,7 +370,7 @@ eligibility, synthesis, or a documented precision variant.
   still the responsibility of the isolated specialist profiles.
 
 Living Reviews freeze and replay their accepted search plan. Corpus identity prefers DOI, then PMID,
-PMCID, and source/source-ID. Digest-identical work receives an immutable reuse receipt; changed
+PMCID, and source with source ID. Digest-identical work receives an immutable reuse receipt; changed
 metadata or retraction state is rescreened. An unchanged refresh records a checkpoint referring to
 the prior report and skips downstream inference. Changed audit targets always receive a fresh audit.
 
@@ -273,36 +386,21 @@ The source is never modified. Existing native-review, completion, verification, 
 are archived under `provenance/v0.4`; a fresh independent audit under the current audit contract is
 mandatory.
 
-## Qualification and development
-
-The first operational gate is deliberately small: two fresh Selector bot chats each inspect and
-record one synthetic article decision.
-
-```bash
-uv run python scripts/qualify_hermes.py \
-  --hermes-home /path/to/isolated-hermes-home
-```
-
-Only after that passes should the three-run full qualification be attempted:
-
-```bash
-uv run python scripts/qualify_hermes.py \
-  --hermes-home /path/to/isolated-hermes-home \
-  --full-runs 3 \
-  --output qualification.json
-```
+## Development
 
 Local deterministic checks:
 
 ```bash
 uv sync --locked --extra dev
 uv run ruff check .
-uv run pytest
+uv run --extra dev pytest -q
 uv build
 ```
+
+Operational gates against a real Hermes host are recorded in [validation status](VALIDATION.md).
 
 See [project context](CONTEXT.md), the
 [CLI architecture decision](docs/adr/0001-hermes-skills-over-deterministic-cli.md), the
 [cron architecture decision](docs/adr/0002-cron-backed-review-automation.md), the
-[serial runner decision](docs/adr/0003-serial-runners-and-outcome-decisions.md), and
-[validation status](VALIDATION.md).
+[serial runner decision](docs/adr/0003-serial-runners-and-outcome-decisions.md), and the
+[step and constrained-call decision](docs/adr/0004-user-invoked-steps-and-constrained-tool-calls.md).

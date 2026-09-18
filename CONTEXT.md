@@ -2,10 +2,11 @@
 
 ## Vision
 
-Hermes Medical Research turns a structured medical question into an auditable evidence report. It
-uses persistent Hermes bot profiles for semantic work and a deterministic Python boundary for every
-stateful or safety-critical operation. No model is trusted to preserve corpus integrity, invent its
-own task scope, validate its own citations, or declare the run complete.
+Hermes Medical Research turns a structured medical question into an auditable evidence report. An
+operator advances the work one step at a time. Each item is answered by one isolated Hermes surface,
+and every stateful or safety-critical operation stays behind a deterministic Python boundary. No
+model is trusted to preserve corpus integrity, invent its own task scope, validate its own citations,
+or declare the run complete.
 
 ## Domain language
 
@@ -17,21 +18,27 @@ own task scope, validate its own citations, or declare the run complete.
 - A **Proposal** is the only agent-editable staging artifact. It has no authority until accepted.
 - A **Receipt** binds an accepted result to its Run, Task, actor profile, session, input digests, and
   immutable result file.
-- A **Lease** is a 60-minute, session-bound capability to perform one cron-managed Task. Failed
-  Leases retry after 5 and 30 minutes and the third failure blocks the Cycle.
-- An **Outcome decision** (a `dispositions` row) records, for one assessed record, whether each
+- A **Step** is one operator act. It claims and answers one stage's Tasks in the active Review until
+  that queue is empty, then stops. Nothing advances a Review unless someone runs a Step.
+- A **Lane** is the surface that answers one item: `call`, `agent`, or `none`. The Lane of a kind is
+  deterministic.
+- A **Constrained call** is one fresh tool-free session whose profile exposes exactly one submit tool
+  and forces a tool call, so the answer arrives as a grammar-constrained payload.
+- A **Lease** is a 60-minute, session-bound capability to perform one Task. Failed Leases retry after
+  5 and 30 minutes and the third failure blocks the Cycle. An interrupted Step releases its Lease
+  without spending an attempt.
+- An **Outcome decision** is a `dispositions` row. It records, for one assessed record, whether each
   protocol outcome was extracted, not reported, or not applicable, with the locations inspected.
-- A **Runner** is a script-only Routine that claims one Task at a time for one role and starts one
-  fresh Hermes session per Task with an instruction file of exact commands.
 - A **Halt** stops a Run when an audit group stays unresolved after two corrections; an operator
-  clears it with `hmr review retry`.
+  clears it with `hmr review retry` or `hmr step retry`.
 - The **Outbox** carries only completed, no-change, and blocked Cycle notifications to Coordinator.
-- The **Corpus** is the search and source material owned by the CLI. Bots access it only through a
-  bounded Task packet or paginated `hmr source show` calls.
+- The **Corpus** is the search and source material owned by the CLI. Sessions access it only through
+  a bounded Task packet or paginated `hmr source show` calls.
 - The **Candidate** is the frozen pre-audit protocol, workflow provenance, evidence, and synthesis.
-- **Coordinator, Searcher, Selector, Extractor, Synthesizer, and Auditor** are isolated Hermes
-  profiles. Cron workers claim Tasks from the CLI; the Auditor is independent of every evidence
-  author.
+- **Coordinator, Selector, Extractor, Synthesizer, and Auditor** are isolated Hermes session
+  profiles; `hmr-screen`, `hmr-cover`, `hmr-link`, and `hmr-finding` are isolated constrained-call
+  profiles. Search and full-text acquisition run no session at all. The Auditor is independent of
+  every evidence author.
 
 ## Architectural principles
 
@@ -40,13 +47,16 @@ own task scope, validate its own citations, or declare the run complete.
 2. The CLI owns schemas, exact coverage, citations, digests, legal transitions, and completion.
 3. Task inputs and accepted results are immutable and content-addressed. Stale proposals fail closed.
 4. Work is deliberately small: one record, one outcome, or one audit group per Task, and one fresh
-   Hermes session per Task.
-5. Hermes integration uses public profile, skill, terminal, file, and Bot Mode surfaces only.
+   Hermes session or one constrained call per item. Nothing batches items, and no surface keeps
+   context between items.
+5. Hermes integration uses public profile, quick-command, MCP server, skill, terminal, file, and Bot
+   Mode surfaces only.
 6. Bootstrap is non-mutating by default and never overwrites an unmanaged or locally edited profile.
 7. v0.4 runs may be copied into the shared store, but old host-native review remains provenance only;
    finalization requires a fresh v0.5 independent audit.
-8. Hermes cron is an edge Adapter, not the workflow authority. Review, Cycle, Lease, retry, reuse,
-   and notification transitions remain deterministic and restart-safe in the CLI core.
+8. Hermes is an edge Adapter for two things: invoking a session and giving the operator a command to
+   type. No model output has authority, whatever shape it arrives in. Review, Cycle, Lease, retry,
+   reuse, and notification transitions remain deterministic and restart-safe in the CLI core.
 9. A living Review replays its accepted search plan. Protocol changes fork a new Review. Exact
    source digests permit reuse; changed metadata or retraction state invalidates affected work.
 
@@ -54,9 +64,14 @@ own task scope, validate its own citations, or declare the run complete.
 
 `hermes_medical_research.tasks` is the deep per-Run Module.
 `hermes_medical_research.automation` is the deep cross-Run Review/queue Module. Their narrow
-Interface is the `hmr` CLI. `hermes_medical_research.hermes` is the localized true-external Adapter
-for profiles and Routines; it does not implement workflow state. Search retrieval and evidence
-validation remain internal libraries. Hermes skills describe commands; they do not implement
-correctness. The default store is
-`$XDG_DATA_HOME/hermes-medical-research` (or `~/.local/share/hermes-medical-research`) and can be
-isolated with `HMR_HOME`.
+Interface is the `hmr` CLI. `hermes_medical_research.steps` is the user-invoked runner: it picks the
+Lane, claims one item at a time, and owns the status a step reports.
+`hermes_medical_research.answers` holds the constrained answer schemas and the prompts built from
+them. `hermes_medical_research.mcp_server` is the tool Adapter that maps one checked payload into a
+proposal and through the normal submit path. `hermes_medical_research.hermes` is the localized
+true-external Adapter for managed profiles and session invocation, and
+`hermes_medical_research.quick_commands` is the Adapter for the host command entries. Neither
+implements workflow state. Search retrieval and evidence validation remain internal libraries.
+Hermes skills describe commands; they do not implement correctness. The default store is
+`$XDG_DATA_HOME/hermes-medical-research`, falling back to `~/.local/share/hermes-medical-research`,
+and can be isolated with `HMR_HOME`.

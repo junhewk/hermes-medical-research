@@ -2,7 +2,7 @@
 
 ## Deterministic qualification
 
-The v0.5 cutover is covered by the repository test suite. Its new architecture cases verify:
+The current design is covered by the repository test suite. Its architecture cases verify:
 
 - creation and resolution of opaque Run and Task IDs inside an isolated artifact root;
 - one-record Selector routing, bounded source access, exact target coverage, and CLI-recorded state;
@@ -37,6 +37,39 @@ The v0.5 cutover is covered by the repository test suite. Its new architecture c
   failure handling that does not stop the queue, deterministic full-text submission, per-record
   audit groups with screening batches, content-bound audit reuse after a changed record, correction
   halts, and routine pause controls through Hermes's public cron CLI;
+- steps (0.6.0): one constrained call per record with one decision each, a call that does not answer
+  retried twice and then escalated to the session lane, an exhausted ladder that fails the claim with
+  its reason, a single failure that does not end the step, search and full-text acquisition answered
+  with no model at all, the deterministic lane of every kind, a step that claims only its own Review,
+  the active-Review pointer and the message it raises when none is set, a paused Review reported
+  instead of worked, a stop request honored between items, `--limit` leaving the rest claimable, an
+  interrupted claim released without spending an attempt, a second runner refused while the step lock
+  is held, status that reports progress, failures and the next command, a detached worker that
+  inherits none of the quick command's pipes, a second start that reports the running job instead of
+  racing it, and a bounded backoff wait that never blocks a Cycle;
+- constrained answers (0.6.0): every schema restricted to the grammar-safe keyword subset, no payload
+  that is a bare string or enum at the top level, a prompt prefix that is identical across records
+  and carries no record text, a retry hint confined to the tail, an answer contract rendered from the
+  schema, off-schema answers rejected with an actionable message, identity fields and digests
+  untouched when a payload is applied, and coverage outcomes, study merges and finding citations
+  checked against the packet that was shown;
+- the tool server (0.6.0): a constrained profile that sees exactly one tool, the MCP handshake and
+  tool listing, newline-delimited serving until stdin closes, a submitted decision accepted through
+  the normal submit path, an off-schema answer returned to the model and never written, a validation
+  rejection returned as the validator's own message, every call refused when no task is claimed, a
+  tool that does not match the claimed kind refused, and a claim token that is never written into a
+  config file or a prompt;
+- quick commands (0.6.0): a dry run that writes nothing, an apply that keeps comments, key order and
+  foreign quick commands, self-contained commands with no arguments, a quoted baked-in Review name,
+  refusal of an unmanaged name and of a managed entry edited outside the package, removal that
+  restores the original bytes, and refusal of a config that is not a mapping;
+- managed profiles (0.6.0): a constrained profile that hosts its submit tool and pins
+  `tool_choice: required` on the provider entry it selects, a per-kind assignment that overrides only
+  the model and provider, removal that deletes only the files the package installed, the retired
+  Searcher profile reported and removed, and doctor reporting a legacy cron fleet or missing quick
+  commands as not ready;
+- the read-only manifest view (0.6.0): a claim that retries a busy Run lock instead of ending the
+  runner;
 - the retained retrieval, evidence, appraisal, synthesis, verification, and export behavior.
 
 Run locally with:
@@ -44,29 +77,46 @@ Run locally with:
 ```bash
 uv sync --locked --extra dev
 uv run ruff check .
-uv run pytest
+uv run --extra dev pytest -q
 uv build
 ```
 
-The 0.5.11 local run on 2026-09-17 collected and passed 218 tests; Ruff, `git diff --check`, wheel
-construction, source-distribution construction, and a wheel-only `hmr` smoke test also passed. The
-final count is updated with each release commit.
+The 0.6.0 local run on 2026-09-18 collected and passed 274 tests, and Ruff and `git diff --check`
+passed with it. The final count is updated with each release commit.
 
 ## Hermes operational gates
 
-Hermes itself is not available in every development environment. Operational qualification therefore
-has two explicit gates and preserves its JSON output:
+Hermes itself is not available in every development environment, and the constrained lane depends on
+how the host model server treats a forced tool call. Four host facts are therefore verified by hand
+before the step commands are installed on a host:
 
-1. In an isolated Hermes home, bootstrap the six profiles, apply the managed cron fleet, and run two
-   fresh Selector host sessions against one synthetic article each. Each worker must claim its
-   Task, inspect only its bounded source, submit one decision, and leave an accepted receipt.
-2. Only if both Selector workers pass, run three clean end-to-end Reviews through the cron queue.
-   Every Cycle must complete through Searcher, Selector, Extractor, Synthesizer, and Auditor.
-3. Qualify one living Review with a changed refresh and one exact no-change refresh, verify coalescing,
-   pause/resume, Outbox acknowledgement, retry/backoff, and gateway-restart recovery.
+1. The cron delete verb. Confirm that `hermes -p PROFILE cron delete JOB_ID` removes a job on the
+   installed Hermes version, because that is how `hmr hermes routines --remove --apply` takes a
+   0.5.x fleet off the host.
+2. That `extra_body` reaches the wire. Confirm that the `tool_choice: required` pinned on the
+   provider entry a constrained profile selects is actually sent with the chat-completions request.
+3. That a profile-hosted stdio MCP server starts. Open a session on `hmr-screen` and confirm the
+   server starts and lists exactly `submit_screening`.
+4. That a forced tool call enforces its nested payload. Send one screening packet whose record text
+   invites a prose answer or an off-schema decision, and confirm the answer still arrives as one
+   `result` object whose `decision` is inside the enum.
 
-The harness is `scripts/qualify_hermes.py`. A failure of the first gate is a stop condition: do not
-weaken the CLI boundary or fall back to private delegated children.
+Only then re-screen the recorded 170-record corpus of `ai-med-ed-evidence-report-v4` in an isolated
+store and compare every decision with the recorded one. Its gates are:
+
+- every record decided;
+- zero unparseable or off-schema final answers, down from 7 of 170;
+- agreement with the recorded bot decisions at or above 152 of 163;
+- a mean under 15 seconds per record.
+
+The thresholds come from the one-shot screening measurement taken on that corpus on 2026-09-18: 170
+of 170 records answered in 20.2 minutes, 7.1 seconds mean, 7 answers prose rather than JSON, and 152
+of the 163 parseable answers agreeing with the recorded bot decisions. That run asked for the answer
+shape instead of constraining it, which is why 7 answers were prose, and it is not one of the gates.
+
+None of these five gates has been run. `scripts/qualify_hermes.py` is the 0.5.x harness and still
+installs the cron fleet, so it does not run them. A failure of a host fact is a stop condition: do
+not weaken the CLI boundary, and do not accept an unconstrained answer shape as a fallback.
 
 ### Current Hermes result (2026-09-15)
 
@@ -79,8 +129,9 @@ Run. The retained artifact is
 On 2026-09-16, the six profiles were also installed into the live `~/.hermes` registry on
 `jkworkstation`, used by Hermes Agent 0.21.3 and the macOS remote gateway. Bot Mode discovered them automatically, and a
 manual Selector task submitted through the macOS Bot roster produced one accepted CLI receipt. This
-result qualifies terminal access but predates ADR 0002. The cron fleet, multiplexed gateway, three
-full Reviews, and living-review gates have not yet been qualified.
+result qualifies terminal access but predates ADR 0002. The cron fleet and its three-full-Review and
+living-review gates are retired with 0.6.0, and gateway profile multiplexing is now reported by
+doctor without gating readiness, because a step starts its own session.
 
 ### Extractor qualification (2026-09-16, 0.5.7)
 
@@ -124,5 +175,5 @@ On 2026-09-17 the Hermes line split from the Claude Code/Codex plugin line. GitH
 `junhewk/medical-deep-research-plugin` was renamed `junhewk/hermes-medical-research`; the 0.4.0
 plugin line remains on branch `legacy/claude-codex-0.4` and tag `v0.4.0`. Releases are Git tags
 installed with `uv tool install` or `pipx install` from the repository. There is no PyPI or
-plugin-ZIP release in this design. The cron fleet, multiplexed gateway, three full Reviews, and
-living-review gates above remain open until recorded here.
+plugin-ZIP release in this design. The 0.6.0 host facts and the re-screening comparison above remain
+open until recorded here.

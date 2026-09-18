@@ -28,3 +28,5 @@ record did not report; search the full text with `source_find` before supporting
 Edit only the proposal with the file tool and run the exact `submit` command. On an unrecoverable
 error, run the exact `fail` command. Return only the `run_id`, `task_id`, and recorded state. Never
 send corpus or report content between Bots, edit skills, or run scripts.
+
+When the instruction file names a typed submit tool, call it with one `result` object instead of editing the proposal and running a command. It is checked the same way and costs fewer turns.

@@ -164,8 +164,53 @@ STABLE_PACKET_KEYS = {
 }
 
 
+def response_format(kind: str) -> dict[str, Any]:
+    """The request field that constrains a tool-free answer to one kind's shape.
+
+    ``json_object`` with a schema is the form both llama.cpp and the OpenAI-compatible servers
+    accept, and it is the only way to constrain a session that has no tools: a schema and a tool
+    list cannot be combined on this gateway, which returns HTTP 400 for the pair.
+    """
+    return {"type": "json_object", "schema": RESULT_SCHEMAS[kind]}
+
+
+def parse_answer(kind: str, text: str) -> dict[str, Any]:
+    """Read one constrained answer, tolerating a fence or a trailing sentence."""
+    stripped = (text or "").strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        stripped = stripped[stripped.index("{"):] if "{" in stripped else stripped
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        value = _first_object(stripped)
+    check_shape(value, RESULT_SCHEMAS[kind])
+    return value
+
+
+def _first_object(text: str) -> Any:
+    """The first brace-balanced object in the text, so a stray preface is survivable."""
+    depth = 0
+    start = -1
+    for index, character in enumerate(text):
+        if character == "{":
+            depth += 1
+            if depth == 1:
+                start = index
+        elif character == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    return json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    start = -1
+    raise ValidationError(
+        "the answer was not one JSON object; return only the object the contract describes"
+    )
+
+
 def schema_digest(kind: str) -> str:
-    return sha256(canonical(RESULT_SCHEMAS[kind]).encode()).hexdigest()
+    return sha256(canonical(response_format(kind)).encode()).hexdigest()
 
 
 def canonical(value: Any) -> str:

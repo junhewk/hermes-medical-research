@@ -12,7 +12,7 @@ import pytest
 from test_mcp_server import claimed_screening, protocol
 from test_research import completed_search
 
-from hermes_medical_research import hermes, mcp_server, steps
+from hermes_medical_research import hermes, steps
 from hermes_medical_research.automation import AutomationEngine
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import Actor, TaskEngine
@@ -39,21 +39,20 @@ PAYLOADS = {
 
 
 def answering(store: Path, decision: str = "exclude", *, record: list[str] | None = None):
-    """A constrained-call stub that answers through the tool server, as the model would."""
+    """A constrained-call stub: the session answers with schema JSON and nothing else."""
     def call(_executable, _home, _profile, prompt, kind):
         payload = dict(PAYLOADS[kind])
         if kind == "screening":
             payload["decision"] = decision
-        role = steps.ROLE_BY_KIND[kind]
-        server = mcp_server.ToolServer(store, role, (kind,))
-        text = server.call(f"submit_{kind}", {"result": payload})
         if record is not None:
             record.append(prompt)
-        return subprocess.CompletedProcess([], 0, text, "")
+        return subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+    del store
     return call
 
 
 def refusing(reply: str = "I cannot answer that."):
+    """A session that answers in prose, which is what the schema exists to prevent."""
     def call(_executable, _home, _profile, _prompt, _kind):
         return subprocess.CompletedProcess([], 0, reply, "")
     return call
@@ -119,7 +118,7 @@ async def test_an_unanswered_call_retries_then_escalates_to_the_session_lane(tmp
     )
 
     assert len(calls) == steps.CALL_ATTEMPTS
-    assert sessions == ["selector"]
+    assert sessions == ["selector"]  # one session with tools, after the constrained attempts
     assert (result["processed"], result["failed"]) == (1, 0)
     assert workspace.rows("screening")[0]["decision"] == "exclude"
 

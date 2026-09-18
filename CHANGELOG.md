@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.6.0 - 2026-09-18
+
+- Replaced the cron bot fleet with user-invoked steps. Work now advances only when the operator runs
+  one step, and a step claims and answers one stage's items until that queue is empty. On the real
+  170-record review the bot design took about 90 seconds per screening record and about 15 minutes
+  per extracted article, and 9 hours did not finish it, because every item was a multi-turn agent
+  session that read an instruction file, hand-edited `proposal.json`, and shelled out to a submit
+  command. One tool-free call per record screened all 170 records in 20.2 minutes, 7.1 seconds mean,
+  and agreed with the bot Selector on 152 of the 163 answers it could parse.
+- Made every step start a detached worker and return one line. A `type: exec` Hermes quick command
+  is killed after 30 seconds and receives no arguments, on the CLI and the messaging path alike, so
+  nothing about the work can be passed in: the active Review is `<store>/steps/active.json`, set by
+  `hmr step use NAME`, and progress, failures, and the next command live in
+  `<store>/steps/<review>/<step>/status.json`, which `hmr step status` reads.
+- Added `hmr hermes commands`, which installs one quick command per step into the host Hermes config
+  as a marked region owned by a digest manifest: `/hmr-search`, `/hmr-selector`, `/hmr-extractor`,
+  `/hmr-synthesizer`, `/hmr-auditor`, `/hmr-status`, `/hmr-next`, `/hmr-stop`, `/hmr-finalize`, and
+  `/hmr-retry`. The config is backed up once, re-parsed after the edit, and restored if anything
+  outside the managed entries changed.
+- Answered screening, coverage, study linking, and synthesis with one constrained tool call instead
+  of a session. The submit tool takes a single `result` object because llama.cpp compiles a real
+  grammar only for non-string tool arguments, and a string enum counts as a string: `result` with
+  `decision` and `reason` inside it binds, while a flat `decision` enum does not. Enforcement also
+  needs `tool_choice: required`, pinned in the profile's provider `extra_body`, because under `auto`
+  the tool grammar stays lazy until the model opens a tool call. In the measured screening run 7 of
+  170 answers were prose rather than JSON, which is why the shape is now constrained rather than
+  requested.
+- Chose a tool payload over `response_format`, measured on the operator's own gateway. A schema in
+  `response_format` works only without tools: the gateway returns HTTP 400 for tools plus
+  `response_format`, and llama-server drops the schema when tools are present. A JSON-Schema
+  `parameters` block composes with tools and is also how tools work on OpenAI, vLLM, SGLang, and
+  Ollama, so the design does not depend on one server.
+- Turned reasoning off in a constrained call, because llama.cpp ignores a schema while thinking is
+  enabled.
+- Made the lane of each Task kind deterministic. `call` covers screening, coverage, study linking,
+  and synthesis, each of which decides one packet. `agent` covers per-outcome assessment, audit, and
+  every audit correction, which must read arbitrary full text; a correction re-mints the same packet,
+  so a deterministic call would repeat the rejected answer. `none` covers search and full-text
+  acquisition, which call no model at all. Synthesis falls back to `agent` when its packet was
+  shortened to fit, because its rows are then summaries. A `call` gets two constrained attempts and
+  then one session with tools before the durable failure path runs.
+- Kept authority exactly where it was. The schemas buy shape only: every value, identifier, digest,
+  and cross-field rule is still checked by `validation` and `evidence` when the mapped proposal
+  reaches `TaskEngine.submit`, a rejection comes back to the model as the validator's own message,
+  and record, study, and finding ids, protocol outcomes, schema versions, base digests, and
+  certainty origin are never taken from a payload. The schemas are protocol-independent because a
+  profile's `extra_body` is fixed at bootstrap time.
+- Installed nine managed profiles. `hmr-screen`, `hmr-cover`, `hmr-link`, and `hmr-finding` host one
+  stdio MCP submit tool each, carry no skill and no shell toolset, and cap their answer tokens;
+  `hmr-coordinator`, `hmr-selector`, `hmr-extractor`, `hmr-synthesizer`, and `hmr-auditor` keep
+  their skill and tools. `hmr-searcher` is retired and removed, because the search step runs no
+  session. `hmr hermes profiles` creates, checks, and removes them and records a per-kind model and
+  lane in `<hermes_home>/hmr-steps.json`.
+- Renamed the CLI, the managed profiles, the managed manifests, and the store environment variable
+  from `mdr` to `hmr`, because `mdr` is the separate medical-deep-research line. `MDR_HOME` is still
+  honored and `mdr-*` actor profiles in existing receipts still resolve to their role, so old runs
+  stay readable.
+- Changed three queue rules the step model forces. A step waits out the 5-minute and 30-minute retry
+  backoff instead of mistaking a backed-off Task for an empty queue. Abandonment blocking after 95
+  minutes is deleted, because an unclaimed Task between two slash commands is now normal. An
+  interrupted runner releases its claim on the next start without spending one of its three
+  attempts, and a step claims only inside the Review it was pointed at.
+- Retired cron routine creation, the serial drain, `work probe`, `work cron-tick`, `hermes drain`,
+  and the `medical-search` skill, whose step now runs no session. `hmr hermes routines` is
+  removal-only, so a host that still has the fleet can be migrated; a Routine claiming on a timer
+  would race the operator's own step runner.
+- Served read-only manifest views from a stat-keyed cache. A submission validated every row against
+  a freshly loaded and deep-copied manifest, so on the production copy one appraisal validation took
+  119 seconds and held the Run lock throughout, which timed out every other claim and crashed the
+  extractor runner. The same validation now takes 0.11 seconds, and a busy Run lock is retried five
+  times at 30-second intervals instead of ending a runner.
+
 ## 0.5.11 - 2026-09-17
 
 - Seeded assessment proposals with one full `study-appraisal-...` template and `same_as` outcome

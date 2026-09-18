@@ -1,6 +1,6 @@
 # ADR 0003: Serial runners for every role and per-outcome decisions
 
-- Status: accepted
+- Status: accepted; worker runners and the three-clean-run cron gate superseded by ADR 0004
 - Date: 2026-09-17
 - Supersedes: ADR 0002's gated agent workers for Searcher, Extractor, Synthesizer, and Auditor;
   ADR 0001's consequence that the repository is renamed only after three full runs

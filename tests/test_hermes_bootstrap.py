@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from hermes_medical_research import quick_commands
-from hermes_medical_research.answers import MAX_TOKENS, schema_digest
+from hermes_medical_research.answers import MAX_TOKENS, response_format, schema_digest
 from hermes_medical_research.hermes import (
     MCP_SERVER_NAME,
     PROFILES,
@@ -127,7 +127,7 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
         }
         if spec.max_turns:
             expected["agent"] = {"max_turns": spec.max_turns}
-        if spec.kind:
+        if spec.role and not spec.kind:
             expected["mcp_servers"] = {
                 MCP_SERVER_NAME: {
                     "command": _hmr_path(),
@@ -138,8 +138,6 @@ def test_bootstrap_applies_clean_profiles_for_automatic_bot_discovery(
                         str(store.resolve()),
                         "--role",
                         spec.role,
-                        "--kind",
-                        spec.kind,
                     ],
                     "enabled": True,
                     "timeout": 300,
@@ -226,9 +224,7 @@ def test_bootstrap_can_update_only_one_profile(tmp_path, monkeypatch):
         bootstrap_profiles(apply=True, hermes_home=home, store=store, profile="hmr-searcher")
 
 
-def test_constrained_profile_hosts_its_submit_tool_and_forces_the_tool_call(
-    tmp_path, monkeypatch
-):
+def test_a_constrained_profile_carries_its_answer_schema_and_no_tools(tmp_path, monkeypatch):
     fake_hermes(tmp_path, monkeypatch)
     home = tmp_path / "hermes"
     store = tmp_path / "store"
@@ -238,40 +234,27 @@ def test_constrained_profile_hosts_its_submit_tool_and_forces_the_tool_call(
     bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
 
     config = yaml.safe_load((home / "profiles" / "hmr-screen" / "config.yaml").read_text())
-    assert config["mcp_servers"] == {
-        MCP_SERVER_NAME: {
-            "command": _hmr_path(),
-            "args": [
-                "mcp",
-                "serve",
-                "--store",
-                str(store.resolve()),
-                "--role",
-                "selector",
-                "--kind",
-                "screening",
-            ],
-            "enabled": True,
-            "timeout": 300,
-        }
+    # A schema applies only to a session with no tools: tools plus a response format is refused by
+    # the gateway, and Hermes merges ``extra_body`` from the entry ``model.provider`` names.
+    assert MCP_SERVER_NAME not in (config.get("mcp_servers") or {})
+    assert config["providers"]["selected"]["extra_body"] == {
+        "response_format": response_format("screening")
     }
-    # ``required`` is what makes the model server compile the tool grammar from the first token,
-    # and Hermes merges ``extra_body`` from the entry that ``model.provider`` names.
-    assert config["providers"]["selected"]["extra_body"] == {"tool_choice": "required"}
     assert config["custom_providers"] == [
         {
             "name": "local",
             "base_url": "http://localhost:8091/v1",
             "model": "base-model",
-            "extra_body": {"tool_choice": "required"},
+            "extra_body": {"response_format": response_format("screening")},
         }
     ]
     assert config["model"]["max_tokens"] == MAX_TOKENS["screening"]
     assert config["agent"] == {"max_turns": 2}
     assert config["tools"] == {"enabled_toolsets": []}
 
+    # The session profile is the opposite: tools, no schema, and the typed submit tools.
     session = yaml.safe_load((home / "profiles" / "hmr-selector" / "config.yaml").read_text())
-    assert MCP_SERVER_NAME not in (session.get("mcp_servers") or {})
+    assert MCP_SERVER_NAME in session["mcp_servers"]
     assert session["providers"] == {"selected": {"base_url": "http://localhost:8091"}}
     assert session["tools"] == {"enabled_toolsets": ["terminal", "file", "skills"]}
     assert "max_tokens" not in session["model"]
@@ -284,10 +267,8 @@ def test_constrained_profile_hosts_its_submit_tool_and_forces_the_tool_call(
     assert entry["ready"] and not entry["problems"]
     assert entry["schema"] == {
         "kind": "screening",
-        "tool": "submit_screening",
         "schema_digest": schema_digest("screening"),
-        "tool_choice": "required",
-        "mcp_server": True,
+        "response_format": True,
         "provider_entry": "providers.selected",
     }
 
@@ -324,12 +305,22 @@ def test_assignment_overrides_only_the_model_and_provider(tmp_path, monkeypatch)
         "provider": "selected",
         "max_tokens": MAX_TOKENS["coverage"],
     }
-    # Only the model choice moved: the forced tool call, the tool server and the copied provider
-    # definition are identical to the profile that has no assignment.
-    assert screen["providers"] == unassigned["providers"]
-    assert screen["custom_providers"] == unassigned["custom_providers"]
+    # Only the model choice moved. Each profile still carries its own kind's schema, so the
+    # provider definitions are compared without it.
+    def without_schema(entry: dict) -> dict:
+        return {key: value for key, value in entry.items() if key != "extra_body"}
+
+    assert without_schema(screen["providers"]["selected"]) == without_schema(
+        unassigned["providers"]["selected"]
+    )
+    assert [without_schema(item) for item in screen["custom_providers"]] == [
+        without_schema(item) for item in unassigned["custom_providers"]
+    ]
+    assert screen["providers"]["selected"]["extra_body"] == {
+        "response_format": response_format("screening")
+    }
     assert screen["timezone"] == unassigned["timezone"]
-    assert screen["mcp_servers"][MCP_SERVER_NAME]["args"][-1] == "screening"
+    assert MCP_SERVER_NAME not in (screen.get("mcp_servers") or {})
 
     finding = yaml.safe_load((home / "profiles" / "hmr-finding" / "config.yaml").read_text())
     assert finding["model"]["default"] == "big-model"

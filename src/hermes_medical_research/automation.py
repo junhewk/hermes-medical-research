@@ -762,33 +762,6 @@ class AutomationEngine:
             "count": len(pending),
         }
 
-    async def cron_tick(self) -> str:
-        """Advance work and lease at most one human notification for Bot Chat delivery."""
-        await self.tick()
-        current = self.clock()
-        if not self.outbox.is_dir():
-            return ""
-        with self.lock:
-            for path in sorted(self.outbox.glob("event-*.json")):
-                event = _read_json(path)
-                if event.get("state") != "pending":
-                    continue
-                leased_until = event.get("delivery_lease_until")
-                if leased_until and current < _parse(leased_until):
-                    continue
-                event["delivery_lease_until"] = _at(current + timedelta(minutes=60))
-                event["delivery_attempts"] = int(event.get("delivery_attempts", 0)) + 1
-                _write_json(path, event)
-                label = event["kind"].removeprefix("cycle.").replace("_", " ")
-                return (
-                    f'Medical Review "{event["review"]}" cycle {event["cycle"]} '
-                    f"is {label}. Event {event['event_id']}. "
-                    f"Acknowledge after presenting this update with: "
-                    f"{hmr_command()} --store {shlex.quote(str(self.root))} "
-                    f"review acknowledge {event['event_id']}"
-                )
-        return ""
-
     def _eligible(
         self, role: str, *, mutate: bool, review: str | None = None
     ) -> list[dict[str, Any]]:

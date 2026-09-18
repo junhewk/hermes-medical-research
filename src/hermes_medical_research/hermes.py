@@ -107,20 +107,25 @@ PROFILES: dict[str, ProfileSpec] = {
 CALL_PROFILES = {spec.kind: name for name, spec in PROFILES.items() if spec.kind}
 SESSION_PROFILES = {spec.role: name for name, spec in PROFILES.items()
                     if spec.kind is None and spec.role}
-# 0.5.x installed a Searcher profile for a role that now runs no session at all.
-RETIRED_PROFILES = ("hmr-searcher", "mdr-searcher")
+# 0.5.x installed a Searcher profile for a role that now runs no session at all, and named every
+# profile under the old namespace.  Both are removed by the profile command.
+RETIRED_PROFILES = (
+    "hmr-searcher",
+    "mdr-coordinator",
+    "mdr-searcher",
+    "mdr-selector",
+    "mdr-extractor",
+    "mdr-synthesizer",
+    "mdr-auditor",
+)
 MANAGED = "hmr-managed.json"
 ROUTINES_MANAGED = "hmr-routines.json"
+# 0.5.x wrote the same manifests under the old namespace.  Both are read so a host installed by
+# 0.5.x can be migrated and cleaned up; only the new names are ever written.
+LEGACY_MANAGED = "mdr-managed.json"
+LEGACY_ROUTINES_MANAGED = "mdr-routines.json"
 ASSIGNMENT_FILE = "hmr-steps.json"
 MCP_SERVER_NAME = "hmr-tasks"
-WORKER_ROLES = ("searcher", "selector", "extractor", "synthesizer", "auditor")
-ROLE_COMMANDS = {
-    "searcher": "search",
-    "selector": "select",
-    "extractor": "extract",
-    "synthesizer": "synthesize",
-    "auditor": "audit",
-}
 # One session may take many slow model turns; the runner renews its claim while it works.
 HOST_TIMEOUT_SECONDS = 75 * 60
 # A constrained call is one short turn; 7 s measured, with headroom for a cold prefix.
@@ -239,27 +244,31 @@ def _provider_name(settings: dict[str, Any]) -> str | None:
     return provider if isinstance(provider, str) else None
 
 
-def _with_forced_tool_call(settings: dict[str, Any], kind: str) -> dict[str, Any]:
-    """Pin ``tool_choice: required`` on the provider entry this profile actually selects.
+def _with_response_format(settings: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Pin this kind's answer schema on the provider entry the profile actually selects.
 
-    A tool grammar is lazy under ``auto``: it binds nothing until the model opens a tool call, and
-    a model that answers in prose never opens one.  ``required`` makes the call mandatory and the
-    grammar active from the first token.  Hermes merges a provider's ``extra_body`` into every
-    chat-completions request, and the entry named by ``model.provider`` is the one it resolves, so
-    both spellings of that entry carry it.
+    Hermes merges a provider's ``extra_body`` into every chat-completions request, and the entry
+    named by ``model.provider`` is the one it resolves, so both spellings of that entry carry it.
+    The session has no tools, which is what lets a schema apply at all: this gateway returns HTTP
+    400 for a request that carries both tools and a response format, and llama-server drops the
+    schema when tools are present.
     """
     from . import answers
 
-    extra = {"tool_choice": "required"}
+    def extra() -> dict[str, Any]:
+        # A fresh mapping per entry: a shared one makes yaml emit anchors into a file an operator
+        # may read or edit.
+        return {"response_format": answers.response_format(kind)}
+
     updated = deepcopy(settings)
     name = _provider_name(settings)
     providers = updated.get("providers")
     if name and isinstance(providers, dict) and isinstance(providers.get(name), dict):
-        providers[name] = {**providers[name], "extra_body": extra}
+        providers[name] = {**providers[name], "extra_body": extra()}
     custom = updated.get("custom_providers")
     if isinstance(custom, list):
         updated["custom_providers"] = [
-            {**entry, "extra_body": extra} if isinstance(entry, dict) else entry
+            {**entry, "extra_body": extra()} if isinstance(entry, dict) else entry
             for entry in custom
         ]
     model = updated.get("model")
@@ -295,20 +304,21 @@ def _desired_files(
     # selecting, so the operator's model assignment has to be applied first.
     settings = _with_assigned_model(settings, spec, assignment)
     if spec.kind:
-        settings = _with_forced_tool_call(settings, spec.kind)
+        settings = _with_response_format(settings, spec.kind)
     config: dict[str, Any] = {
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),
         **({"agent": {"max_turns": spec.max_turns}} if spec.max_turns else {}),
         "tools": {"enabled_toolsets": list(spec.toolsets)},
     }
-    if spec.kind:
-        # The submit tool is the profile's whole tool surface, and the server resolves its own
+    if spec.role and not spec.kind:
+        # A session that must read full text keeps its tools, so its answer cannot be constrained
+        # by a schema.  It gets the typed submit tools instead, and the server resolves its own
         # claim, so nothing task-specific is ever written into a config file.
         config["mcp_servers"] = _mcp_entry(
             store if store is not None else _default_store(),
-            spec.role or "",
-            spec.kind,
+            spec.role,
+            None,
             _hmr_path(),
         )
     files = {
@@ -422,19 +432,22 @@ def profile_for_kind(kind: str, assignment: dict[str, Any] | None = None) -> str
 
 
 def _read_manifest(root: Path) -> dict[str, Any] | None:
-    path = root / MANAGED
-    if not path.is_file():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValidationError(f"invalid managed-profile manifest at {path}: {exc}") from exc
-    if not isinstance(value, dict) or not isinstance(value.get("files"), dict):
-        raise ValidationError(f"invalid managed-profile manifest at {path}")
-    return value
+    for name in (MANAGED, LEGACY_MANAGED):
+        path = root / name
+        if not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValidationError(f"invalid managed profile manifest {path}: {exc}") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("files"), dict):
+            raise ValidationError(f"invalid managed profile manifest {path}")
+        return value
+    return None
 
 
-def _check_ownership(root: Path, desired: dict[str, bytes]) -> None:
+def _check_ownership(root: Path) -> None:
+    """Refuse a profile this package does not own, or one edited since it was written."""
     manifest = _read_manifest(root)
     if root.exists() and manifest is None and any(root.iterdir()):
         raise ValidationError(f"refusing to overwrite unmanaged Hermes profile: {root}")
@@ -490,7 +503,7 @@ def bootstrap_profiles(
         desired = _desired_files(name, settings, store=artifact_store,
                                  assignment=assignment)
         desired_by_profile[name] = desired
-        _check_ownership(root, desired)
+        _check_ownership(root)
         plan.append(
             {
                 "profile": name,
@@ -570,7 +583,7 @@ def bootstrap_profiles(
         root.mkdir(parents=True, exist_ok=True)
         desired = desired_by_profile[name]
         if not created:
-            _check_ownership(root, desired)
+            _check_ownership(root)
         previous = _read_manifest(root)
         for relative in set((previous or {}).get("files", {})) - set(desired):
             (root / relative).unlink()
@@ -610,6 +623,7 @@ def _remove_profile(root: Path) -> dict[str, Any]:
     for relative in manifest.get("files", {}):
         (root / relative).unlink(missing_ok=True)
     (root / MANAGED).unlink(missing_ok=True)
+    (root / LEGACY_MANAGED).unlink(missing_ok=True)
     for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
         if not any(directory.iterdir()):
             directory.rmdir()
@@ -634,7 +648,7 @@ def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dic
         )
         problems: list[str] = []
         try:
-            _check_ownership(root, desired)
+            _check_ownership(root)
         except ValidationError as exc:
             problems.append(str(exc))
         manifest = _read_manifest(root)
@@ -722,18 +736,15 @@ def _schema_report(root: Path, kind: str, problems: list[str]) -> dict[str, Any]
         installed = loaded if isinstance(loaded, dict) else {}
     provider = _provider_name(installed)
     entry = ((installed.get("providers") or {}).get(provider or "") or {})
-    forced = (entry.get("extra_body") or {}).get("tool_choice")
-    servers = installed.get("mcp_servers") or {}
-    if forced != "required":
-        problems.append("provider entry does not pin tool_choice: required")
-    if MCP_SERVER_NAME not in servers:
-        problems.append(f"profile does not host the {MCP_SERVER_NAME} tool server")
+    installed_format = (entry.get("extra_body") or {}).get("response_format")
+    if installed_format != answers.response_format(kind):
+        problems.append("provider entry does not carry this release's answer schema")
+    if installed.get("tools", {}).get("enabled_toolsets"):
+        problems.append("a constrained profile must have no toolsets; a schema and tools conflict")
     return {
         "kind": kind,
-        "tool": f"submit_{kind}",
         "schema_digest": answers.schema_digest(kind),
-        "tool_choice": forced,
-        "mcp_server": MCP_SERVER_NAME in servers,
+        "response_format": bool(installed_format),
         "provider_entry": f"providers.{provider}" if provider else None,
     }
 
@@ -810,7 +821,11 @@ def _job_static(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _routine_manifest(home: Path) -> dict[str, Any] | None:
-    path = home / ROUTINES_MANAGED
+    path = next(
+        (home / name for name in (ROUTINES_MANAGED, LEGACY_ROUTINES_MANAGED)
+         if (home / name).is_file()),
+        home / ROUTINES_MANAGED,
+    )
     if not path.is_file():
         return None
     try:
@@ -820,29 +835,6 @@ def _routine_manifest(home: Path) -> dict[str, Any] | None:
     if not isinstance(value, dict) or not isinstance(value.get("scripts"), dict):
         raise ValidationError(f"invalid routine manifest {path}")
     return value
-
-
-def _routine_health(home: Path) -> dict[str, Any]:
-    manifest = _routine_manifest(home)
-    if manifest is None:
-        return {"ready": False, "problems": ["managed cron routines are not installed"]}
-    problems = []
-    for key, checksum in manifest["scripts"].items():
-        profile, relative = key.split("/", 1)
-        path = _profile_root(home, profile) / relative
-        if not path.is_file() or _sha256(path.read_bytes()) != checksum:
-            problems.append(f"managed routine script changed or is missing: {path}")
-    for managed in manifest.get("jobs", []):
-        matches = [
-            job
-            for job in _jobs(_profile_root(home, managed["profile"]))
-            if job.get("name") == managed["name"]
-        ]
-        if len(matches) != 1:
-            problems.append(
-                f"managed cron job {managed['profile']}/{managed['name']} is missing or ambiguous"
-            )
-    return {"ready": not problems, "problems": problems, "jobs": manifest.get("jobs", [])}
 
 
 def invoke_task_session(
@@ -931,6 +923,9 @@ def invoke_call_session(
     argv = [
         executable,
         "-p", profile,
+        # The tool-free toolset: measured at a 719-token system prompt, and the only configuration
+        # in which the answer schema applies.  Without it a session reaches for skill tools.
+        "-t", "context_engine",
         "--ignore-rules",
         "--reasoning", "none",
         *(["--usage-file", str(usage_file)] if usage_file else []),
@@ -1111,4 +1106,5 @@ def routines(
             path.unlink()
     if not remaining:
         (home / ROUTINES_MANAGED).unlink(missing_ok=True)
+        (home / LEGACY_ROUTINES_MANAGED).unlink(missing_ok=True)
     return {**plan, "applied": True, "removed": sorted(removed), "remaining": sorted(remaining)}

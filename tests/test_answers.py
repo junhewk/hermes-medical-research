@@ -195,3 +195,39 @@ def test_a_finding_keeps_its_identity_and_cites_only_packet_extractions():
             packet,
         )
     assert "unknown extraction_id" in str(error.value)
+
+
+def test_the_response_format_carries_the_schema_and_a_stable_digest():
+    block = answers.response_format("screening")
+
+    assert block["type"] == "json_object"
+    assert block["schema"] is answers.RESULT_SCHEMAS["screening"]
+    assert answers.schema_digest("screening") == answers.schema_digest("screening")
+    assert answers.schema_digest("screening") != answers.schema_digest("coverage")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"decision": "exclude", "reason": "No comparator."}',
+        '```json\n{"decision": "exclude", "reason": "No comparator."}\n```',
+        'Here is my answer: {"decision": "exclude", "reason": "No comparator."} Hope that helps.',
+    ],
+)
+def test_an_answer_is_read_through_a_fence_or_a_preface(text):
+    assert answers.parse_answer("screening", text)["decision"] == "exclude"
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("exclude - no comparator", "not one JSON object"),
+        ('{"decision": "probably", "reason": "x"}', "must be one of"),
+        ('{"decision": "exclude"}', "reason is required"),
+        ('{"decision": "exclude", "reason": "x"', "not one JSON object"),
+    ],
+)
+def test_an_unusable_answer_raises_a_message_the_next_attempt_can_carry(text, message):
+    with pytest.raises(ValidationError) as error:
+        answers.parse_answer("screening", text)
+    assert message in str(error.value)

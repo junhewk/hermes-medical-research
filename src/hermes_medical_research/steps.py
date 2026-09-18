@@ -612,19 +612,31 @@ async def _work_one(
         attempts = [lane] * (CALL_ATTEMPTS if lane == "call" else AGENT_ATTEMPTS)
         if lane == "call":
             attempts.append("agent")  # escalate once to a session that can read and explain
+        hint: str | None = None
         for attempt_lane in attempts:
             try:
                 completed = await hermes.run_with_renewal(
                     automation, claim, actor,
                     runner=_runner(attempt_lane, kind, packet, executable, home, assignment,
-                                   invoke=invoke, call=call),
+                                   invoke=invoke, call=call, hint=hint),
                 )
                 last_error = (completed.stderr or completed.stdout or "").strip()[-500:]
             except subprocess.TimeoutExpired:
                 last_error = f"{attempt_lane} session exceeded its timeout"
+                continue
             except ValidationError as exc:
                 # A lost lease or a busy lock ends this attempt, not the step.
                 last_error = str(exc)[-500:]
+                continue
+            if attempt_lane == "call":
+                try:
+                    await _record_answer(engine, claim, actor, kind, packet,
+                                         completed.stdout or "")
+                except ValidationError as exc:
+                    # The next attempt carries the reason, which is the only thing a stateless
+                    # call can act on; the cached prompt prefix is unchanged.
+                    hint = str(exc)
+                    last_error = hint[-500:]
             if engine.task_automation(claim["task_id"])["state"] != "in_progress":
                 break
         if engine.task_automation(claim["task_id"])["state"] == "accepted":
@@ -652,11 +664,12 @@ def _runner(
     assignment: dict[str, Any], *,
     invoke: Callable[..., subprocess.CompletedProcess[str]] | None,
     call: Callable[..., subprocess.CompletedProcess[str]] | None,
+    hint: str | None = None,
 ) -> Callable[[dict[str, Any], Actor], subprocess.CompletedProcess[str]]:
     if lane == "call":
         runner = call or hermes.invoke_call_session
         profile = hermes.profile_for_kind(kind, assignment)
-        prefix, tail = answers.build_prompt(kind, packet)
+        prefix, tail = answers.build_prompt(kind, packet, hint=hint)
         prompt = f"{prefix}\n\n{tail}"
 
         def run_call(claim: dict[str, Any], actor: Actor) -> subprocess.CompletedProcess[str]:
@@ -670,6 +683,34 @@ def _runner(
         return session(executable, home, claim, actor, role)
 
     return run_agent
+
+
+async def _record_answer(
+    engine: TaskEngine,
+    claim: dict[str, Any],
+    actor: Actor,
+    kind: str,
+    packet: dict[str, Any],
+    text: str,
+) -> None:
+    """Map a constrained answer into the task's proposal and submit it, unchanged path.
+
+    The model never edits the proposal and never runs a command: it answers, and this writes only
+    the fields its schema owns. A rejection is raised with the validator's own message so the next
+    attempt can carry it.
+    """
+    answer = answers.parse_answer(kind, text)
+    proposal_path = Path(claim["proposal_path"])
+    updated = answers.apply_result(kind, _read_json(proposal_path), answer, packet)
+    proposal_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n")
+    outcome = await engine.submit(
+        KIND_COMMANDS[kind], claim["task_id"], proposal_path, actor,
+        claim_token=claim["claim_token"],
+    )
+    if outcome.get("accepted") is False:
+        raise ValidationError(
+            "; ".join(str(error) for error in (outcome.get("errors") or [])[:6])
+        )
 
 
 async def _submit_unchanged(

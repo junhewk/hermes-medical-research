@@ -46,3 +46,5 @@ record to an existing study only with explicit identity evidence such as the sam
 Single-arm or intervention-only surveys stay descriptive: use `effect.basis` group_summary or
 qualitative, never between_group. Keep the prefilled appraisal method unless the design clearly
 needs another method from the packet's `methods`.
+
+When the instruction file names a typed submit tool, call it with one `result` object instead of editing the proposal and running a command. It is checked the same way and costs fewer turns.
