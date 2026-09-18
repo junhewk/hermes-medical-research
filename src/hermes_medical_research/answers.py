@@ -1,10 +1,11 @@
 """Constrained answer shapes for the task kinds a model can decide in one call.
 
-Every shape here is a tool payload, not a free-text contract.  A submit tool takes exactly one
-argument, ``result``, an object: llama.cpp compiles a real grammar only for non-string tool
-arguments, and a string enum counts as a string, so a nested object is what makes ``decision``
-actually bind.  The same JSON-Schema ``parameters`` block is how tools work on OpenAI, vLLM, SGLang
-and Ollama, so nothing here depends on one server.
+Each shape is both the request's ``response_format`` schema, which the model server compiles into a
+grammar, and the contract the prompt states in words, rendered from the same schema so the two
+cannot drift.  A session that answers this way has no tools at all: a schema and a tool list cannot
+be combined on this gateway, and the same schema in a tool's ``parameters`` costs extra model turns
+because Hermes proxies a tool behind its own meta-tools.  The typed submit tools in ``mcp_server``
+carry the identical shapes for the roles that must keep their tools.
 
 Schemas buy *shape* only.  Every value, identifier, digest and cross-field rule is still checked by
 ``validation`` and ``evidence`` when the mapped proposal reaches ``TaskEngine.submit``; these
@@ -12,9 +13,9 @@ schemas are deliberately protocol-independent, because a profile's ``extra_body`
 bootstrap time and cannot know a Review's outcomes or record ids.
 
 Keyword subset: ``type``, ``properties``, ``required``, ``additionalProperties``, ``enum``,
-``items``, ``minItems`` and ``maxItems``.  That is what llama.cpp's grammar converter handles
-predictably, and what :func:`check_shape` implements, so prose, grammar and the local check cannot
-drift apart.
+``items``, ``minItems``, ``maxItems``, ``minLength`` and ``maxLength``.  That is what llama.cpp's
+converter handles predictably, and what :func:`check_shape` implements, so prose, grammar and the
+local check cannot drift apart.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from .validation import GRADE_DOMAINS, RELATIONSHIPS, ValidationError
 
 ALLOWED_KEYWORDS = frozenset(
     {"type", "properties", "required", "additionalProperties", "enum", "items",
-     "minItems", "maxItems"}
+     "minItems", "maxItems", "minLength", "maxLength"}
 )
 
 CLAIM_BASES = ("comparative", "within_group", "association", "diagnostic_accuracy", "ranking",
@@ -39,6 +40,11 @@ OVERLAP_STATUSES = ("mapped", "not_applicable", "suspected", "unknown")
 STUDY_KINDS = ("primary", "systematic-review", "guideline", "other")
 
 _TEXT = {"type": "string"}
+# A reason is one sentence.  Without a ceiling the model writes paragraphs, and on a local model
+# that is the difference between seconds and minutes per record: one measured screening answer ran
+# 111 seconds unbounded.
+_REASON = {"type": "string", "minLength": 1, "maxLength": 300}
+_SENTENCE = {"type": "string", "minLength": 1, "maxLength": 600}
 
 
 def _object(required: list[str], properties: dict[str, Any]) -> dict[str, Any]:
@@ -80,7 +86,7 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
         ["decision", "reason"],
         {
             "decision": {"type": "string", "enum": ["include", "exclude", "uncertain"]},
-            "reason": _TEXT,
+            "reason": _REASON,
             "basis": {"type": "string", "enum": ["title-abstract", "fulltext", "registry"]},
         },
     ),
@@ -88,7 +94,7 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
         ["selection", "reason", "protocol_outcomes"],
         {
             "selection": {"type": "string", "enum": ["selected", "deferred", "unavailable"]},
-            "reason": _TEXT,
+            "reason": _REASON,
             "protocol_outcomes": {"type": "array", "maxItems": 24, "items": _TEXT},
         },
     ),
@@ -96,7 +102,7 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
         ["kind", "basis"],
         {
             "kind": {"type": "string", "enum": list(STUDY_KINDS)},
-            "basis": _TEXT,
+            "basis": _REASON,
             # "" keeps this record as its own study; any other value must name an existing study.
             "same_study_id": _TEXT,
         },
@@ -112,7 +118,7 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
             "timepoint": _TEXT,
             "claim_basis": {"type": "string", "enum": list(CLAIM_BASES)},
             "comparator_type": {"type": "string", "enum": sorted(COMPARATORS)},
-            "conclusion": _TEXT,
+            "conclusion": _SENTENCE,
             "gap_reason": _TEXT,
             "gap_basis": _TEXT,
             "evidence": {"type": "array", "maxItems": 24, "items": _CONTRIBUTION},
@@ -133,24 +139,24 @@ MAX_TOKENS = {"screening": 768, "coverage": 768, "studies": 768, "synthesis": 30
 INSTRUCTIONS = {
     "screening": (
         "You screen one bibliographic record for a medical evidence review. Apply every "
-        "eligibility criterion below to the record's title and abstract, then record the decision "
-        "by calling the submit tool exactly once. Judge only this record. A record whose abstract "
-        "is missing or uninformative is uncertain, not excluded."
+        "eligibility criterion below to the record's title and abstract. Judge only this record. "
+        "A record whose abstract is missing or uninformative is uncertain, not excluded. Name the "
+        "deciding criterion in one sentence; do not restate the record."
     ),
     "coverage": (
         "You decide whether one included record goes on to detailed assessment. Eligibility is "
         "already settled and must not be revisited. Name the protocol outcomes this record can "
-        "answer, then call the submit tool exactly once."
+        "answer, and give one sentence of reason."
     ),
     "studies": (
         "You decide whether one record reports a study already linked in this review. Link only on "
         "explicit identity evidence such as a shared registration number or a stated companion "
-        "report. Otherwise leave it as its own study. Call the submit tool exactly once."
+        "report. Otherwise leave it as its own study, and say in one sentence what decided it."
     ),
     "synthesis": (
         "You write one finding for one protocol outcome from the extraction and appraisal rows "
         "below, and from the unreported outcome decisions that tell you what is missing. Cite only "
-        "the extraction ids shown. Call the submit tool exactly once."
+        "the extraction ids shown, and keep every rationale to one sentence."
     ),
 }
 
@@ -270,12 +276,18 @@ def check_shape(value: Any, schema: dict[str, Any], path: str = "result") -> Non
     allowed = schema.get("enum")
     if allowed is not None and value not in allowed:
         raise ValidationError(f"{path} must be one of {list(allowed)}; got {value!r}")
+    if len(value.strip()) < schema.get("minLength", 0):
+        raise ValidationError(f"{path} must not be empty")
+    if "maxLength" in schema and len(value) > schema["maxLength"]:
+        raise ValidationError(
+            f"{path} must be at most {schema['maxLength']} characters; keep it to one sentence"
+        )
 
 
 def contract_text(kind: str) -> str:
     """The answer contract, rendered from the schema so prose cannot drift from the grammar."""
     schema = RESULT_SCHEMAS[kind]
-    lines = ["Call the submit tool once with a single `result` object:"]
+    lines = ["Answer with one JSON object and nothing else:"]
     for field, member in schema["properties"].items():
         required = "required" if field in schema["required"] else "optional"
         if member.get("type") == "array":
@@ -291,6 +303,22 @@ def contract_text(kind: str) -> str:
     return "\n".join(lines)
 
 
+RECORD_FIELDS = ("record_id", "title", "year", "journal", "publication_types", "abstract", "doi")
+
+
+def _record_view(packet: dict[str, Any]) -> dict[str, Any] | None:
+    """The bibliographic fields a decision needs, without the document previews and excerpts.
+
+    A packet also carries per-document locator previews for the session lane. Sending those into a
+    single call costs prompt tokens and invites the model to summarize the paper instead of
+    deciding.
+    """
+    record = (packet.get("source") or {}).get("record")
+    if not isinstance(record, dict):
+        return None
+    return {field: record[field] for field in RECORD_FIELDS if record.get(field)}
+
+
 def build_prompt(kind: str, packet: dict[str, Any], *, hint: str | None = None) -> tuple[str, str]:
     """``(prefix, tail)``.
 
@@ -301,13 +329,16 @@ def build_prompt(kind: str, packet: dict[str, Any], *, hint: str | None = None) 
     prefix_parts = [INSTRUCTIONS[kind], contract_text(kind)]
     for key, value in stable.items():
         prefix_parts.append(f"{key.replace('_', ' ').title()}:\n{_render(value)}")
+    skip = {"schema_version", "run_id", "task_id", "role", "base_digests", "proposal_path",
+            "source_list", "source_count", "instructions", "target_ids"}
     variable = {
         key: value
         for key, value in packet.items()
-        if key not in STABLE_PACKET_KEYS[kind]
-        and key not in {"schema_version", "run_id", "task_id", "role", "base_digests",
-                        "proposal_path", "source_list", "source_count", "instructions"}
+        if key not in STABLE_PACKET_KEYS[kind] and key not in skip
     }
+    record = _record_view(packet)
+    if record is not None:
+        variable["source"] = record
     tail_parts = [f"{key.replace('_', ' ').title()}:\n{_render(value)}" for key, value in
                   variable.items()]
     if hint:

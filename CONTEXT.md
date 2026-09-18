@@ -22,8 +22,10 @@ or declare the run complete.
   that queue is empty, then stops. Nothing advances a Review unless someone runs a Step.
 - A **Lane** is the surface that answers one item: `call`, `agent`, or `none`. The Lane of a kind is
   deterministic.
-- A **Constrained call** is one fresh tool-free session whose profile exposes exactly one submit tool
-  and forces a tool call, so the answer arrives as a grammar-constrained payload.
+- A **Constrained call** is one fresh session with no tools whose profile carries that kind's answer
+  schema on the request, so the answer arrives as one shape-checked JSON object. The typed submit
+  tools are the session Lane's equivalent, for roles whose work needs tools and so cannot carry a
+  schema.
 - A **Lease** is a 60-minute, session-bound capability to perform one Task. Failed Leases retry after
   5 and 30 minutes and the third failure blocks the Cycle. An interrupted Step releases its Lease
   without spending an attempt.
@@ -67,9 +69,10 @@ or declare the run complete.
 Interface is the `hmr` CLI. `hermes_medical_research.steps` is the user-invoked runner: it picks the
 Lane, claims one item at a time, and owns the status a step reports.
 `hermes_medical_research.answers` holds the constrained answer schemas and the prompts built from
-them. `hermes_medical_research.mcp_server` is the tool Adapter that maps one checked payload into a
-proposal and through the normal submit path. `hermes_medical_research.hermes` is the localized
-true-external Adapter for managed profiles and session invocation, and
+them. `hermes_medical_research.mcp_server` is the tool Adapter for the session Lane: it maps one
+checked payload into a proposal and through the normal submit path.
+`hermes_medical_research.hermes` is the localized true-external Adapter for managed profiles and
+session invocation, and
 `hermes_medical_research.quick_commands` is the Adapter for the host command entries. Neither
 implements workflow state. Search retrieval and evidence validation remain internal libraries.
 Hermes skills describe commands; they do not implement correctness. The default store is

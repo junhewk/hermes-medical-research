@@ -48,24 +48,26 @@ The current design is covered by the repository test suite. Its architecture cas
   inherits none of the quick command's pipes, a second start that reports the running job instead of
   racing it, and a bounded backoff wait that never blocks a Cycle;
 - constrained answers (0.6.0): every schema restricted to the grammar-safe keyword subset, no payload
-  that is a bare string or enum at the top level, a prompt prefix that is identical across records
-  and carries no record text, a retry hint confined to the tail, an answer contract rendered from the
-  schema, off-schema answers rejected with an actionable message, identity fields and digests
-  untouched when a payload is applied, and coverage outcomes, study merges and finding citations
-  checked against the packet that was shown;
-- the tool server (0.6.0): a constrained profile that sees exactly one tool, the MCP handshake and
-  tool listing, newline-delimited serving until stdin closes, a submitted decision accepted through
-  the normal submit path, an off-schema answer returned to the model and never written, a validation
-  rejection returned as the validator's own message, every call refused when no task is claimed, a
-  tool that does not match the claimed kind refused, and a claim token that is never written into a
-  config file or a prompt;
+  that is a bare string or enum at the top level, a response format that carries the schema under a
+  stable digest, an answer read through a code fence or a stray preface, a prompt prefix that is
+  identical across records and carries no record text, a retry hint confined to the tail, an answer
+  contract rendered from the schema, off-schema answers rejected with an actionable message, identity
+  fields and digests untouched when a payload is applied, and coverage outcomes, study merges and
+  finding citations checked against the packet that was shown;
+- the tool server (0.6.0): one submit tool per kind a role owns, an object payload with the enums
+  inside it, the MCP handshake and tool listing, newline-delimited serving until stdin closes, a
+  submitted decision accepted through the normal submit path, an off-schema answer returned to the
+  model and never written, a validation rejection returned as the validator's own message, every call
+  refused when no task is claimed, a tool that does not match the claimed kind refused, and a claim
+  token that is never written into a config file or a prompt;
 - quick commands (0.6.0): a dry run that writes nothing, an apply that keeps comments, key order and
   foreign quick commands, self-contained commands with no arguments, a quoted baked-in Review name,
   refusal of an unmanaged name and of a managed entry edited outside the package, removal that
   restores the original bytes, and refusal of a config that is not a mapping;
-- managed profiles (0.6.0): a constrained profile that hosts its submit tool and pins
-  `tool_choice: required` on the provider entry it selects, a per-kind assignment that overrides only
-  the model and provider, removal that deletes only the files the package installed, the retired
+- managed profiles (0.6.0): a constrained profile that carries its kind's answer schema on the
+  provider entry it selects, with no toolset and no tool server, a session profile that keeps its
+  toolsets and hosts the submit tools instead, a per-kind assignment that overrides only the model
+  and provider, removal that deletes only the files the package installed, the retired
   Searcher profile reported and removed, and doctor reporting a legacy cron fleet or missing quick
   commands as not ready;
 - the read-only manifest view (0.6.0): a claim that retries a busy Run lock instead of ending the
@@ -87,19 +89,19 @@ passed with it. The final count is updated with each release commit.
 ## Hermes operational gates
 
 Hermes itself is not available in every development environment, and the constrained lane depends on
-how the host model server treats a forced tool call. Four host facts are therefore verified by hand
-before the step commands are installed on a host:
+whether a provider's `extra_body` reaches the model server. Four host facts are therefore verified by
+hand before the step commands are installed on a host:
 
 1. The cron delete verb. Confirm that `hermes -p PROFILE cron delete JOB_ID` removes a job on the
    installed Hermes version, because that is how `hmr hermes routines --remove --apply` takes a
    0.5.x fleet off the host.
-2. That `extra_body` reaches the wire. Confirm that the `tool_choice: required` pinned on the
-   provider entry a constrained profile selects is actually sent with the chat-completions request.
-3. That a profile-hosted stdio MCP server starts. Open a session on `hmr-screen` and confirm the
-   server starts and lists exactly `submit_screening`.
-4. That a forced tool call enforces its nested payload. Send one screening packet whose record text
-   invites a prose answer or an off-schema decision, and confirm the answer still arrives as one
-   `result` object whose `decision` is inside the enum.
+2. That a provider `extra_body` reaches the wire. Run one tool-free session on `hmr-screen` with
+   reasoning off and confirm the answer is a single JSON object in the shape of the pinned schema.
+3. That a session profile's stdio tool server starts. Open a session on `hmr-selector` and confirm
+   the server starts and lists `submit_screening` and `submit_coverage`.
+4. That the schema holds against an adversarial prompt. Send one screening packet whose text demands
+   an out-of-enum decision and a long reason, and confirm the answer still arrives as one object
+   whose `decision` is inside the enum.
 
 Only then re-screen the recorded 170-record corpus of `ai-med-ed-evidence-report-v4` in an isolated
 store and compare every decision with the recorded one. Its gates are:
@@ -114,9 +116,21 @@ of 170 records answered in 20.2 minutes, 7.1 seconds mean, 7 answers prose rathe
 of the 163 parseable answers agreeing with the recorded bot decisions. That run asked for the answer
 shape instead of constraining it, which is why 7 answers were prose, and it is not one of the gates.
 
-None of these five gates has been run. `scripts/qualify_hermes.py` is the 0.5.x harness and still
-installs the cron fleet, so it does not run them. A failure of a host fact is a stop condition: do
-not weaken the CLI boundary, and do not accept an unconstrained answer shape as a fallback.
+Facts one, two and four were verified on `jkworkstation` on 2026-09-18. `hermes -p PROFILE cron
+delete JOB_ID` removed a job. A tool-free `hmr-screen` session with reasoning off answered one
+screening record as a single schema-shaped JSON object, in one model call and 13 seconds, and it held
+the decision enum against a prompt that demanded an out-of-enum value and a 300-word reason. The same
+record was also answered through a submit tool for comparison: Hermes proxies an MCP tool behind its
+own meta-tools, so the session called `tool_describe` and then `tool_call`, about three model turns,
+and it reached for skill tools as well. That measurement is why the `call` lane carries a schema and
+the submit tools stay with the sessions.
+
+Fact three was verified standalone: `hmr mcp serve --role selector` started and listed its submit
+tools. It has not been checked from inside a session profile on the host.
+
+The re-screening comparison has not been run. `scripts/qualify_hermes.py` is the 0.5.x harness and
+still installs the cron fleet, so it does not run it. A failure of a host fact is a stop condition:
+do not weaken the CLI boundary, and do not accept an unconstrained answer shape as a fallback.
 
 ### Current Hermes result (2026-09-15)
 
@@ -175,5 +189,5 @@ On 2026-09-17 the Hermes line split from the Claude Code/Codex plugin line. GitH
 `junhewk/medical-deep-research-plugin` was renamed `junhewk/hermes-medical-research`; the 0.4.0
 plugin line remains on branch `legacy/claude-codex-0.4` and tag `v0.4.0`. Releases are Git tags
 installed with `uv tool install` or `pipx install` from the repository. There is no PyPI or
-plugin-ZIP release in this design. The 0.6.0 host facts and the re-screening comparison above remain
-open until recorded here.
+plugin-ZIP release in this design. The 0.6.0 host facts are recorded above, the tool-server listing
+standalone; the re-screening comparison remains open until it is recorded here.

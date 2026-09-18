@@ -141,14 +141,18 @@ async def test_a_validation_rejection_comes_back_as_the_validators_own_message(t
     store, _automation, workspace, claim = await claimed_screening(tmp_path)
     server = mcp_server.ToolServer(store, "selector", ("screening",))
 
+    # The shape is fine, so only the stage validator can catch it: full-text screening needs a
+    # stored full text, and this record has none.
     reply = server.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
         "name": "submit_screening",
-        "arguments": {"result": {"decision": "include", "reason": "   "}},
+        "arguments": {"result": {"decision": "include", "reason": "Reads as eligible.",
+                                 "basis": "fulltext"}},
     }})
 
     assert reply["result"]["isError"] is True
     text = reply["result"]["content"][0]["text"]
-    assert "screening reason" in text and "call the tool again" in text
+    assert "full-text screening requires a stored full text" in text
+    assert "call the tool again" in text
     assert TaskEngine(workspace).task_automation(claim["task_id"])["state"] == "in_progress"
 
 

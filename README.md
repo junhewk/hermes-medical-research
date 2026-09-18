@@ -29,8 +29,8 @@ hmr --version
 | --- | --- |
 | Step | One operator act. It claims and answers one stage's items until that queue is empty |
 | CLI/core | Enforces schemas, exact scope, citations, digests, receipts, legal transitions, and completion |
-| Hermes profile | Supplies role separation, model and provider choice, session identity, and the tool surface of one lane |
-| MCP submit tool | Carries one constrained answer into the normal submit path |
+| Hermes profile | Supplies role separation, model and provider choice, session identity, and either the answer schema or the tool surface of one lane |
+| MCP submit tools | Carry one typed payload from a session into the normal submit path |
 | Artifact store | Carries immutable results between roles; sessions exchange only `run_id` and `task_id` |
 
 Three checked-in skills serve the five session profiles. `medical-select` belongs to the Selector,
@@ -59,15 +59,18 @@ surface produces the answer.
 | `synthesis` | `call` | One finding from the packet's extraction, appraisal, and unreported-outcome rows |
 | `audit` | `agent` | Quotes and locators are checked against the stored sources |
 
-A `call` is one fresh tool-free Hermes session whose profile exposes exactly that kind's submit tool
-and pins `extra_body.tool_choice: required`. An `agent` is one fresh session with the role's skill
-and the terminal, file, and skills toolsets. A synthesis packet that was shortened to fit falls back
-to `agent`, because its rows are then summaries. Every audit correction takes `agent`, because a
-correction re-mints the same packet and a constrained call would repeat the rejected answer.
+A `call` is one fresh Hermes session with no tools at all. Its profile carries that kind's answer
+schema in `extra_body.response_format`, so the model answers with one JSON object, and the step
+runner writes only the fields the schema owns and submits them. An `agent` is one fresh session with
+the role's skill, the terminal, file, and skills toolsets, and the role's typed submit tools. A
+synthesis packet that was shortened to fit falls back to `agent`, because its rows are then
+summaries. Every audit correction takes `agent`, because a correction re-mints the same packet and a
+constrained call would repeat the rejected answer.
 
 A `call` gets two constrained attempts and then one session with tools. An `agent` gets three
-attempts. After the ladder the durable failure path runs: the item retries after 5 and 30 minutes,
-and the third failure blocks the Cycle for `hmr step retry`.
+attempts. A rejected answer comes back as the validator's own message, appended after the record, so
+the cached prompt prefix survives the retry. After the ladder the durable failure path runs: the item
+retries after 5 and 30 minutes, and the third failure blocks the Cycle for `hmr step retry`.
 
 ## Why a step detaches
 
@@ -92,10 +95,15 @@ hmr hermes profiles --profile hmr-screen --apply
 ```
 
 Five profiles run sessions: `hmr-coordinator`, `hmr-selector`, `hmr-extractor`, `hmr-synthesizer`,
-and `hmr-auditor`. Four answer one constrained call: `hmr-screen`, `hmr-cover`, `hmr-link`, and
-`hmr-finding`. A constrained profile hosts the submit tool for its kind, enables no toolset, pins
-`extra_body.tool_choice: required` on the provider entry its `model.provider` names, and caps
-`max_tokens` for that kind.
+and `hmr-auditor`. Each keeps its skill and toolsets and hosts the `hmr-tasks` tool server for its
+role. Four answer one constrained call: `hmr-screen`, `hmr-cover`, `hmr-link`, and `hmr-finding`. A
+constrained profile enables no toolset, hosts no tool server, pins `extra_body.response_format` with
+its kind's answer schema on the provider entry its `model.provider` names and on every
+`custom_providers` entry, and caps `max_tokens` for that kind.
+
+The two surfaces do not swap. A session that must read full text cannot carry a schema: the gateway
+refuses tools plus a response format with HTTP 400. A decision that needs no tools is one request
+with a schema on it, which is cheaper than a tool call the host proxies behind its own meta-tools.
 
 Bootstrap creates profiles through Hermes's public profile command. It copies only the current model,
 provider, and timezone selection. It refuses to overwrite an unmanaged profile or a managed file
@@ -103,8 +111,8 @@ edited after installation. `hmr-searcher` and `mdr-searcher` are removed when pr
 search step runs no session. Bot Mode discovers profiles automatically from each connected gateway;
 use **Reconnect gateway** to refresh a roster that was connected during installation.
 
-A per-kind model or lane choice is the operator's, and it is applied before the forced tool call is
-pinned:
+A per-kind model or lane choice is the operator's, and it is applied before the schema is pinned, so
+the schema lands on the provider entry the profile really selects:
 
 ```bash
 hmr hermes profiles --set-model screening=MODEL@PROVIDER --apply
@@ -128,8 +136,8 @@ Each session has a model-turn ceiling set in its profile:
 A constrained call is given 5 minutes and a session 75 minutes. The runner renews the claim every 10
 minutes while a session is still working, so a slow session cannot outlive its 60-minute lease.
 
-Verify profiles, the resolved `hmr`, the forced tool call, the hosted tool server, the installed
-quick commands, per-kind assignments, and any leftover cron fleet with:
+Verify profiles, the resolved `hmr`, each constrained profile's pinned answer schema and empty
+toolset, the installed quick commands, per-kind assignments, and any leftover cron fleet with:
 
 ```bash
 hmr hermes doctor
@@ -167,15 +175,23 @@ command string; without it each command uses the stored active Review.
 ## The tool server
 
 ```bash
+hmr mcp serve --role ROLE
 hmr mcp serve --role ROLE --kind KIND
 ```
 
-The server speaks JSON-RPC 2.0 over newline-delimited stdio and is started by a constrained
-profile's `mcp_servers` entry. That entry is static: the server resolves its own claim from
-`<store>/steps/<step>/current.json`, so no task id, path, or claim token is ever written into a
-config file or a prompt. With no current item every tool call is refused. A submitted payload is
-mapped into the task's pre-filled proposal and put through the same `submit` path as a session, and a
-rejection comes back to the model as the validator's own message.
+The server speaks JSON-RPC 2.0 over newline-delimited stdio and is started by a session profile's
+`mcp_servers` entry, which names only the role. The server lists that role's submit tools: the
+Selector sees `submit_screening` and `submit_coverage`, the Extractor `submit_study_link`, and the
+Synthesizer `submit_finding`. The Coordinator and the Auditor own no kind that one payload can
+answer, so their listing is empty. Calling a tool costs a session fewer turns than editing
+`proposal.json` and shelling out to a submit command. `--kind` narrows the listing and is an operator
+diagnostic.
+
+That entry is static: the server resolves its own claim from `<store>/steps/<step>/current.json`, so
+no task id, path, or claim token is ever written into a config file or a prompt. With no current item
+every tool call is refused. A submitted payload is mapped into the task's pre-filled proposal and put
+through the same `submit` path as a hand-edited one, and a rejection comes back to the model as the
+validator's own message.
 
 ## Workflow
 
@@ -403,4 +419,4 @@ See [project context](CONTEXT.md), the
 [CLI architecture decision](docs/adr/0001-hermes-skills-over-deterministic-cli.md), the
 [cron architecture decision](docs/adr/0002-cron-backed-review-automation.md), the
 [serial runner decision](docs/adr/0003-serial-runners-and-outcome-decisions.md), and the
-[step and constrained-call decision](docs/adr/0004-user-invoked-steps-and-constrained-tool-calls.md).
+[step and answer decision](docs/adr/0004-user-invoked-steps-schema-calls-and-submit-tools.md).

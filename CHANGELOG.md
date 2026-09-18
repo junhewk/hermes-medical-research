@@ -19,21 +19,26 @@
   `/hmr-synthesizer`, `/hmr-auditor`, `/hmr-status`, `/hmr-next`, `/hmr-stop`, `/hmr-finalize`, and
   `/hmr-retry`. The config is backed up once, re-parsed after the edit, and restored if anything
   outside the managed entries changed.
-- Answered screening, coverage, study linking, and synthesis with one constrained tool call instead
-  of a session. The submit tool takes a single `result` object because llama.cpp compiles a real
-  grammar only for non-string tool arguments, and a string enum counts as a string: `result` with
-  `decision` and `reason` inside it binds, while a flat `decision` enum does not. Enforcement also
-  needs `tool_choice: required`, pinned in the profile's provider `extra_body`, because under `auto`
-  the tool grammar stays lazy until the model opens a tool call. In the measured screening run 7 of
-  170 answers were prose rather than JSON, which is why the shape is now constrained rather than
-  requested.
-- Chose a tool payload over `response_format`, measured on the operator's own gateway. A schema in
-  `response_format` works only without tools: the gateway returns HTTP 400 for tools plus
-  `response_format`, and llama-server drops the schema when tools are present. A JSON-Schema
-  `parameters` block composes with tools and is also how tools work on OpenAI, vLLM, SGLang, and
-  Ollama, so the design does not depend on one server.
-- Turned reasoning off in a constrained call, because llama.cpp ignores a schema while thinking is
-  enabled.
+- Answered screening, coverage, study linking, and synthesis with one tool-free session that carries
+  the kind's answer schema on the request. The profile pins `extra_body.response_format` on the
+  provider entry it selects, the model returns one JSON object, and the step runner parses it, writes
+  only the fields the schema owns, and submits it through the unchanged path. Measured on the host:
+  one model call, 13 seconds for one screening record, and the decision enum held against a prompt
+  that demanded an out-of-enum value and a 300-word reason. In the earlier unconstrained run 7 of 170
+  answers were prose rather than JSON, which is why the shape is now enforced by the server rather
+  than asked for.
+- Kept the typed submit tools and the `hmr-tasks` tool server for the session lane, where they are
+  the only option. Hermes proxies an MCP tool behind its own meta-tools: in the host probe the
+  session called `tool_describe` and then `tool_call`, about three model turns per record instead of
+  one, and it also reached for skill tools. Hermes sends only the tools it already knows about, so a
+  tool schema cannot be handed over per invocation, and a session that must read full text cannot
+  carry a schema at all, because the gateway refuses tools plus a response format with HTTP 400. The
+  five session profiles therefore host the server, and `medical-extract` and `medical-synthesize`
+  now say to call the submit tool when the instruction file names one, which costs fewer turns than
+  editing a proposal and shelling out.
+- Turned reasoning off in a constrained call, because llama.cpp ignores a response schema while
+  thinking is enabled. A schema in `response_format` is also what OpenAI-compatible servers accept,
+  so the answer surface does not depend on one server.
 - Made the lane of each Task kind deterministic. `call` covers screening, coverage, study linking,
   and synthesis, each of which decides one packet. `agent` covers per-outcome assessment, audit, and
   every audit correction, which must read arbitrary full text; a correction re-mints the same packet,
@@ -44,15 +49,19 @@
 - Kept authority exactly where it was. The schemas buy shape only: every value, identifier, digest,
   and cross-field rule is still checked by `validation` and `evidence` when the mapped proposal
   reaches `TaskEngine.submit`, a rejection comes back to the model as the validator's own message,
-  and record, study, and finding ids, protocol outcomes, schema versions, base digests, and
-  certainty origin are never taken from a payload. The schemas are protocol-independent because a
-  profile's `extra_body` is fixed at bootstrap time.
-- Installed nine managed profiles. `hmr-screen`, `hmr-cover`, `hmr-link`, and `hmr-finding` host one
-  stdio MCP submit tool each, carry no skill and no shell toolset, and cap their answer tokens;
-  `hmr-coordinator`, `hmr-selector`, `hmr-extractor`, `hmr-synthesizer`, and `hmr-auditor` keep
-  their skill and tools. `hmr-searcher` is retired and removed, because the search step runs no
-  session. `hmr hermes profiles` creates, checks, and removes them and records a per-kind model and
-  lane in `<hermes_home>/hmr-steps.json`.
+  appended after the record so the cached prompt prefix survives the retry, and record, study, and
+  finding ids, protocol outcomes, schema versions, base digests, and certainty origin are never
+  taken from a payload. The schemas are protocol-independent because a profile's `extra_body` is
+  fixed at bootstrap time.
+- Installed nine managed profiles. `hmr-screen`, `hmr-cover`, `hmr-link`, and `hmr-finding` carry
+  their kind's answer schema, no skill, no shell toolset, and no tool server, and cap their answer
+  tokens; `hmr-coordinator`, `hmr-selector`, `hmr-extractor`, `hmr-synthesizer`, and `hmr-auditor`
+  keep their skill and tools and host the stdio submit tools of their role. `hmr-searcher` is
+  retired and removed, because the search step runs no session. `hmr hermes profiles` creates,
+  checks, and removes them and records a per-kind model and lane in `<hermes_home>/hmr-steps.json`.
+  An assigned model is applied before the schema is pinned, so the schema lands on the provider
+  entry the profile really selects. `hmr hermes doctor` reports each constrained profile's kind,
+  schema digest, response format, and provider entry, and flags one that has any toolset.
 - Renamed the CLI, the managed profiles, the managed manifests, and the store environment variable
   from `mdr` to `hmr`, because `mdr` is the separate medical-deep-research line. `MDR_HOME` is still
   honored and `mdr-*` actor profiles in existing receipts still resolve to their role, so old runs

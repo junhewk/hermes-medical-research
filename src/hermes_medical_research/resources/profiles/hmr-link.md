@@ -4,4 +4,4 @@ Answer the one study-linking packet in the message. Link this record to an exist
 explicit identity evidence, such as a shared registration number or a stated companion report.
 Otherwise leave it as its own study.
 
-Call `submit_study_link` once with a single `result` object.
+Answer with one JSON object in the shape the message states.
