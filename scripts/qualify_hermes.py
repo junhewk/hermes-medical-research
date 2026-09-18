@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
-"""Qualify the Hermes cron queue with fresh selector workers and clean full Reviews."""
+"""Qualify the step runners against a real Hermes and a real model, on a scratch store."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from uuid import uuid4
 
 from hermes_medical_research.automation import AutomationEngine
-from hermes_medical_research.hermes import routines
 from hermes_medical_research.search.artifacts import RunStore
 from hermes_medical_research.search.config import Credentials
 from hermes_medical_research.search.models import Question
 from hermes_medical_research.search.query import compile_strategy
-from hermes_medical_research.tasks import TaskEngine
+from hermes_medical_research.tasks import ROLE_COMMANDS, TaskEngine
 
 
 def protocol() -> dict:
@@ -86,46 +83,32 @@ def synthetic_selector_run(
     return name, run_id, route["task_id"]
 
 
-def invoke_routine(
-    hermes: str,
-    profile: str,
-    hermes_home: Path,
-    store: Path,
-    job: str,
-    timeout: int,
-) -> dict:
+def run_step_now(args, step: str, review: str) -> dict:
+    """Run one step to completion in the foreground, as an operator would to watch it."""
     command = [
-        hermes,
-        "-p",
-        profile,
-        "cron",
-        "run",
-        job,
+        str(args.hmr),
+        "--store",
+        str(args.store),
+        "step",
+        step,
+        "--review",
+        review,
+        "--foreground",
+        "--max-wait",
+        "0",
+        "--hermes-home",
+        str(args.hermes_home),
     ]
     try:
         completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={
-                **os.environ,
-                "HERMES_HOME": str(hermes_home),
-                "HMR_HOME": str(store),
-            },
+            command, capture_output=True, text=True, timeout=args.timeout, check=False
         )
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "command": command,
-            "returncode": 124,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or f"timed out after {timeout} seconds",
-        }
+    except subprocess.TimeoutExpired:
+        return {"step": step, "returncode": 124, "detail": "step timed out"}
     return {
-        "command": command,
+        "step": step,
         "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "detail": (completed.stdout or completed.stderr).strip()[-400:],
     }
 
 
@@ -135,20 +118,9 @@ def selector_pilot(
     results = []
     for _number in range(1, 3):
         review, run_id, task_id = synthetic_selector_run(automation, scratch)
-        invocation = invoke_routine(
-            args.hermes,
-            "hmr-selector",
-            args.hermes_home,
-            args.store,
-            "hmr-work-selector",
-            args.timeout,
-        )
+        invocation = run_step_now(args, "select", review)
         engine = TaskEngine(automation.catalog.workspace(run_id))
-        deadline = time.monotonic() + args.timeout
         state = engine.task_automation(task_id)["state"]
-        while state in {"pending", "in_progress"} and time.monotonic() < deadline:
-            time.sleep(2)
-            state = engine.task_automation(task_id)["state"]
         passed = state == "accepted"
         results.append(
             {
@@ -188,14 +160,7 @@ def full_runs(args, automation: AutomationEngine) -> list[dict]:
             if not status["active"]:
                 continue
             role = status["active"][0]["role"]
-            invocation = invoke_routine(
-                args.hermes,
-                f"hmr-{role}",
-                args.hermes_home,
-                args.store,
-                f"hmr-work-{role}",
-                args.timeout,
-            )
+            invocation = run_step_now(args, ROLE_COMMANDS[role], name)
             invocations.append(invocation)
             if invocation["returncode"]:
                 break
@@ -248,11 +213,6 @@ def main() -> int:
             args.output.write_text(encoded + "\n")
         print(encoded)
         return 0
-    installed = routines(
-        apply=True,
-        hermes_home=args.hermes_home,
-        store=args.store,
-    )
     pilot = selector_pilot(args, automation, scratch)
     pilot_passed = len(pilot) == 2 and all(item["passed"] for item in pilot)
     full = full_runs(args, automation) if pilot_passed and args.full_runs else []
@@ -264,7 +224,6 @@ def main() -> int:
         "selector_terminal_gate": pilot,
         "full_runs": full,
         "store": str(args.store),
-        "routines": installed,
     }
     encoded = json.dumps(report, indent=2)
     if args.output:
