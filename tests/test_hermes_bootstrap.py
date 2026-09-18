@@ -465,3 +465,31 @@ def test_doctor_reports_a_legacy_fleet_and_missing_quick_commands_as_not_ready(
     ready = doctor(hermes_home=home, store=store)
     assert ready["ready"]
     assert ready["assignments"] == {"path": "hmr-steps.json", "kinds": {}, "problems": []}
+
+
+def test_a_drifted_profile_can_still_be_removed_and_reinstalled(tmp_path, monkeypatch):
+    """A session once appended notes to its own installed skill file.
+
+    Apply then refused to overwrite the profile and remove refused to clear it, so the only way
+    back was deleting files by hand. Removal only unlinks what the manifest lists, so it proceeds.
+    """
+    fake_hermes(tmp_path, monkeypatch)
+    home = tmp_path / "hermes"
+    store = tmp_path / "store"
+    source = tmp_path / "source.yaml"
+    source.write_text(SELECTED_SOURCE)
+    bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
+    skill = home / "profiles/hmr-synthesizer/skills/hmr-synthesize/SKILL.md"
+    original = skill.read_text()
+    skill.write_text(original + "\nNotes I wrote to myself.\n")
+
+    with pytest.raises(ValidationError, match="edited outside hmr"):
+        bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
+
+    removed = bootstrap_profiles(apply=True, remove=True, profile="hmr-synthesizer",
+                                 hermes_home=home, source_profile=source, store=store)
+    assert removed["removed"][0]["removed"] is True
+    assert not skill.exists()
+
+    bootstrap_profiles(apply=True, hermes_home=home, source_profile=source, store=store)
+    assert skill.read_text() == original

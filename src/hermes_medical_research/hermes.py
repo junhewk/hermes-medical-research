@@ -574,7 +574,11 @@ def bootstrap_profiles(
         desired = _desired_files(name, settings, store=artifact_store,
                                  assignment=assignment)
         desired_by_profile[name] = desired
-        _check_ownership(root)
+        if not remove:
+            # Removal deletes exactly the files the manifest lists, so drift is no reason to refuse
+            # it. Checking here too left a drifted profile unrepairable: apply refused to overwrite
+            # it and remove refused to clear it, and the only way out was deleting files by hand.
+            _check_ownership(root)
         plan.append(
             {
                 "profile": name,
