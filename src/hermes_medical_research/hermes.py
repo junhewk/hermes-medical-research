@@ -39,6 +39,12 @@ class ProfileSpec:
     max_turns: int | None = None
     kind: str | None = None
     role: str | None = None
+    # The answer schema this profile carries, when it is not a Task kind.  Intake is the only one.
+    schema: str | None = None
+
+    @property
+    def answer_schema(self) -> str | None:
+        return self.schema or self.kind
 
 
 SESSION_TOOLSETS = ("terminal", "file", "skills")
@@ -103,6 +109,11 @@ PROFILES: dict[str, ProfileSpec] = {
         kind="synthesis",
         role="synthesizer",
     ),
+    "hmr-intake": ProfileSpec(
+        "Turns a plain-language research request into one structured protocol.",
+        max_turns=2,
+        schema="intake",
+    ),
 }
 CALL_PROFILES = {spec.kind: name for name, spec in PROFILES.items() if spec.kind}
 SESSION_PROFILES = {spec.role: name for name, spec in PROFILES.items()
@@ -143,6 +154,11 @@ def _home(value: Path | None) -> Path:
 
 def _profile_root(home: Path, name: str) -> Path:
     return home / "profiles" / name
+
+
+def host_timezone() -> str:
+    """The timezone a Review gets when the operator names none."""
+    return _system_timezone()
 
 
 def _system_timezone() -> str:
@@ -291,7 +307,7 @@ def schema_warning(name: str, settings: dict[str, Any]) -> str | None:
     where JSON was expected, so both bootstrap and doctor report it.
     """
     spec = PROFILES[name]
-    if not spec.kind or _carries_schema(settings, spec.kind):
+    if not spec.answer_schema or _carries_schema(settings, spec.answer_schema):
         return None
     return (
         f"{name} has no provider entry to carry its answer schema; the settings name provider "
@@ -340,15 +356,15 @@ def _desired_files(
     # Order matters: the schema is pinned on the provider entry the profile ends up selecting, so
     # the operator's model assignment has to be applied first.
     settings = _with_assigned_model(settings, spec, assignment)
-    if spec.kind:
-        settings = _with_response_format(settings, spec.kind)
+    if spec.answer_schema:
+        settings = _with_response_format(settings, spec.answer_schema)
     config: dict[str, Any] = {
         **settings,
         "timezone": settings.get("timezone", _system_timezone()),
         **({"agent": {"max_turns": spec.max_turns}} if spec.max_turns else {}),
         "tools": {"enabled_toolsets": list(spec.toolsets)},
     }
-    if spec.role and not spec.kind:
+    if spec.role and not spec.answer_schema:
         # A session that must read full text keeps its tools, so its answer cannot be constrained
         # by a schema.  It gets the typed submit tools instead, and the server resolves its own
         # claim, so nothing task-specific is ever written into a config file.
@@ -562,8 +578,8 @@ def bootstrap_profiles(
             name,
             _with_response_format(
                 _with_assigned_model(settings, PROFILES[name], assignment),
-                PROFILES[name].kind,
-            ) if PROFILES[name].kind else settings,
+                PROFILES[name].answer_schema,
+            ) if PROFILES[name].answer_schema else settings,
         ))
     ]
     if not apply:
@@ -712,8 +728,8 @@ def doctor(*, hermes_home: Path | None = None, store: Path | None = None) -> dic
             if not (root / relative).is_file():
                 problems.append(f"missing {relative}")
         entry: dict[str, Any] = {"profile": name, "ready": not problems, "problems": problems}
-        if PROFILES[name].kind:
-            entry["schema"] = _schema_report(root, PROFILES[name].kind, problems)
+        if PROFILES[name].answer_schema:
+            entry["schema"] = _schema_report(root, PROFILES[name].answer_schema, problems)
         if problems:
             ready = False
         entry["ready"] = not problems

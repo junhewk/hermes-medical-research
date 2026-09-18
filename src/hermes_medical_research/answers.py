@@ -26,6 +26,7 @@ from hashlib import sha256
 from typing import Any
 
 from .evidence import COMPARATORS
+from .search.models import FRAMEWORKS, SOURCES
 from .validation import GRADE_DOMAINS, RELATIONSHIPS, ValidationError
 
 ALLOWED_KEYWORDS = frozenset(
@@ -134,9 +135,69 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
 
 CALL_KINDS = tuple(RESULT_SCHEMAS)
 
-MAX_TOKENS = {"screening": 768, "coverage": 768, "studies": 768, "synthesis": 3072}
+# Intake is not a Task kind: it turns the operator's plain words into a request the CLI validates
+# before any Review exists.  It has an answer schema all the same, so the same machinery applies.
+_GROUP = _object(
+    ["label", "text", "synonyms", "candidate_mesh"],
+    {
+        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+        "text": {"type": "string", "minLength": 1, "maxLength": 200},
+        "synonyms": {"type": "array", "maxItems": 12, "items": {"type": "string",
+                                                                "maxLength": 120}},
+        "candidate_mesh": {"type": "array", "maxItems": 6, "items": {"type": "string",
+                                                                     "maxLength": 120}},
+    },
+)
+_BLOCK = _object(
+    ["groups"],
+    {
+        "operator": {"type": "string", "enum": ["all", "any"]},
+        "groups": {"type": "array", "minItems": 1, "maxItems": 8, "items": _GROUP},
+    },
+)
+# The union of every framework's components, so one static schema serves all five.
+COMPONENT_KEYS = tuple(dict.fromkeys(
+    key for required, optional in FRAMEWORKS.values() for key in (*required, *optional)
+))
+INTAKE_SCHEMA = _object(
+    ["framework", "question", "components", "search_components", "eligibility", "outcomes",
+     "search_rationale"],
+    {
+        "framework": {"type": "string", "enum": sorted(FRAMEWORKS)},
+        "question": {"type": "string", "minLength": 1, "maxLength": 400},
+        "components": _object([], {key: _BLOCK for key in COMPONENT_KEYS}),
+        "search_components": {"type": "array", "minItems": 1, "maxItems": 5,
+                              "items": {"type": "string", "enum": list(COMPONENT_KEYS)}},
+        "sources": {"type": "array", "maxItems": 7,
+                    "items": {"type": "string", "enum": sorted(SOURCES)}},
+        "eligibility": _object(
+            ["include", "exclude"],
+            {
+                "include": {"type": "array", "minItems": 1, "maxItems": 12,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 300}},
+                "exclude": {"type": "array", "maxItems": 12,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 300}},
+            },
+        ),
+        "outcomes": {"type": "array", "maxItems": 12,
+                     "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+        "search_rationale": {"type": "string", "minLength": 1, "maxLength": 600},
+    },
+)
+SCHEMAS: dict[str, dict[str, Any]] = {**RESULT_SCHEMAS, "intake": INTAKE_SCHEMA}
+
+MAX_TOKENS = {"screening": 768, "coverage": 768, "studies": 768, "synthesis": 3072,
+              "intake": 4096}
 
 INSTRUCTIONS = {
+    "intake": (
+        "You turn a researcher's request into one structured review protocol. Choose the framework "
+        "the question fits. Break the question into components, and give each component group the "
+        "synonyms and candidate MeSH headings a high-recall search needs. State eligibility "
+        "criteria the way a screener can apply them to a title and abstract, and list the outcomes "
+        "the review will report. Add nothing the request does not support: a criterion nobody "
+        "asked for silently narrows the review."
+    ),
     "screening": (
         "You screen one bibliographic record for a medical evidence review. Apply every "
         "eligibility criterion below to the record's title and abstract. Judge only this record. "
@@ -163,6 +224,7 @@ INSTRUCTIONS = {
 # Packet keys whose content is the same for every item of one Cycle, so they belong in the cached
 # prompt prefix.  Everything else is the item itself and goes last.
 STABLE_PACKET_KEYS = {
+    "intake": (),
     "screening": ("eligibility",),
     "coverage": ("outcomes",),
     "studies": (),
@@ -177,20 +239,25 @@ def response_format(kind: str) -> dict[str, Any]:
     accept, and it is the only way to constrain a session that has no tools: a schema and a tool
     list cannot be combined on this gateway, which returns HTTP 400 for the pair.
     """
-    return {"type": "json_object", "schema": RESULT_SCHEMAS[kind]}
+    return {"type": "json_object", "schema": SCHEMAS[kind]}
 
 
-def parse_answer(kind: str, text: str) -> dict[str, Any]:
-    """Read one constrained answer, tolerating a fence or a trailing sentence."""
+def read_object(text: str) -> Any:
+    """Parse one answer without checking it, tolerating a fence or a trailing sentence."""
     stripped = (text or "").strip()
     if stripped.startswith("```"):
         stripped = stripped.strip("`")
         stripped = stripped[stripped.index("{"):] if "{" in stripped else stripped
     try:
-        value = json.loads(stripped)
+        return json.loads(stripped)
     except json.JSONDecodeError:
-        value = _first_object(stripped)
-    check_shape(value, RESULT_SCHEMAS[kind])
+        return _first_object(stripped)
+
+
+def parse_answer(kind: str, text: str) -> dict[str, Any]:
+    """Read one constrained answer and check it against its schema."""
+    value = read_object(text)
+    check_shape(value, SCHEMAS[kind])
     return value
 
 
@@ -284,9 +351,26 @@ def check_shape(value: Any, schema: dict[str, Any], path: str = "result") -> Non
         )
 
 
+def framework_text() -> str:
+    """Name each framework's own components, because the schema has to allow all of them.
+
+    One static schema serves five frameworks, so its ``components`` object lists every key any
+    framework uses. Without this the model fills keys its framework does not allow and the request
+    is refused for components it should never have written.
+    """
+    lines = ["Each framework uses only its own components:"]
+    for name, (required, optional) in FRAMEWORKS.items():
+        lines.append(
+            f"- {name}: {', '.join(required)}"
+            + (f"; optional {', '.join(optional)}" if optional else "")
+        )
+    lines.append("Include no other component key, and omit any component you have nothing for.")
+    return "\n".join(lines)
+
+
 def contract_text(kind: str) -> str:
     """The answer contract, rendered from the schema so prose cannot drift from the grammar."""
-    schema = RESULT_SCHEMAS[kind]
+    schema = SCHEMAS[kind]
     lines = ["Answer with one JSON object and nothing else:"]
     for field, member in schema["properties"].items():
         required = "required" if field in schema["required"] else "optional"
@@ -363,7 +447,7 @@ def apply_result(
     outcomes, schema versions, ``base_digests`` and ``certainty.origin`` stay exactly as the task
     minted them, so a model cannot move a decision onto another record.
     """
-    check_shape(result, RESULT_SCHEMAS[kind])
+    check_shape(result, SCHEMAS[kind])
     updated = deepcopy(proposal)
     if kind == "screening":
         row = updated["stages"]["screening"]["records"][0]

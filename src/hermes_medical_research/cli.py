@@ -128,6 +128,25 @@ def parser() -> argparse.ArgumentParser:
     retry.add_argument("name")
     retry.add_argument("--reason", required=True)
 
+    intake = review_commands.add_parser(
+        "intake", help="State the request in plain language and confirm the protocol"
+    )
+    intake.add_argument("text", nargs="?")
+    intake.add_argument("--from-file", type=Path, dest="from_file")
+    intake.add_argument("--list", action="store_true", dest="list_drafts")
+    intake.add_argument("--show")
+    intake.add_argument("--revise", nargs=2, metavar=("DRAFT_ID", "CLARIFICATION"))
+    intake.add_argument("--confirm")
+    intake.add_argument("--discard")
+    intake.add_argument("--name")
+    intake.add_argument("--schedule", default="once")
+    intake.add_argument("--timezone", dest="timezone_name")
+    intake.add_argument("--mode", choices=("report", "review-prep"), default="report")
+    intake.add_argument("--records-per-source", type=int, dest="records")
+    intake.add_argument("--fulltexts", type=int)
+    intake.add_argument("--language", default="en")
+    intake.add_argument("--hermes-home", type=Path)
+
     work = commands.add_parser("work", help="Operator diagnostics for the durable work queue")
     work_commands = work.add_subparsers(dest="action", required=True)
     work_commands.add_parser("tick", help=argparse.SUPPRESS)
@@ -338,6 +357,8 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return automation.set_paused(args.name, True)
         if args.action == "resume":
             return automation.set_paused(args.name, False)
+        if args.action == "intake":
+            return _intake(args, catalog)
         if args.action == "run-now":
             return automation.trigger(args.name, scheduled=args.scheduled)
         if args.action == "cancel":
@@ -523,6 +544,45 @@ def _pairs(values: list[str] | None) -> list[tuple[str, str]]:
             raise ValidationError(f"expected KIND=VALUE, got {item!r}")
         pairs.append((key.strip(), value.strip()))
     return pairs
+
+
+def _intake(args: argparse.Namespace, catalog: RunCatalog) -> Any:
+    """Plain language in, a protocol to read, and only then a Review."""
+    from . import intake
+
+    store = catalog.root
+    options = {
+        "mode": args.mode,
+        "records": args.records,
+        "fulltexts": args.fulltexts,
+        "language": args.language,
+    }
+    if args.list_drafts:
+        return intake.list_drafts(store)
+    if args.show:
+        return {"_raw": intake.render(intake.read_draft(store, args.show))}
+    if args.discard:
+        return intake.discard(store, args.discard)
+    if args.confirm:
+        if not args.name:
+            raise ValidationError("--confirm needs --name SLUG for the Review")
+        return intake.confirm(
+            store, args.confirm, name=args.name, schedule=args.schedule,
+            timezone_name=args.timezone_name, **options,
+        )
+    if args.revise:
+        draft_id, clarification = args.revise
+        return {"_raw": intake.render(intake.revise(
+            store, draft_id, clarification, hermes_home=args.hermes_home, **options
+        ))}
+    text = args.text
+    if args.from_file is not None:
+        text = sys.stdin.read() if str(args.from_file) == "-" else args.from_file.read_text()
+    if not text:
+        raise ValidationError("say what the review should answer, or pass --from-file")
+    return {"_raw": intake.render(intake.propose(
+        store, text, hermes_home=args.hermes_home, **options
+    ))}
 
 
 async def _step(args: argparse.Namespace, catalog: RunCatalog) -> Any:
