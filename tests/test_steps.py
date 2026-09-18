@@ -375,6 +375,11 @@ async def test_status_reports_progress_failures_and_the_next_command(tmp_path):
     assert "1/2 screened" in text
     assert "/hmr-selector" in text
 
+    automation.set_paused(name, True)
+    paused = steps.render_status(steps.status_view(store))
+    assert "paused" in paused.splitlines()[0]
+    assert "hmr review resume" in paused
+
 
 def test_start_detaches_the_worker_and_never_inherits_the_quick_commands_pipes(tmp_path):
     """A quick command is killed at 30 s; an inherited pipe would hang the Hermes CLI."""

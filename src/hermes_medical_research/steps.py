@@ -780,10 +780,15 @@ def render_next(view: dict[str, Any]) -> str:
 
 def render_status(view: dict[str, Any]) -> str:
     cycle = view.get("cycle") or {}
+    state = view.get("state")
+    # A paused Review refuses every claim, so it is the first thing an operator needs to see.
+    paused = " · paused" if state and state != "active" else ""
     lines = [
-        f"review {view['review']} · cycle {cycle.get('number', '?')} · "
+        f"review {view['review']}{paused} · cycle {cycle.get('number', '?')} · "
         f"{cycle.get('status', 'unknown')} · {cycle.get('run_id', 'no run')}"
     ]
+    if paused:
+        lines.append(f"the review is {state}; run `hmr review resume {view['review']}` to work it")
     for step, status in view["steps"].items():
         if not status:
             continue
