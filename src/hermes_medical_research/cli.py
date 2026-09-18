@@ -149,7 +149,7 @@ def parser() -> argparse.ArgumentParser:
 
     work = commands.add_parser("work", help="Operator diagnostics for the durable work queue")
     work_commands = work.add_subparsers(dest="action", required=True)
-    work_commands.add_parser("tick", help=argparse.SUPPRESS)
+    work_commands.add_parser("tick")  # argparse prints the sentinel if help is given
     fail = work_commands.add_parser("fail")
     fail.add_argument("claim_id")
     fail.add_argument("--code", required=True)
@@ -202,17 +202,27 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--role", required=True, choices=tuple(COMMAND_ROLES.values()))
     serve.add_argument("--kind", action="append")
 
-    from .steps import STEPS
+    from .steps import PUBLISHED_STEPS, STEPS
 
     step = commands.add_parser("step", help="Run one pipeline step yourself")
-    step_commands = step.add_subparsers(dest="action", required=True)
+    # `synthesize`, `audit`, `next`, `finalize` and `retry` stay callable but are left out of the
+    # listing: they are how an existing Run was produced and checked, not work to hand a person.
+    step_commands = step.add_subparsers(
+        dest="action",
+        required=True,
+        metavar="{use,status,stop,prompt," + ",".join(PUBLISHED_STEPS) + "}",
+    )
     use = step_commands.add_parser("use", help="Point argument-less steps at one Review")
     use.add_argument("name", nargs="?")
     use.add_argument("--clear", action="store_true")
-    for name in ("status", "next", "finalize"):
+    status = step_commands.add_parser(
+        "status", help="Every step's state, progress, and what is next"
+    )
+    status.add_argument("--review")
+    for name in ("next", "finalize"):
         view = step_commands.add_parser(name)
         view.add_argument("--review")
-    stop = step_commands.add_parser("stop")
+    stop = step_commands.add_parser("stop", help="Ask a running step to finish its item and halt")
     stop.add_argument("--review")
     stop.add_argument("--step", choices=tuple(STEPS))
     retry = step_commands.add_parser("retry")
@@ -224,14 +234,15 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("step", choices=tuple(STEPS))
     prompt.add_argument("--review")
     for name in STEPS:
-        runner = step_commands.add_parser(name)
+        published = {"help": f"Run the {name} step"} if name in PUBLISHED_STEPS else {}
+        runner = step_commands.add_parser(name, **published)
         runner.add_argument("--review")
         runner.add_argument("--limit", type=int)
         runner.add_argument("--max-wait", type=float, default=40.0)
         runner.add_argument("--foreground", action="store_true")
         runner.add_argument("--hermes-home", type=Path)
         runner.add_argument("--hermes-executable", type=Path)
-    worker = step_commands.add_parser("run", help=argparse.SUPPRESS)
+    worker = step_commands.add_parser("run")  # the detached entry point, not for people
     worker.add_argument("step", choices=tuple(STEPS))
     worker.add_argument("--review")
     worker.add_argument("--job")

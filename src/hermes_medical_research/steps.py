@@ -61,13 +61,24 @@ STEPS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 DETERMINISTIC_KINDS = ("search", "fulltext")
 ROLE_BY_KIND = {kind: STEPS[step][0] for step in STEPS for kind in STEPS[step][1]}
-# The slash command each step is installed as, so the operator is told what to type next.
+# The steps a user drives.  Extraction is the handover boundary: what it records -- an estimate,
+# an appraisal and a disposition per protocol outcome, each with a document, a locator and a
+# verbatim quote -- is the artifact a reviewer verifies and synthesizes from.  Synthesis and audit
+# stay in the code and on the CLI, because they are how an existing Run was produced and checked,
+# but they are not installed as commands: measured on the 170-record production review, synthesis
+# took about two hours for seven outcomes and audit about eight for 106 assertion groups, so
+# neither is something a person can be told to "run".
+PUBLISHED_STEPS = ("search", "select", "extract")
+# The slash command each published step is installed as, so the operator is told what to type next.
 STEP_COMMANDS = {
     "search": "/hmr-search",
     "select": "/hmr-selector",
     "extract": "/hmr-extractor",
-    "synthesize": "/hmr-synthesizer",
-    "audit": "/hmr-auditor",
+}
+# A step that exists but is not published, and the command that still runs it by hand.
+UNPUBLISHED_STEPS = {
+    "synthesize": "hmr step synthesize",
+    "audit": "hmr step audit",
 }
 # Two constrained attempts, then one session with tools, then the durable failure path.
 CALL_ATTEMPTS = 2
@@ -742,15 +753,15 @@ def quick_command_specs(store: Path, *, review: str | None = None) -> dict[str, 
     executable = hmr_command().strip("'")
     base = f"{shlex.quote(executable)} --store {shlex.quote(str(Path(store)))}"
     scope = f" --review {shlex.quote(review)}" if review else ""
+    # One command per thing a person does, plus one read and one brake.  `step next` is not
+    # installed because `step status` already ends with the same line, and `finalize` and `retry`
+    # belong to stages that are no longer published.
     specs = {
         "hmr-status": f"{base} step status{scope}",
-        "hmr-next": f"{base} step next{scope}",
         "hmr-stop": f"{base} step stop{scope}",
-        "hmr-finalize": f"{base} step finalize{scope}",
-        "hmr-retry": f"{base} step retry{scope}",
     }
-    for step, label in STEP_COMMANDS.items():
-        specs[label.lstrip("/")] = f"{base} step {step}{scope}"
+    for step in PUBLISHED_STEPS:
+        specs[STEP_COMMANDS[step].lstrip("/")] = f"{base} step {step}{scope}"
     return {name: {"type": "exec", "command": command} for name, command in sorted(specs.items())}
 
 # -- operator-facing text ---------------------------------------------------------------------
@@ -776,8 +787,18 @@ def render_next(view: dict[str, Any]) -> str:
             f"review {view['review']} has nothing routed "
             f"(cycle {cycle.get('number', '?')} is {cycle.get('status', 'unknown')})"
         )
-    label = STEP_COMMANDS.get(following["step"], following["step"] or "hmr step status")
-    return f"next: {following['kind']} ({following['role']}) — run {label}"
+    step = following["step"]
+    if step in STEP_COMMANDS:
+        return f"next: {following['kind']} ({following['role']}) — run {STEP_COMMANDS[step]}"
+    if step in UNPUBLISHED_STEPS:
+        # Never name a command that is not installed.  Extraction is where the run is handed over,
+        # so say that, and say what still runs the stage for anyone who wants it.
+        return (
+            f"extraction is complete; {following['kind']} is next but is not a published step. "
+            f"The recorded evidence is ready to hand over. "
+            f"`{UNPUBLISHED_STEPS[step]}` still runs it, and takes hours."
+        )
+    return f"next: {following['kind']} ({following['role']}) — run hmr step status"
 
 
 def render_status(view: dict[str, Any]) -> str:

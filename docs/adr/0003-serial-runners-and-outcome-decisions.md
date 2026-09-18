@@ -7,7 +7,7 @@
 
 ## Context
 
-A bounded extractor qualification on `jkworkstation` recorded one extraction for a trial that also
+A bounded extractor qualification on the Hermes host recorded one extraction for a trial that also
 reported two other protocol outcomes. An independent review caught the gap, but nothing in the CLI
 required a decision for each outcome, and the Synthesizer would have turned the omission into an
 evidence gap. The same qualification showed the agent-prompt cron workers fumbling argument order,

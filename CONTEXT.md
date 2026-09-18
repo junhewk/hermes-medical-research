@@ -20,6 +20,11 @@ or declare the run complete.
   immutable result file.
 - A **Step** is one operator act. It claims and answers one stage's Tasks in the active Review until
   that queue is empty, then stops. Nothing advances a Review unless someone runs a Step.
+- A **Published step** is a Step installed as a quick command: search, select, and extract. Synthesis
+  and audit remain in the package and on the CLI but are not published, because each takes hours.
+- The **Handover** is the point where extraction drains. The Run then holds an estimate, an appraisal,
+  and a disposition for every protocol outcome, each with a document, a locator, and a verbatim
+  quote, which is what a reviewer verifies and synthesizes from.
 - A **Lane** is the surface that answers one item: `call`, `agent`, or `none`. The Lane of a kind is
   deterministic.
 - A **Constrained call** is one fresh session with no tools whose profile carries that kind's answer

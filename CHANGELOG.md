@@ -14,11 +14,19 @@
   nothing about the work can be passed in: the active Review is `<store>/steps/active.json`, set by
   `hmr step use NAME`, and progress, failures, and the next command live in
   `<store>/steps/<review>/<step>/status.json`, which `hmr step status` reads.
-- Added `hmr hermes commands`, which installs one quick command per step into the host Hermes config
-  as a marked region owned by a digest manifest: `/hmr-search`, `/hmr-selector`, `/hmr-extractor`,
-  `/hmr-synthesizer`, `/hmr-auditor`, `/hmr-status`, `/hmr-next`, `/hmr-stop`, `/hmr-finalize`, and
-  `/hmr-retry`. The config is backed up once, re-parsed after the edit, and restored if anything
-  outside the managed entries changed.
+- Added `hmr hermes commands`, which installs the published quick commands into the host Hermes
+  config as a marked region owned by a digest manifest: `/hmr-search`, `/hmr-selector`,
+  `/hmr-extractor`, `/hmr-status`, and `/hmr-stop`. The config is backed up once, re-parsed after
+  the edit, and restored if anything outside the managed entries changed.
+- Stopped publishing synthesis and audit. Extraction is the handover boundary: it records an
+  estimate, an appraisal, and a disposition for every protocol outcome, each with a document, a
+  locator, and a verbatim quote, which is what a reviewer verifies and synthesizes from. Measured
+  end to end on the 170-record review, search through extraction took about four hours while
+  synthesis took about two for seven outcomes and audit about eight for 106 assertion groups, so
+  the two stages that cost ten of the fourteen hours are the two a person cannot be told to run.
+  Both remain in the package and on the CLI, since they are how an existing Run was produced and
+  checked, and `hmr step status` now says extraction is complete rather than naming a command that
+  is not installed. `/hmr-next` went with them: `/hmr-status` already ends with the same line.
 - Answered screening, coverage, study linking, and synthesis with one tool-free session that carries
   the kind's answer schema on the request. The profile pins `extra_body.response_format` on the
   provider entry it selects, the model returns one JSON object, and the step runner parses it, writes

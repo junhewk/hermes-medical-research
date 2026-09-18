@@ -433,13 +433,27 @@ def test_an_unknown_step_is_refused_by_name(tmp_path):
 def test_the_quick_commands_carry_no_arguments_and_one_store(tmp_path):
     specs = steps.quick_command_specs(tmp_path / "store")
 
+    # One command per thing a person does, plus one read and one brake.  Synthesis and audit are
+    # not installed: measured on the production review they take hours, so they are not work to
+    # hand someone.  `next` is not installed because `status` already prints the same line.
     assert set(specs) == {
-        "hmr-search", "hmr-selector", "hmr-extractor", "hmr-synthesizer", "hmr-auditor",
-        "hmr-status", "hmr-next", "hmr-stop", "hmr-retry", "hmr-finalize",
+        "hmr-search", "hmr-selector", "hmr-extractor", "hmr-status", "hmr-stop",
     }
     for entry in specs.values():
         assert entry["type"] == "exec"
         assert str(tmp_path / "store") in entry["command"]
+
+
+def test_an_unpublished_step_is_never_named_as_a_command_to_run(tmp_path):
+    """Extraction is the handover boundary, so status must not point at an uninstalled command."""
+    line = steps.render_next({
+        "review": "r",
+        "next": {"step": "synthesize", "kind": "synthesis", "role": "synthesizer"},
+    })
+
+    assert "/hmr-synthesizer" not in line
+    assert "extraction is complete" in line
+    assert "hmr step synthesize" in line
 
 
 @pytest.mark.asyncio

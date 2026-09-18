@@ -116,7 +116,7 @@ of 170 records answered in 20.2 minutes, 7.1 seconds mean, 7 answers prose rathe
 of the 163 parseable answers agreeing with the recorded bot decisions. That run asked for the answer
 shape instead of constraining it, which is why 7 answers were prose, and it is not one of the gates.
 
-Facts one, two and four were verified on `jkworkstation` on 2026-09-18. `hermes -p PROFILE cron
+Facts one, two and four were verified on the Hermes host on 2026-09-18. `hermes -p PROFILE cron
 delete JOB_ID` removed a job. A tool-free `hmr-screen` session with reasoning off answered one
 screening record as a single schema-shaped JSON object, in one model call and 13 seconds, and it held
 the decision enum against a prompt that demanded an out-of-enum value and a 300-word reason. The same
@@ -131,7 +131,7 @@ session: "MCP: registered 1 tool(s) from 1 server(s)", which was the one submit 
 role owned on that build. The role now owns the three per-outcome assessment tools, and a later
 session on the same host resolved all three by name through `tool_describe`.
 
-The re-screening comparison was run on `jkworkstation` on 2026-09-18 with
+The re-screening comparison was run on the Hermes host on 2026-09-18 with
 `scripts/rescreen_compare.py`, which replays the corpus into an isolated store and never writes to
 the source. It attached all 170 records and drove `hmr step select` with the real model:
 
@@ -205,22 +205,23 @@ in prose.
 
 ### Current Hermes result (2026-09-15)
 
-On `jkworkstation`, Hermes Agent 0.21.2 accepted the public creation of all six isolated profiles.
+On the Hermes host, Hermes Agent 0.21.2 accepted the public creation of all six isolated profiles.
 The earlier two-session Selector terminal gate passed: both fresh chats returned the assigned `run_id` and
 `task_id` with state `accepted`, and the harness independently confirmed one accepted receipt in each
 Run. The retained artifact is
 `/tmp/hermes-medical-research-v0.5-codex-20260915/selector-qualification-2.json` on that host.
 
-On 2026-09-16, the six profiles were also installed into the live `~/.hermes` registry on
-`jkworkstation`, used by Hermes Agent 0.21.3 and the macOS remote gateway. Bot Mode discovered them automatically, and a
-manual Selector task submitted through the macOS Bot roster produced one accepted CLI receipt. This
+On 2026-09-16, the six profiles were also installed into the live `~/.hermes` registry on the
+Hermes host, used by Hermes Agent 0.21.3 and the macOS remote gateway. Bot Mode discovered them
+automatically, and a manual Selector task submitted through the macOS Bot roster produced one
+accepted CLI receipt. This
 result qualifies terminal access but predates ADR 0002. The cron fleet and its three-full-Review and
 living-review gates are retired with 0.6.0, and gateway profile multiplexing is now reported by
 doctor without gating readiness, because a step starts its own session.
 
 ### Extractor qualification (2026-09-16, 0.5.7)
 
-A bounded linked Run on `jkworkstation` acquired three full texts and recorded eight extraction and
+A bounded linked Run on the Hermes host acquired three full texts and recorded eight extraction and
 appraisal pairs. A separate reviewer verified all 8 extraction quotes, 31 appraisal quotes, locators,
 and numerical transcriptions, but found that one trial's Mini-CEX and satisfaction outcomes were never
 extracted. That gap motivated the 0.5.8 outcome-decision contract. The run is retained unchanged as
@@ -228,7 +229,7 @@ provenance; it is not a qualification of 0.5.8.
 
 ### 0.5.8 host smoke test (2026-09-17)
 
-In an isolated store on `jkworkstation`, the three extractor-qualification articles were seeded
+In an isolated store on the Hermes host, the three extractor-qualification articles were seeded
 with screening, coverage, and study links, and the 0.5.8 Extractor runner was started. The runner
 acquired all three full texts deterministically without a model session and routed straight into
 the first assessment. The session followed the per-outcome procedure: it searched every protocol

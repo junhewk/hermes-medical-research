@@ -164,13 +164,18 @@ command string; without it each command uses the stored active Review.
 | `/hmr-search` | Runs the search step |
 | `/hmr-selector` | Screens and selects |
 | `/hmr-extractor` | Acquires full text, links studies, and assesses |
-| `/hmr-synthesizer` | Writes findings |
-| `/hmr-auditor` | Audits frozen evidence |
-| `/hmr-status` | Prints stage progress, recent failures, and the next command |
-| `/hmr-next` | Names the routed stage and the command for it |
+| `/hmr-status` | Prints stage progress, recent failures, and what is next |
 | `/hmr-stop` | Asks running steps to finish the item in flight and stop |
-| `/hmr-finalize` | Finalizes the active Cycle's Run |
-| `/hmr-retry` | Reopens a blocked Cycle in place |
+
+Five commands, one per thing you do plus one read and one brake. Extraction is where a Run is handed
+over: what it records is an estimate, an appraisal, and a disposition for every protocol outcome,
+each carrying a document, a locator, and a verbatim quote, which is the artifact a reviewer checks
+and synthesizes from.
+
+Synthesis and audit are not installed as commands. They still exist, and `hmr step synthesize` and
+`hmr step audit` still run them, but measured on the 170-record production review synthesis took
+about two hours for seven outcomes and audit about eight hours for 106 assertion groups. Neither is
+work that can honestly be handed to someone as a command, so neither is offered as one.
 
 ## The tool server
 
@@ -204,9 +209,10 @@ hmr step use exercise-review
 hmr step status
 ```
 
-Then run one step at a time, in order: `/hmr-search`, `/hmr-selector`, `/hmr-extractor`,
-`/hmr-synthesizer`, `/hmr-auditor`, and `/hmr-finalize`. `/hmr-status` after each one reports what is
-done, what failed, and the command for the routed stage. A step does nothing until you run it.
+Then run one step at a time, in order: `/hmr-search`, `/hmr-selector`, and `/hmr-extractor`.
+`/hmr-status` after each one reports what is done, what failed, and what is next. A step does nothing
+until you run it. When extraction drains, the Run holds the recorded evidence and is ready to hand
+over.
 
 The same steps are available as CLI commands, with flags the quick commands cannot carry:
 
