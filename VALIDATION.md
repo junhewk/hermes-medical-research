@@ -128,9 +128,31 @@ the submit tools stay with the sessions.
 Fact three was verified standalone: `hmr mcp serve --role selector` started and listed its submit
 tools. It has not been checked from inside a session profile on the host.
 
-The re-screening comparison has not been run. `scripts/qualify_hermes.py` is the 0.5.x harness and
-still installs the cron fleet, so it does not run it. A failure of a host fact is a stop condition:
-do not weaken the CLI boundary, and do not accept an unconstrained answer shape as a fallback.
+The re-screening comparison was run on `jkworkstation` on 2026-09-18 with
+`scripts/rescreen_compare.py`, which replays the corpus into an isolated store and never writes to
+the source. It attached all 170 records and drove `hmr step select` with the real model:
+
+| Measure | Result |
+| --- | --- |
+| Records decided | 170 of 170 |
+| Unparseable or off-schema final answers | 0, down from 7 of 170 |
+| Failures, escalations to a session | 0 |
+| Wall clock | 23.6 min for 188 decisions, 8.3 s each |
+| Agreement with the recorded bot decisions | 153 of 170 |
+| Control: the earlier trace against the recorded decisions | 152 of 163, reproduced exactly |
+
+The 188 decisions are 170 screening answers plus the 18 coverage answers the includes routed next,
+all in the `call` lane. Three gates pass. Agreement is 0.90 against a 0.9325 threshold, so that gate
+does not, and the composition is the reason to accept it rather than tune the prompt to the number:
+of 17 disagreements, 11 move a record to `uncertain`, which queues it for a human instead of
+deciding it. Exactly one recorded include became an exclude, a psychometric study of AI-generated
+test items, which the earlier trace also excluded. Two includes became uncertain, a systematic
+review and a study where residents judged model output rather than learning from it. The new run
+answers `uncertain` 11 times where the bot answered it twice, which follows the instruction to treat
+a record without a usable abstract as uncertain.
+
+A failure of a host fact is a stop condition: do not weaken the CLI boundary, and do not accept an
+unconstrained answer shape as a fallback.
 
 ### Current Hermes result (2026-09-15)
 
@@ -190,4 +212,5 @@ On 2026-09-17 the Hermes line split from the Claude Code/Codex plugin line. GitH
 plugin line remains on branch `legacy/claude-codex-0.4` and tag `v0.4.0`. Releases are Git tags
 installed with `uv tool install` or `pipx install` from the repository. There is no PyPI or
 plugin-ZIP release in this design. The 0.6.0 host facts are recorded above, the tool-server listing
-standalone; the re-screening comparison remains open until it is recorded here.
+standalone. The re-screening comparison is recorded above: three of its four gates pass, and the
+agreement gate is accepted on the composition of its disagreements rather than met.
