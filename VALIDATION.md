@@ -83,7 +83,7 @@ uv run --extra dev pytest -q
 uv build
 ```
 
-The 0.6.0 local run on 2026-09-18 collected and passed 274 tests, and Ruff and `git diff --check`
+The 0.6.0 local run on 2026-09-19 collected and passed 324 tests, and Ruff and `git diff --check`
 passed with it. The final count is updated with each release commit.
 
 ## Hermes operational gates
