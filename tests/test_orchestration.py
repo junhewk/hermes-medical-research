@@ -777,3 +777,29 @@ def test_a_revised_report_row_is_recorded_but_mints_no_correction(tmp_path):
     assert "halt" not in reloaded
     recorded = workspace.read("reviews")["report_reviews"]
     assert any(row["status"] == "revise" for row in recorded), "but it is still recorded"
+
+
+def test_source_text_narrows_so_every_cited_locator_is_still_shown(tmp_path):
+    """A locator the auditor is never shown is a target it can only answer `uncertain`.
+
+    Unbounded, the widest real finding group reached 47781 bytes against the 32768-byte packet
+    bound, and a 54 KB prompt came back with all five verdicts `uncertain` and nothing cited. The
+    text narrows instead, which is safe: `_validate_sources` checks a returned quote against the
+    stored segment, so a quote taken from the shown prefix still verifies.
+    """
+    workspace = modern_workspace(tmp_path)
+    engine = TaskEngine(workspace)
+    _, groups = audit.audit_groups(workspace)
+    group = next(g for g in groups if engine._cited_segments(g))
+    full = {
+        (item["document_id"], item["locator"]): item["text"]
+        for item in engine._cited_segments(group)
+    }
+
+    engine.PACKET_RESERVE_BYTES = 31 * 1024  # leave almost nothing, forcing the narrowest cap
+    narrowed = engine._cited_segments(group)
+
+    assert {(i["document_id"], i["locator"]) for i in narrowed} == set(full)
+    for item in narrowed:
+        stored = full[(item["document_id"], item["locator"])]
+        assert stored.startswith(item["text"]), "a shown quote must still verify against the store"

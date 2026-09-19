@@ -1488,8 +1488,18 @@ class TaskEngine:
             "allowed_source_ids": list(dict.fromkeys([*logical, *documents])),
         }
 
+    #: What a group may spend showing source text, and the descending per-segment caps used to fit
+    #: it.  Truncating is safe: `_validate_sources` checks a returned quote against the *stored*
+    #: segment, so a quote taken from the shown prefix still verifies.  Unbounded, the widest real
+    #: finding group reached 47781 bytes against the 32768 bound, and a 54 KB prompt came back with
+    #: every verdict `uncertain` and nothing cited.
+    SOURCE_TEXT_CAPS = (4000, 2000, 1200, 600, 300, 120)
+    #: Room kept for everything else `_create_task` puts in a packet besides the group and its
+    #: sources: instructions, digests, the proposal path, the source list.
+    PACKET_RESERVE_BYTES = 4 * 1024
+
     def _cited_segments(self, group: dict[str, Any]) -> list[dict[str, Any]]:
-        """Segment text for every locator this group's targets point at, deduplicated."""
+        """Segment text for every locator this group points at, deduplicated and bounded."""
         allowed = set(group.get("allowed_document_ids") or [])
         wanted: list[dict[str, str]] = []
         every = [*(group.get("targets") or []), *(group.get("membership_targets") or [])]
@@ -1497,6 +1507,16 @@ class TaskEngine:
             for location in target.get("cited_locations") or []:
                 if location["document_id"] in allowed and location not in wanted:
                     wanted.append(location)
+        # A finding's own fields rarely cite a locator; its contributions do. Without these a
+        # finding group carried no quotable text at all and every verdict came back `uncertain`.
+        for contribution in group.get("evidence") or []:
+            location = (contribution.get("extraction") or {}).get("source_location") or {}
+            entry = {
+                "document_id": location.get("document_id"),
+                "locator": location.get("locator"),
+            }
+            if entry["document_id"] in allowed and entry not in wanted:
+                wanted.append(entry)
         documents = self.workspace.source_index()
         segments = []
         for location in wanted:
@@ -1513,7 +1533,22 @@ class TaskEngine:
             )
             if text:
                 segments.append({**location, "text": text})
-        return segments
+        # Keep every cited locator and narrow the text until the block fits: a locator the auditor
+        # is never shown is a target it can only answer `uncertain`.
+        # The budget is whatever the group has not already spent, so a finding with many
+        # contributions narrows its quotations instead of overflowing the packet.
+        spent = len(
+            json.dumps(
+                {k: v for k, v in group.items() if k not in {"proposal", "allowed_document_ids"}},
+                ensure_ascii=False,
+            ).encode()
+        )
+        budget = max(2 * 1024, TASK_PACKET_LIMIT - spent - self.PACKET_RESERVE_BYTES)
+        for cap in self.SOURCE_TEXT_CAPS:
+            capped = [{**item, "text": item["text"][:cap]} for item in segments]
+            if len(json.dumps(capped, ensure_ascii=False).encode()) <= budget:
+                return capped
+        return [{**item, "text": item["text"][: self.SOURCE_TEXT_CAPS[-1]]} for item in segments]
 
     def _audit_spec(
         self, manifest: dict[str, Any], ledger: dict[str, Any]

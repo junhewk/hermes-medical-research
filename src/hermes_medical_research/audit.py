@@ -472,13 +472,14 @@ CONTRIBUTION_FACTS = (
     "favors",
     "source_location",
 )
-#: What a finding group may spend on its contribution detail.  Its five target assertions already
-#: cost about 11 KB on the widest real finding, so this leaves headroom under TASK_PACKET_LIMIT.
-EVIDENCE_DETAIL_BYTES = 16 * 1024
-#: Descending detail: (text cap for the synthesizer's own rationales, keep source_location).  The
-#: same graduated shortening ``_synthesis_spec`` uses, so a review with many contributions narrows
-#: instead of overflowing.  The last level always fits.
-EVIDENCE_DETAIL_LEVELS = ((None, True), (240, False), (120, False), (0, False))
+#: What a finding group may spend on its contribution detail.  Its five target assertions cost
+#: about 11 KB on the widest real finding and its source segments another 10 KB, so the three
+#: together have to stay under TASK_PACKET_LIMIT.
+EVIDENCE_DETAIL_BYTES = 8 * 1024
+#: Descending detail: the cap on the synthesizer's own rationales.  ``source_location`` is never
+#: dropped -- at about 87 bytes it is cheap, and it is the only thing telling the auditor where to
+#: read.  Without it the packet carries no quotable text and every verdict comes back `uncertain`.
+EVIDENCE_DETAIL_LEVELS = (None, 240, 120, 0)
 
 
 def _evidence_detail(frozen: dict[str, Any], finding: dict[str, Any]) -> list[dict[str, Any]]:
@@ -486,10 +487,7 @@ def _evidence_detail(frozen: dict[str, Any], finding: dict[str, Any]) -> list[di
     rows = {row["extraction_id"]: row for row in frozen["stages"]["extractions"]["records"]}
     appraisals = {row["extraction_id"]: row for row in frozen["stages"]["appraisals"]["records"]}
 
-    def build(cap: int | None, locations: bool) -> list[dict[str, Any]]:
-        keys = CONTRIBUTION_FACTS if locations else tuple(
-            key for key in CONTRIBUTION_FACTS if key != "source_location"
-        )
+    def build(cap: int | None) -> list[dict[str, Any]]:
         detail = []
         for contribution in finding.get("evidence") or []:
             entry = dict(contribution)
@@ -500,7 +498,7 @@ def _evidence_detail(frozen: dict[str, Any], finding: dict[str, Any]) -> list[di
             row = rows.get(contribution.get("extraction_id"))
             if row is not None:
                 entry["extraction"] = _without_quotes(
-                    {key: row.get(key) for key in keys if key in row}
+                    {key: row.get(key) for key in CONTRIBUTION_FACTS if key in row}
                 )
                 appraisal = appraisals.get(row["extraction_id"]) or {}
                 if appraisal.get("same_as"):
@@ -515,8 +513,8 @@ def _evidence_detail(frozen: dict[str, Any], finding: dict[str, Any]) -> list[di
             detail.append(entry)
         return detail
 
-    for cap, locations in EVIDENCE_DETAIL_LEVELS:
-        detail = build(cap, locations)
+    for cap in EVIDENCE_DETAIL_LEVELS:
+        detail = build(cap)
         if len(canonical_json(detail).encode()) <= EVIDENCE_DETAIL_BYTES:
             return detail
     return detail
