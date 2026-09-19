@@ -94,20 +94,13 @@
   audit the session spent 53 minutes reading the store and never submitted a group. The new skill
   says the proposal is a filled template, names the four fields a session may edit and the identity
   fields it must never retype, and states the revise and citation rules.
-- Wrote two more of the audit contract's real rules into `hmr-audit`: a report group's template
-  carries no `checks` block and must not be given one, and `read_file` truncates a long
-  single-line assertion, so it has to be paged before it is judged. An auditor session had found
-  both by being rejected and then appended them to its own installed skill file, exactly as a
-  synthesizer session had done earlier. Every session skill now states that its own file is
-  read-only to the session, and the digest manifest keeps catching the write when it happens: a
-  drifting skill is reported by `hmr hermes doctor` as a profile problem.
-- Wrote the synthesis validator's real rejection rules into `hmr-synthesize`: the 600-character
-  `conclusion` cap, the required `limitations` array, `use: indirect` under a mixed comparator,
-  source-grounded mappings for `overlap.status: mapped`, and `not-assessable` certainty when the
-  contributing appraisal is limited. A synthesizer session had discovered these by being rejected
-  and then appended them to its own installed skill file, which the digest manifest caught as
-  drift. The rules belong in the reviewed skill; the skill now also says that a skill file is
-  read-only to the session even when the filesystem permits a write.
+- Kept sessions out of their own instructions. A synthesizer session and later an auditor session
+  each appended what they had learned from validator rejections to their own installed skill file.
+  The digest manifest caught both, and `hmr hermes doctor` reports a drifting skill as a profile
+  problem. Their notes were accurate, and were briefly folded into the reviewed skills, but prose
+  that reaches a shipped skill by that route has no reviewed provenance, so it was removed again.
+  Every session skill now states that its own file is read-only to the session; that is prose, not
+  containment, since a session runs as the same user, so the manifest remains the mechanism.
 - Changed three queue rules the step model forces. A step waits out the 5-minute and 30-minute retry
   backoff instead of mistaking a backed-off Task for an empty queue. Abandonment blocking after 95
   minutes is deleted, because an unclaimed Task between two slash commands is now normal. An
