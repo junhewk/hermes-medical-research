@@ -445,6 +445,68 @@ def _pack_report_groups(report_targets: list[dict[str, Any]]) -> list[list[dict[
     return groups
 
 
+#: The facts of a contributing extraction that a finding's checks are judged against.  Quotes are
+#: deliberately absent; see ``_without_quotes``.  ``source_location`` is in the widest level only:
+#: the target assertions already carry their own locators.
+CONTRIBUTION_FACTS = (
+    "protocol_outcome",
+    "comparator_type",
+    "outcome_type",
+    "sample_size",
+    "effect",
+    "favors",
+    "source_location",
+)
+#: What a finding group may spend on its contribution detail.  Its five target assertions already
+#: cost about 11 KB on the widest real finding, so this leaves headroom under TASK_PACKET_LIMIT.
+EVIDENCE_DETAIL_BYTES = 16 * 1024
+#: Descending detail: (text cap for the synthesizer's own rationales, keep source_location).  The
+#: same graduated shortening ``_synthesis_spec`` uses, so a review with many contributions narrows
+#: instead of overflowing.  The last level always fits.
+EVIDENCE_DETAIL_LEVELS = ((None, True), (240, False), (120, False), (0, False))
+
+
+def _evidence_detail(frozen: dict[str, Any], finding: dict[str, Any]) -> list[dict[str, Any]]:
+    """The finding's contributions, each carrying the extraction facts its checks need."""
+    rows = {row["extraction_id"]: row for row in frozen["stages"]["extractions"]["records"]}
+    appraisals = {row["extraction_id"]: row for row in frozen["stages"]["appraisals"]["records"]}
+
+    def build(cap: int | None, locations: bool) -> list[dict[str, Any]]:
+        keys = CONTRIBUTION_FACTS if locations else tuple(
+            key for key in CONTRIBUTION_FACTS if key != "source_location"
+        )
+        detail = []
+        for contribution in finding.get("evidence") or []:
+            entry = dict(contribution)
+            for field in ("alignment_rationale", "weight_rationale"):
+                if cap is None or field not in entry:
+                    continue
+                entry[field] = str(entry[field])[:cap] if cap else ""
+            row = rows.get(contribution.get("extraction_id"))
+            if row is not None:
+                entry["extraction"] = _without_quotes(
+                    {key: row.get(key) for key in keys if key in row}
+                )
+                appraisal = appraisals.get(row["extraction_id"]) or {}
+                if appraisal.get("same_as"):
+                    appraisal = appraisals.get(appraisal["same_as"], appraisal)
+                if appraisal:
+                    # The certainty rule at evidence.py:244 turns on these, so they must be visible.
+                    entry["appraisal"] = {
+                        "method": appraisal.get("method"),
+                        "completion": appraisal.get("completion"),
+                        "overall_judgment": appraisal.get("overall_judgment"),
+                    }
+            detail.append(entry)
+        return detail
+
+    for cap, locations in EVIDENCE_DETAIL_LEVELS:
+        detail = build(cap, locations)
+        if len(canonical_json(detail).encode()) <= EVIDENCE_DETAIL_BYTES:
+            return detail
+    return detail
+
+
 def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
     """Return bounded, exhaustive audit groups whose digests change only with their content."""
     frozen = candidate(workspace)
@@ -478,8 +540,13 @@ def audit_groups(workspace: Workspace) -> tuple[str, list[dict[str, Any]]]:
                 "entity_id": finding_id,
                 "targets": targets,
                 "membership_targets": memberships,
-                # Judged against by the harms and certainty targets, and shown once for both.
-                "evidence": finding.get("evidence") or [],
+                # Judged against by the harms and certainty targets, and shown once for both.  Each
+                # contribution carries the checkable facts of the extraction it names, because the
+                # `estimates` and `harms` assertions are only the conclusion string: without the
+                # effects, the outcome types and the comparators, both checks ask about data the
+                # packet does not hold, which is the defect that produced three of seven findings
+                # needing revision on the first real run.
+                "evidence": _evidence_detail(frozen, finding),
                 "allowed_document_ids": allowed_document_ids,
                 "group_digest": digest(
                     {

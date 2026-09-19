@@ -563,12 +563,15 @@ def test_a_findings_evidence_is_shown_once_not_inside_two_assertions(tmp_path):
         assertions = {target["check"]: target["assertion"] for target in group["targets"]}
         assert "evidence" not in assertions["harms"]
         assert "evidence" not in assertions["certainty"]
-        # Shown once for both checks, so the auditor can still judge them against it.
-        assert group["evidence"] == next(
-            row["evidence"]
-            for row in workspace.read("synthesis")["findings"]
+        # Shown once for both checks, so the auditor can still judge them against it, and every
+        # contribution is named exactly as the finding named it.
+        finding = next(
+            row for row in workspace.read("synthesis")["findings"]
             if row["finding_id"] == group["entity_id"]
         )
+        assert [item["extraction_id"] for item in group["evidence"]] == [
+            item["extraction_id"] for item in finding["evidence"]
+        ]
 
 
 def test_an_oversized_packet_names_the_field_that_overflowed(tmp_path):
@@ -642,3 +645,52 @@ def test_an_assertion_still_says_where_to_look(tmp_path):
 
     assert location["document_id"] and location["locator"]
     assert "quote" not in location
+
+
+def test_the_estimates_and_harms_checks_can_see_what_they_judge(tmp_path):
+    """Both assert only the conclusion string, so their data has to be on the group.
+
+    `estimates` asserted `{outcome, conclusion}` and `harms` asserted `{conclusion}` — the same
+    sentence, with no effect, no outcome type and no comparator anywhere in the packet. A check
+    whose input is absent can only be guessed at, which is what sent three of seven findings back
+    for revision on the first real run.
+    """
+    workspace = modern_workspace(tmp_path)
+    _, groups = audit.audit_groups(workspace)
+    group = next(g for g in groups if g["kind"] == "finding" and g["evidence"])
+
+    contribution = group["evidence"][0]
+    facts = contribution["extraction"]
+
+    assert "effect" in facts, "the estimates check needs the numbers it is judging"
+    assert "outcome_type" in facts, "the harms check needs to know benefit from harm"
+    assert "comparator_type" in facts, "the scope check needs what each study compared against"
+    # The certainty rule at evidence.py:244 turns on appraisal completion, so it must be visible.
+    assert set(contribution["appraisal"]) == {"method", "completion", "overall_judgment"}
+    # And none of it reintroduces a quote.
+    assert not _quotes_in(facts)
+
+
+def test_contribution_detail_narrows_instead_of_overflowing(tmp_path, monkeypatch):
+    """Supplying the facts cost bytes, and the widest real finding went back over the bound.
+
+    Carrying 22 contributions with effects and appraisals took one group to 36324 bytes against
+    the 32768-byte packet limit, so the detail shortens in steps like `_synthesis_spec` does.
+    """
+    workspace = modern_workspace(tmp_path)
+    monkeypatch.setattr(audit, "EVIDENCE_DETAIL_BYTES", 400)
+
+    _, groups = audit.audit_groups(workspace)
+    group = next(g for g in groups if g["kind"] == "finding" and g["evidence"])
+
+    # Narrowed, but every contribution is still named and still carries its checkable facts.
+    finding = next(
+        row for row in workspace.read("synthesis")["findings"]
+        if row["finding_id"] == group["entity_id"]
+    )
+    assert len(group["evidence"]) == len(finding["evidence"])
+    assert all("extraction" in item for item in group["evidence"])
+    assert all(
+        not item.get("alignment_rationale") or len(item["alignment_rationale"]) <= 240
+        for item in group["evidence"]
+    )
