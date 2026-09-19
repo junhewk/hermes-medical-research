@@ -75,6 +75,23 @@ def candidate(workspace: Workspace) -> dict[str, Any]:
     }
 
 
+def _without_quotes(value: Any) -> Any:
+    """``value`` with every ``quote`` removed, wherever it is nested.
+
+    A quote is the answer to the question the target asks, so it cannot be part of the question.
+    An ``extractions`` or ``appraisals`` target requires a citation, and its own row carried a
+    ``source_location.quote`` that was already inside ``allowed_document_ids`` and had already
+    passed the same verbatim test at submit time: an auditor could satisfy the requirement by
+    copying it out of the assertion without opening a document.  ``document_id`` and ``locator``
+    stay, because the auditor still has to be told where to read.
+    """
+    if isinstance(value, dict):
+        return {key: _without_quotes(item) for key, item in value.items() if key != "quote"}
+    if isinstance(value, list):
+        return [_without_quotes(item) for item in value]
+    return value
+
+
 def _target(
     *,
     prefix: str,
@@ -93,7 +110,7 @@ def _target(
         "entity_id": entity_id,
         "field": field,
         "paths": paths,
-        "assertion": canonical_json(value),
+        "assertion": canonical_json(_without_quotes(value)),
     }
     result = {
         "target_id": f"{prefix}-{digest(body)[:20]}",

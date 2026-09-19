@@ -589,3 +589,56 @@ def test_an_oversized_packet_names_the_field_that_overflowed(tmp_path):
     message = str(error.value)
     assert "audit task packet is" in message
     assert "audit_group is the largest field" in message
+
+
+def _assertions(workspace):
+    report, findings, memberships = audit.build_review_targets(audit.candidate(workspace))
+    return [*report, *findings, *memberships]
+
+
+def _quotes_in(value) -> list[str]:
+    """Every `quote` string anywhere inside an assertion."""
+    found = []
+    if isinstance(value, dict):
+        for key, member in value.items():
+            if key == "quote" and isinstance(member, str):
+                found.append(member)
+            else:
+                found.extend(_quotes_in(member))
+    elif isinstance(value, list):
+        for member in value:
+            found.extend(_quotes_in(member))
+    return found
+
+
+def test_no_assertion_carries_the_quote_that_would_answer_it(tmp_path):
+    """The quote is the answer, so it must not sit inside the question.
+
+    An `extractions` target requires a citation, and its own row's `source_location.quote` used to
+    be part of the assertion: already in `allowed_document_ids`, already verbatim-checked at submit
+    time. An auditor could satisfy the requirement by copying it out of the question without ever
+    opening a document, so independent verification was not enforced at all.
+    """
+    workspace = modern_workspace(tmp_path)
+
+    targets = _assertions(workspace)
+    cited = [t for t in targets if t.get("requires_sources")]
+    assert cited, "the fixture must contain at least one target that requires a citation"
+
+    for target in targets:
+        leaked = _quotes_in(json.loads(target["assertion"]))
+        assert not leaked, (
+            f"{target.get('kind')}/{target.get('check')} assertion still carries "
+            f"{leaked[0][:40]!r}"
+        )
+
+
+def test_an_assertion_still_says_where_to_look(tmp_path):
+    """Stripping the quote must not strip the locator: the auditor needs somewhere to read."""
+    workspace = modern_workspace(tmp_path)
+
+    extraction = next(t for t in _assertions(workspace) if t.get("kind") == "extractions")
+    location = json.loads(extraction["assertion"])["source_location"]
+
+    assert location["document_id"] and location["locator"]
+    assert "quote" not in location
