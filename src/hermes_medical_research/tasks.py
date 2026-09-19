@@ -1562,10 +1562,14 @@ class TaskEngine:
             result = self.workspace.store.read_json(task["result_file"])
             rows.extend(result["records"])
             report_rows.extend(result["report_reviews"])
-            if any(
-                row.get("status") == "revise"
-                for row in [*result["records"], *result["report_reviews"]]
-            ):
+            # Only a finding sends work back. On the real 170-record run the seven findings
+            # produced the three genuine defects -- a mislabelled comparator and two certainty
+            # blocks that misdescribed their own evidence -- while the report rows produced mostly
+            # `uncertain` hedges. Automating a correction for every hedge made succeeding generate
+            # more work than failing: 11 groups carried revisions, each of which would mint a
+            # session and a re-audit, and two unresolved attempts halt the Run. A revised report
+            # row is recorded and surfaced instead, for a person to read.
+            if any(row.get("status") == "revise" for row in result["records"]):
                 revise_tasks.append(task)
         if revise_tasks:
             # Correct one audit group at a time; the others keep their receipts until then.

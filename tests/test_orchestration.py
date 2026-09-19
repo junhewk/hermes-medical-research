@@ -25,6 +25,7 @@ from hermes_medical_research.hermes import (
 from hermes_medical_research.search.models import ValidationError
 from hermes_medical_research.tasks import MAX_CORRECTIONS_PER_GROUP, Actor, TaskEngine
 from hermes_medical_research.workflow import check
+from hermes_medical_research.workspace import digest
 
 COORDINATOR = Actor("hmr-coordinator", "operator", "coordinator")
 
@@ -365,14 +366,15 @@ def test_unresolved_audit_group_halts_the_run_until_retried(tmp_path):
     engine = TaskEngine(workspace)
     manifest = workspace.load()
     ledger = manifest["task_engine"]
+    # A finding group, because only a finding sends work back.
     task = next(
-        t for t in ledger["tasks"].values() if t["kind"] == "audit" and t["state"] == "accepted"
+        t for t in ledger["tasks"].values()
+        if t["kind"] == "audit" and t["state"] == "accepted"
+        and workspace.store.read_json(t["result_file"])["records"]
     )
     result = workspace.store.read_json(task["result_file"])
     for row in [*result["records"], *result["report_reviews"]]:
         row["status"] = "revise"
-    from hermes_medical_research.workspace import digest
-
     task["result_file"] = f"tasks/{task['task_id']}/result-{digest(result)}.json"
     task["result_digest"] = digest(result)
     workspace.store.write_json(task["result_file"], result)
@@ -741,3 +743,37 @@ def test_an_audit_packet_carries_the_text_it_must_quote(tmp_path):
         # The quote still never travels with the assertion.
         assert not _quotes_in({k: v for k, v in group.items() if k != "proposal"})
     assert carried, "the fixture should have at least one group that cites a locator"
+
+
+def test_a_revised_report_row_is_recorded_but_mints_no_correction(tmp_path):
+    """Automating a correction for every hedge made succeeding cost more than failing.
+
+    On the real run 11 groups carried revisions; each would mint a session and a re-audit, and two
+    unresolved attempts halt the Run. The three genuine defects were all in findings, so only a
+    finding sends work back and a revised report row is recorded for a person to read.
+    """
+    workspace = modern_workspace(tmp_path)
+    engine = TaskEngine(workspace)
+    manifest = workspace.load()
+    ledger = manifest["task_engine"]
+    task = next(
+        t for t in ledger["tasks"].values()
+        if t["kind"] == "audit" and t["state"] == "accepted"
+        and not workspace.store.read_json(t["result_file"])["records"]
+    )
+    result = workspace.store.read_json(task["result_file"])
+    for row in result["report_reviews"]:
+        row["status"] = "revise"
+    task["result_file"] = f"tasks/{task['task_id']}/result-{digest(result)}.json"
+    task["result_digest"] = digest(result)
+    workspace.store.write_json(task["result_file"], result)
+    manifest["datasets"].pop("reviews")
+    workspace.save(manifest)
+
+    engine.route_next(COORDINATOR)
+
+    reloaded = workspace.load()["task_engine"]
+    assert not reloaded.get("revision"), "a report row must not mint a correction"
+    assert "halt" not in reloaded
+    recorded = workspace.read("reviews")["report_reviews"]
+    assert any(row["status"] == "revise" for row in recorded), "but it is still recorded"
