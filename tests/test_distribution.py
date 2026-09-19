@@ -74,12 +74,15 @@ def test_profiles_cover_every_role_without_a_plugin_lifecycle():
         "hmr-cover",
         "hmr-link",
         "hmr-finding",
+        "hmr-verdict",
         "hmr-intake",
     }
     # A constrained profile has no tools at all: a schema and a tool list cannot be combined, so
     # there is no skill to read and no shell toolset to run.
     constrained = {name: spec for name, spec in PROFILES.items() if spec.answer_schema}
-    assert set(constrained) == {"hmr-screen", "hmr-cover", "hmr-link", "hmr-finding", "hmr-intake"}
+    assert set(constrained) == {
+        "hmr-screen", "hmr-cover", "hmr-link", "hmr-finding", "hmr-verdict", "hmr-intake",
+    }
     for name, spec in constrained.items():
         assert spec.skills == () and spec.toolsets == (), name
         assert spec.max_turns == 2, name

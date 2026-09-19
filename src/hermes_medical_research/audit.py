@@ -92,6 +92,27 @@ def _without_quotes(value: Any) -> Any:
     return value
 
 
+def _locations_in(value: Any) -> list[dict[str, str]]:
+    """Every ``{document_id, locator}`` an assertion points at, in order, without duplicates."""
+    found: list[dict[str, str]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            document_id, locator = node.get("document_id"), node.get("locator")
+            if isinstance(document_id, str) and isinstance(locator, str):
+                entry = {"document_id": document_id, "locator": locator}
+                if entry not in found:
+                    found.append(entry)
+            for item in node.values():
+                walk(item)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return found
+
+
 def _target(
     *,
     prefix: str,
@@ -116,6 +137,9 @@ def _target(
         "target_id": f"{prefix}-{digest(body)[:20]}",
         **body,
         "review_digest": digest({"evidence_digest": evidence_digest, **body}),
+        # Where this assertion says it came from.  The packet carries the text at these locators so
+        # a tool-free call can quote it; the quote itself is never in the assertion.
+        "cited_locations": _locations_in(value),
     }
     if check is not None:
         result["check"] = check

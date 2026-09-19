@@ -714,3 +714,30 @@ def test_no_target_asks_for_an_opinion_it_cannot_evidence(tmp_path):
         if unevidenceable:
             assert not target.get("requires_sources"), target.get("kind")
             assert target.get("kind") != "protocol"
+
+
+def test_an_audit_packet_carries_the_text_it_must_quote(tmp_path):
+    """A constrained call has no tools, so the segments have to be in the packet."""
+    workspace = modern_workspace(tmp_path)
+    engine = TaskEngine(workspace)
+    _, groups = audit.audit_groups(workspace)
+
+    carried = 0
+    for group in groups:
+        segments = engine._cited_segments(group)
+        allowed = set(group.get("allowed_document_ids") or [])
+        cited = [
+            location
+            for target in group["targets"]
+            for location in target.get("cited_locations") or []
+            if location["document_id"] in allowed
+        ]
+        if cited:
+            assert segments, f"{group['group_id']} cites a locator but carries no text"
+            carried += 1
+        for entry in segments:
+            assert entry["text"]
+            assert set(entry) == {"document_id", "locator", "text"}
+        # The quote still never travels with the assertion.
+        assert not _quotes_in({k: v for k, v in group.items() if k != "proposal"})
+    assert carried, "the fixture should have at least one group that cites a locator"

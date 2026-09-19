@@ -1488,6 +1488,33 @@ class TaskEngine:
             "allowed_source_ids": list(dict.fromkeys([*logical, *documents])),
         }
 
+    def _cited_segments(self, group: dict[str, Any]) -> list[dict[str, Any]]:
+        """Segment text for every locator this group's targets point at, deduplicated."""
+        allowed = set(group.get("allowed_document_ids") or [])
+        wanted: list[dict[str, str]] = []
+        every = [*(group.get("targets") or []), *(group.get("membership_targets") or [])]
+        for target in every:
+            for location in target.get("cited_locations") or []:
+                if location["document_id"] in allowed and location not in wanted:
+                    wanted.append(location)
+        documents = self.workspace.source_index()
+        segments = []
+        for location in wanted:
+            document = documents.get(location["document_id"])
+            if document is None:
+                continue
+            text = next(
+                (
+                    item.get("text", "")
+                    for item in document.get("segments", [])
+                    if item.get("locator") == location["locator"]
+                ),
+                None,
+            )
+            if text:
+                segments.append({**location, "text": text})
+        return segments
+
     def _audit_spec(
         self, manifest: dict[str, Any], ledger: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -1515,6 +1542,11 @@ class TaskEngine:
                             for key, value in group.items()
                             if key not in {"proposal", "allowed_document_ids"}
                         },
+                        # The text at the locators this group's assertions cite, so a tool-free
+                        # call can quote it.  Measured over a real 106-group run: carrying every
+                        # allowed document breaks the packet bound on 46 groups, while carrying
+                        # only the cited segments leaves every group inside it.
+                        "sources": self._cited_segments(group),
                         "citation_contract": audit.citation_contract(self.workspace),
                     },
                     "allowed_source_ids": group["allowed_document_ids"],

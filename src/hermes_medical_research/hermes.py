@@ -112,6 +112,12 @@ PROFILES: dict[str, ProfileSpec] = {
         kind="synthesis",
         role="synthesizer",
     ),
+    "hmr-verdict": ProfileSpec(
+        "Checks one frozen audit group with one constrained call.",
+        max_turns=2,
+        kind="audit",
+        role="auditor",
+    ),
     "hmr-intake": ProfileSpec(
         "Turns a plain-language research request into one structured protocol.",
         max_turns=2,

@@ -216,7 +216,9 @@ def test_the_lane_of_each_kind_is_deterministic():
     # A shortened synthesis packet shows summaries, so the finding needs source reads.
     assert steps.lane_for("synthesis", packet={"text_limit": 240}) == "agent"
     assert steps.lane_for("assessment") == "agent"
-    assert steps.lane_for("audit") == "agent"
+    # An audit group is one constrained call: every status it used to be asked for is derived, and
+    # the source text it must quote is in the packet, so it needs no tools.
+    assert steps.lane_for("audit") == "call"
     assert steps.lane_for("search") == "none"
     assert steps.lane_for("fulltext") == "none"
     # A correction carries the audit's objection, which only a session can act on.

@@ -134,7 +134,6 @@ RESULT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
 }
 
-CALL_KINDS = tuple(RESULT_SCHEMAS)
 
 # -- assessment, decided one protocol outcome at a time -----------------------------------------
 #
@@ -184,6 +183,48 @@ _DOMAIN = _object(
         "inspected_locations": {"type": "array", "maxItems": 12, "items": _LOCATION},
     },
 )
+
+
+
+# One audit group, answered in one call.  The payload deliberately does not carry `field`, `check`
+# or `assertion`: the validator compares all three byte-for-byte against the target, and making the
+# model echo them meant reproducing an assertion that reached 14 KB on a real finding, which no
+# 4096-token answer can hold.  `apply_result` copies them from the task's own template instead, so
+# the echo is exact by construction and the model spends its tokens on the judgment.
+_AUDIT_OBSERVATION = _object(
+    ["target_id", "verdict", "rationale"],
+    {
+        "target_id": {"type": "string", "minLength": 1, "maxLength": 80},
+        "verdict": {"type": "string", "enum": ["supported", "unsupported", "uncertain"]},
+        "rationale": _REASON,
+        "sources": {"type": "array", "maxItems": 6, "items": _QUOTED_LOCATION},
+    },
+)
+_AUDIT_MEMBERSHIP = _object(
+    ["target_id", "supported_scope", "rationale"],
+    {
+        "target_id": {"type": "string", "minLength": 1, "maxLength": 80},
+        "supported_scope": {
+            "type": "string",
+            "enum": ["outcome", "review", "unsupported", "unknown"],
+        },
+        "rationale": _REASON,
+        "sources": {"type": "array", "maxItems": 6, "items": _QUOTED_LOCATION},
+    },
+)
+# Only the verdicts.  Every status the old contract asked for -- the record's, each review check's,
+# each report row's -- follows from them by rule, and those cross-field rules are precisely what a
+# returned audit kept violating: "unsupported or uncertain requires revision" was refused over and
+# over.  A rule a machine can apply is applied by `_apply_audit`, not asked of a model.
+RESULT_SCHEMAS["audit"] = _object(
+    ["observations"],
+    {
+        "observations": {"type": "array", "maxItems": 24, "items": _AUDIT_OBSERVATION},
+        "memberships": {"type": "array", "maxItems": 12, "items": _AUDIT_MEMBERSHIP},
+    },
+)
+
+CALL_KINDS = tuple(RESULT_SCHEMAS)
 
 ASSESSMENT_SCHEMAS: dict[str, dict[str, Any]] = {
     "study_appraisal": _object(
@@ -290,8 +331,10 @@ INTAKE_SCHEMA = _object(
 )
 SCHEMAS: dict[str, dict[str, Any]] = {**RESULT_SCHEMAS, "intake": INTAKE_SCHEMA}
 
+# An audit group answers up to 24 targets, each a verdict plus one sentence and a short quote, so
+# it needs more room than a single decision and far less than a synthesis.
 MAX_TOKENS = {"screening": 768, "coverage": 768, "studies": 768, "synthesis": 3072,
-              "intake": 4096}
+              "audit": 3072, "intake": 4096}
 
 INSTRUCTIONS = {
     "intake": (
@@ -323,6 +366,14 @@ INSTRUCTIONS = {
         "below, and from the unreported outcome decisions that tell you what is missing. Cite only "
         "the extraction ids shown, and keep every rationale to one sentence."
     ),
+    "audit": (
+        "You independently check one frozen group of assertions and never correct the work. For "
+        "every target, decide whether the source text below supports what the assertion claims, "
+        "and say so in one sentence. Quote only from the segments shown, exactly as they read; a "
+        "quote that is not in them will be refused. An assertion you cannot confirm from the text "
+        "is `uncertain`, and one the text contradicts is `unsupported`; either one makes the group "
+        "`revise`. Answer every target once, by its `target_id`, and answer nothing else."
+    ),
 }
 
 # Packet keys whose content is the same for every item of one Cycle, so they belong in the cached
@@ -333,6 +384,7 @@ STABLE_PACKET_KEYS = {
     "coverage": ("outcomes",),
     "studies": (),
     "synthesis": ("field_rules",),
+    "audit": ("citation_contract",),
 }
 
 
@@ -614,6 +666,96 @@ def apply_result(
         certainty = dict(result["certainty"])
         certainty["origin"] = finding["certainty"]["origin"]
         finding["certainty"] = certainty
+    elif kind == "audit":
+        _apply_audit(updated, result)
     else:  # pragma: no cover - guarded by CALL_KINDS at every call site
         raise ValidationError(f"no constrained answer shape for {kind}")
     return updated
+
+
+def _apply_audit(proposal: dict[str, Any], result: dict[str, Any]) -> None:
+    """Write one audit verdict into the group's pre-filled template.
+
+    ``target_id`` is the only binding the payload carries.  ``field``, ``check`` and ``assertion``
+    are copied from the template, because the validator compares all three byte-for-byte and one
+    real assertion reached 14 KB: asking a model to echo that is asking it to spend its whole
+    answer proving it can copy.  Every status is derived here rather than asked, because each one
+    follows from the verdicts by a rule the validator already enforces -- "unsupported or uncertain
+    requires revision" -- and a returned audit kept being refused for breaking it.
+    """
+    needs_revision = {"unsupported", "uncertain"}
+    verdicts = {item["target_id"]: item for item in result["observations"]}
+
+    def fill(observations: list[dict[str, Any]], where: str) -> set[str]:
+        """Fill each observation in place and return the verdicts it recorded."""
+        recorded = set()
+        for observation in observations:
+            answer = verdicts.pop(observation["target_id"], None)
+            if answer is None:
+                raise ValidationError(
+                    f"{where} has no verdict for target {observation['target_id']}"
+                )
+            observation["verdict"] = answer["verdict"]
+            observation["rationale"] = answer["rationale"]
+            observation["sources"] = [dict(source) for source in answer.get("sources") or []]
+            recorded.add(answer["verdict"])
+        return recorded
+
+    if "record" in proposal:
+        record = proposal["record"]
+        by_check: dict[str, set[str]] = {}
+        for observation in record["observations"]:
+            answer = verdicts.get(observation["target_id"])
+            if answer is not None and observation.get("check"):
+                by_check.setdefault(observation["check"], set()).add(answer["verdict"])
+        reasons = {
+            observation.get("check"): verdicts[observation["target_id"]]["rationale"]
+            for observation in record["observations"]
+            if observation["target_id"] in verdicts
+        }
+        seen = fill(record["observations"], "this finding")
+        scopes = {item["target_id"]: item for item in result.get("memberships") or []}
+        unverified = False
+        for assessment in record.get("membership_assessments") or []:
+            answer = scopes.pop(assessment["target_id"], None)
+            if answer is None:
+                raise ValidationError(
+                    f"this finding has no membership answer for {assessment['target_id']}"
+                )
+            assessment["supported_scope"] = answer["supported_scope"]
+            assessment["rationale"] = answer["rationale"]
+            assessment["sources"] = [dict(source) for source in answer.get("sources") or []]
+            declared = assessment.get("declared_scope")
+            supported = (
+                answer["supported_scope"] == "outcome"
+                if declared == "outcome"
+                else answer["supported_scope"] in {"outcome", "review"}
+            )
+            unverified = unverified or not supported
+        if scopes:
+            raise ValidationError(
+                f"membership answer for unknown target {sorted(scopes)[0]!r}"
+            )
+        for name, check in record["checks"].items():
+            failed = bool(by_check.get(name, set()) & needs_revision)
+            # An unverified membership is an overlap problem by rule, not a separate verdict.
+            if name == "overlap" and unverified:
+                failed = True
+            check["status"] = "revise" if failed else "pass"
+            check["rationale"] = reasons.get(name) or check.get("rationale") or (
+                "No target contradicted this check."
+            )
+        record["status"] = (
+            "revise"
+            if (seen & needs_revision) or unverified
+            or any(check["status"] == "revise" for check in record["checks"].values())
+            else "pass"
+        )
+    else:
+        for row in proposal["report_reviews"]:
+            seen = fill(row["observations"], "this report group")
+            row["status"] = "revise" if seen & needs_revision else "pass"
+    if verdicts:
+        raise ValidationError(
+            f"verdict for unknown target {sorted(verdicts)[0]!r}; answer only this group's targets"
+        )

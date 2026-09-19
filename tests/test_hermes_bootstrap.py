@@ -284,7 +284,11 @@ def test_assignment_overrides_only_the_model_and_provider(tmp_path, monkeypatch)
     source = tmp_path / "source.yaml"
     source.write_text(SELECTED_SOURCE)
     with pytest.raises(ValidationError, match="constrained answer shape"):
-        write_assignment(home, models={"audit": "big-model"})
+        write_assignment(home, models={"fulltext": "big-model"})
+    # Audit is a constrained kind now, so an operator may assign it a model like any other.
+    assert write_assignment(home, models={"audit": "big-model"})["kinds"]["audit"] == {
+        "model": "big-model", "profile": "hmr-verdict"
+    }
     payload = write_assignment(
         home, models={"screening": "fast-model", "synthesis": "big-model@remote"}
     )

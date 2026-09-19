@@ -207,7 +207,14 @@ def test_an_unknown_method_is_a_json_rpc_error(tmp_path):
 
 def test_a_server_cannot_be_built_for_a_kind_without_a_shape(tmp_path):
     with pytest.raises(ValidationError):
-        mcp_server.ToolServer(tmp_path, "auditor", ("audit",))
+        mcp_server.ToolServer(tmp_path, "searcher", ("search",))
+
+
+def test_the_auditor_now_has_a_submit_tool_for_its_escalated_session(tmp_path):
+    """Audit joined the call lane, so its session fallback submits instead of patching a file."""
+    server = mcp_server.ToolServer(tmp_path, "auditor")
+
+    assert "audit" in server.kinds
 
 
 def test_the_extractor_serves_study_linking_and_the_three_assessment_tools(tmp_path):

@@ -169,6 +169,8 @@ class ToolServer:
     def __init__(self, store: Path, role: str, kinds: tuple[str, ...] | None = None) -> None:
         self.store = store.resolve()
         self.role = role
+        # `audit` is in CALL_KINDS now, so the escalated session gets a typed submit tool too and
+        # no longer patches `proposal.json` fragment by fragment.
         served = [*answers.CALL_KINDS, "assessment"]
         self.kinds = tuple(kinds or [k for k in served if KIND_ROLES[k] == role])
         unknown = [kind for kind in self.kinds if kind not in served]
