@@ -694,3 +694,23 @@ def test_contribution_detail_narrows_instead_of_overflowing(tmp_path, monkeypatc
         not item.get("alignment_rationale") or len(item["alignment_rationale"]) <= 240
         for item in group["evidence"]
     )
+
+
+def test_no_target_asks_for_an_opinion_it_cannot_evidence(tmp_path):
+    """A target with no allowed documents and no source requirement is a rubber stamp.
+
+    The protocol target carried `allowed_document_ids == []`, so any citation failed the scope
+    check, and `requires_sources` was absent, so zero citations passed. The only answer it could
+    receive was an unevidenced opinion — and the protocol's structure is already decided by code,
+    since `workflow.finalize` refuses to complete unless `workflow.check` passes.
+    """
+    workspace = modern_workspace(tmp_path)
+
+    targets = _assertions(workspace)
+
+    assert not [t for t in targets if t.get("kind") == "protocol"]
+    for target in targets:
+        unevidenceable = not target.get("allowed_document_ids")
+        if unevidenceable:
+            assert not target.get("requires_sources"), target.get("kind")
+            assert target.get("kind") != "protocol"

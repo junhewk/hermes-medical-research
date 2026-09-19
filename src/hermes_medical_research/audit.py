@@ -150,20 +150,11 @@ def build_review_targets(
     report_targets: list[dict[str, Any]] = []
     finding_targets: list[dict[str, Any]] = []
 
-    protocol_target = _target(
-        prefix="report",
-        kind="protocol",
-        entity_id="protocol",
-        field="protocol",
-        paths=["/protocol"],
-        value=protocol,
-        evidence_digest=digest({"workflow": frozen["workflow"]}),
-    )
-    protocol_target["result_group"] = "report-narrative"
-    protocol_target["allowed_document_ids"] = []
-    protocol_target["record_id"] = None
-    report_targets.append(protocol_target)
-
+    # There is deliberately no protocol target.  It carried no allowed documents, so nothing could
+    # ever be cited for or against it, and it required no sources either: the only answer it could
+    # receive was an unevidenced opinion.  The protocol's structure is already decided by code --
+    # `workflow.check` runs every stage validator over the whole run and `workflow.finalize`
+    # refuses to complete unless it passes -- so asking a model to restate that bought nothing.
     synthesis = stages["synthesis"]
     narrative_target = _target(
         prefix="report",
