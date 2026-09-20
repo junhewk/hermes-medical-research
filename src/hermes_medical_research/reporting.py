@@ -16,8 +16,15 @@ from markdown_it import MarkdownIt
 from hermes_medical_research.search.artifacts import _atomic_write
 from hermes_medical_research.search.models import ValidationError
 
+from . import arithmetic
 from .validation import SCOPE_FIELDS, validate_complete
 from .workspace import Workspace, digest
+
+PROVISIONAL_WARNING = (
+    "PROVISIONAL: the independent audit did not complete for this Run, so no assertion here has "
+    "been checked against its sources by a second reviewer. Deterministic validation and the "
+    "arithmetic checks in `arithmetic_findings` did run and did pass."
+)
 
 
 def text(value: Any) -> str:
@@ -79,8 +86,21 @@ def _csv(rows: list[dict[str, Any]], fields: list[str]) -> str:
     return stream.getvalue()
 
 
-def export(workspace: Workspace) -> dict[str, Any]:
-    warnings = validate_complete(workspace)
+def export(workspace: Workspace, *, provisional: bool = False) -> dict[str, Any]:
+    """Write the report artifacts.
+
+    ``provisional`` exports a Run whose independent audit has not completed.  Refusing to export
+    one is worse than exporting it plainly labelled: the evidence is already recorded, and a reader
+    who is told what was not checked can judge it, while a reader given nothing cannot.  The state
+    is stated in the report rather than implied by its absence.
+    """
+    audited = "reviews" in workspace.load()["datasets"]
+    unaudited = provisional and not audited
+    warnings = validate_complete(
+        workspace, tolerate_missing=frozenset({"reviews"}) if unaudited else frozenset()
+    )
+    if unaudited:
+        warnings.insert(0, PROVISIONAL_WARNING)
     modern = workspace.evidence_version == "2"
     if not modern:
         warnings.append(
@@ -601,12 +621,20 @@ def export(workspace: Workspace) -> dict[str, Any]:
         "report.json",
         {
             "schema_version": workspace.evidence_version,
-            "quality": "qualified" if warnings else "ready",
+            "quality": (
+                "provisional" if provisional and not audited
+                else "qualified" if warnings else "ready"
+            ),
             "limitations": list(dict.fromkeys(warnings)),
             "coverage": workspace.rows("coverage") if modern else [],
             "dispositions": dispositions,
-            "claim_reviews": workspace.rows("reviews") if modern else [],
-            "report_reviews": workspace.read("reviews").get("report_reviews", []) if modern else [],
+            "audit_status": "complete" if audited else "not completed",
+            "claim_reviews": workspace.rows("reviews") if modern and audited else [],
+            "report_reviews": (
+                workspace.read("reviews").get("report_reviews", [])
+                if modern and audited else []
+            ),
+            "arithmetic_findings": arithmetic.check_workspace(workspace),
             "protocol": protocol,
             "synthesis": synthesis,
             "evidence": evidence_rows,

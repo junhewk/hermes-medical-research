@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from test_research import assessed_workspace
 
+from hermes_medical_research import workflow
 from hermes_medical_research.evidence import REVIEW_CHECKS, review_digest
 from hermes_medical_research.packets import documents
 from hermes_medical_research.search.models import ValidationError
@@ -512,10 +513,54 @@ async def test_interrupted_export_can_resume(tmp_path, monkeypatch):
 
     original = reporting.export
     monkeypatch.setattr(
-        reporting, "export", lambda _: (_ for _ in ()).throw(OSError("interrupted"))
+        reporting, "export",
+        lambda _workspace, **_kwargs: (_ for _ in ()).throw(OSError("interrupted")),
     )
     with pytest.raises(OSError, match="interrupted"):
         await finalize(w, offline=True)
     assert not (w.path / "completion.json").exists()
     monkeypatch.setattr(reporting, "export", original)
     assert (await finalize(w, offline=True))["completed"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_audit_never_finished_still_exports_labelled(tmp_path):
+    """Withholding the report is the worse failure.
+
+    The evidence is recorded either way. A reader told what was not checked can weigh it; a reader
+    given nothing cannot. So a missing audit downgrades the report instead of suppressing it.
+    """
+    workspace = modern_workspace(tmp_path)
+    manifest = workspace.load()
+    manifest["datasets"].pop("reviews")
+    workspace.save(manifest)
+
+    blocked = await workflow.finalize(workspace, offline=True)
+    assert blocked["completed"] is False, "the default must still refuse"
+
+    done = await workflow.finalize(workspace, offline=True, provisional=True)
+
+    assert done["completed"] is True
+    assert done["quality"] == "provisional"
+    assert done["audit_status"] == "not completed"
+    report = workspace.store.read_json("report.json")
+    assert report["quality"] == "provisional"
+    assert report["audit_status"] == "not completed"
+    assert report["claim_reviews"] == [] and report["report_reviews"] == []
+    assert report["limitations"][0].startswith("PROVISIONAL:")
+    # The arithmetic checks still run and are published with the report.
+    assert "arithmetic_findings" in report
+
+
+@pytest.mark.asyncio
+async def test_provisional_relaxes_the_audit_and_nothing_else(tmp_path):
+    workspace = modern_workspace(tmp_path)
+    manifest = workspace.load()
+    manifest["datasets"].pop("reviews")
+    manifest["datasets"].pop("appraisals")
+    workspace.save(manifest)
+
+    result = await workflow.finalize(workspace, offline=True, provisional=True)
+
+    assert result["completed"] is False
+    assert any(error["stage"] == "appraisals" for error in result["check"]["errors"])

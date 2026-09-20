@@ -864,7 +864,9 @@ def render_prompt(store: Path, step: str, *, review: str | None = None) -> str:
     return f"{prefix}\n\n{tail}"
 
 
-async def finalize(store: Path, *, review: str | None = None) -> dict[str, Any]:
+async def finalize(
+    store: Path, *, review: str | None = None, provisional: bool = False
+) -> dict[str, Any]:
     """Finalize the active Cycle's Run once every stage is accepted."""
     name = active_review(Path(store), review)
     state = AutomationEngine(Path(store)).review_status(name)
@@ -873,4 +875,4 @@ async def finalize(store: Path, *, review: str | None = None) -> dict[str, Any]:
         raise ValidationError(f"review {name} has no run to finalize")
     engine = TaskEngine(RunCatalog(Path(store)).workspace(cycle["run_id"]))
     actor = Actor(ROLE_PROFILES["coordinator"], f"step-finalize-{os.getpid()}", "coordinator")
-    return await engine.finalize(actor, offline=False)
+    return await engine.finalize(actor, offline=False, provisional=provisional)

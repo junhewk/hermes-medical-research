@@ -941,13 +941,18 @@ class TaskEngine:
             store.write_manifest(child_manifest)
         return {"run_id": self.run_id, "task_id": task_id, "approval": approval}
 
-    async def finalize(self, actor: Actor, *, offline: bool = False) -> dict[str, Any]:
+    async def finalize(
+        self, actor: Actor, *, offline: bool = False, provisional: bool = False
+    ) -> dict[str, Any]:
         actor.require("coordinator")
         with self.workspace.lock:
             manifest = self.workspace.load()
-            if self._derive_state(manifest, self._ledger(manifest)) != "ready":
+            # `provisional` exports a Run whose audit never finished. The ledger gate is relaxed
+            # rather than removed: `workflow.check` still refuses anything but a missing audit, so
+            # a half-extracted Run cannot slip through this door.
+            if self._derive_state(manifest, self._ledger(manifest)) != "ready" and not provisional:
                 raise ValidationError("run is not ready for finalization")
-        result = await finalize(self.workspace, offline=offline)
+        result = await finalize(self.workspace, offline=offline, provisional=provisional)
         with self.workspace.lock:
             if result.get("completed"):
                 manifest = self.workspace.load()

@@ -98,6 +98,10 @@ def parser() -> argparse.ArgumentParser:
     final = commands.add_parser("finalize", help="Verify and export a fully audited run")
     final.add_argument("run_id")
     final.add_argument("--offline", action="store_true")
+    final.add_argument(
+        "--provisional", action="store_true",
+        help="Export a Run whose independent audit did not complete, labelled as such",
+    )
 
     review = commands.add_parser("review", help="Manage human-named one-off and living Reviews")
     review_commands = review.add_subparsers(dest="action", required=True)
@@ -482,7 +486,9 @@ async def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     if args.command == "finalize":
-        return await _engine(catalog, args.run_id).finalize(_actor(args), offline=args.offline)
+        return await _engine(catalog, args.run_id).finalize(
+            _actor(args), offline=args.offline, provisional=args.provisional
+        )
 
     if args.command == "mcp":
         from .mcp_server import serve
@@ -622,7 +628,9 @@ async def _step(args: argparse.Namespace, catalog: RunCatalog) -> Any:
             reason=args.reason,
         )
     if args.action == "finalize":
-        return await steps.finalize(store, review=args.review)
+        return await steps.finalize(
+            store, review=args.review, provisional=args.provisional
+        )
     if args.action == "prompt":
         return {"_raw": steps.render_prompt(store, args.step, review=args.review)}
     if args.action == "run":

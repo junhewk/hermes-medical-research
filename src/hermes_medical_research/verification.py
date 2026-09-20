@@ -87,15 +87,21 @@ async def lookup(
 
 
 async def verify(
-    workspace: Workspace, *, offline: bool = False, session: HttpSession | None = None
+    workspace: Workspace,
+    *,
+    offline: bool = False,
+    session: HttpSession | None = None,
+    provisional: bool = False,
 ) -> dict[str, Any]:
-    warnings = validate_complete(workspace)
+    warnings = validate_complete(
+        workspace, tolerate_missing=frozenset({"reviews"}) if provisional else frozenset()
+    )
     records = workspace.index("records")
     cited = {e["record_id"] for e in workspace.rows("extractions")}
     credentials = Credentials.from_env()
     if session is None and not offline:
         async with HttpSession() as active:
-            return await verify(workspace, session=active)
+            return await verify(workspace, session=active, provisional=provisional)
     semaphore = asyncio.Semaphore(4)
 
     async def check(rid: str) -> tuple[str, dict[str, Any]]:

@@ -418,6 +418,11 @@ def readiness(workspace: Workspace) -> list[str]:
             "address each protocol outcome with findings or explicit gaps: "
             + ", ".join(sorted(missing))
         )
+    if "reviews" not in workspace.load()["datasets"]:
+        # A stage that is not there cannot be validated. Reaching here means the caller already
+        # accounted for its absence -- a provisional export says in the report that the audit did
+        # not complete -- so readiness reports what it can and stops short of what it cannot.
+        return warnings
     reviews = workspace.index("reviews")
     if set(reviews) != {f["finding_id"] for f in findings}:
         raise ValidationError("record a separate claim review for every finding")

@@ -304,14 +304,35 @@ def _audit_summary(workspace: Workspace) -> dict:
     }
 
 
+def _only_missing_audit(errors: list[dict]) -> bool:
+    """Whether the one thing standing in the way is an audit that never completed."""
+    return bool(errors) and all(
+        error.get("stage") == "reviews" and "missing" in str(error.get("message", ""))
+        for error in errors
+    )
+
+
 async def finalize(
-    workspace: Workspace, batch: dict | None = None, *, offline: bool = False, session=None
+    workspace: Workspace,
+    batch: dict | None = None,
+    *,
+    offline: bool = False,
+    session=None,
+    provisional: bool = False,
 ) -> dict:
+    """Verify and export a Run.
+
+    ``provisional`` exports a Run whose independent audit never completed, with the report saying
+    so.  Withholding the report is the worse failure: the evidence is recorded either way, and a
+    reader told what was not checked can weigh it, while a reader given nothing cannot. Every other
+    error still blocks, so this relaxes exactly one condition and not the validation behind it.
+    """
     from .reporting import export
     from .verification import verify
 
     checked = check(workspace, batch)
-    if not checked["ready"]:
+    unaudited = provisional and _only_missing_audit(checked["errors"])
+    if not checked["ready"] and not unaudited:
         return {
             "completed": False,
             "check": checked,
@@ -321,14 +342,20 @@ async def finalize(
         result = submit_batch(workspace, batch)
         if not result["accepted"]:
             return {"completed": False, "check": result}
-    verification = await verify(workspace, offline=offline, session=session)
+    verification = await verify(
+        workspace, offline=offline, session=session, provisional=unaudited
+    )
     if not verification["ready"]:
         return {"completed": False, "verification": verification}
-    artifacts = export(workspace)
+    artifacts = export(workspace, provisional=unaudited)
     completion = {
         "schema_version": "2",
         "completed": True,
-        "quality": "qualified" if artifacts["warnings"] else "ready",
+        "quality": (
+            "provisional" if unaudited
+            else "qualified" if artifacts["warnings"] else "ready"
+        ),
+        "audit_status": "not completed" if unaudited else "complete",
         "datasets": current_digests(workspace),
         "artifacts": {
             name: {

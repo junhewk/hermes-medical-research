@@ -452,10 +452,20 @@ def validate_synthesis(workspace: Workspace, payload: dict[str, Any]) -> None:
             raise ValidationError("descriptive maps use not-applicable certainty")
 
 
-def validate_complete(workspace: Workspace) -> list[str]:
+def validate_complete(
+    workspace: Workspace, *, tolerate_missing: frozenset[str] = frozenset()
+) -> list[str]:
+    """Validate every required stage.
+
+    ``tolerate_missing`` names stages whose absence is already known and accounted for by the
+    caller -- a provisional export passes ``{"reviews"}`` because the report itself says the audit
+    did not complete. A stage that *is* present is validated regardless.
+    """
     manifest = workspace.load()
     for stage in workspace.required_stages:
         if stage not in manifest["datasets"]:
+            if stage in tolerate_missing:
+                continue
             raise ValidationError(f"{stage} is missing")
         payload = workspace.read(stage)
         validate_stage(workspace, stage, payload)
